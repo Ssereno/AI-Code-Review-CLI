@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.yaml": "yaml"
+		},
+		"terminal.integrated.env.linux": {},
+		"terminal.integrated.env.osx": {},
+		"terminal.integrated.env.windows": {}
+	}
+}

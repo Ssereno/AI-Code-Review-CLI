@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "python3",
+    "files.associations": {
+        "*.yaml": "yaml"
+    },
+    "terminal.integrated.env.linux": {},
+    "terminal.integrated.env.osx": {},
+    "terminal.integrated.env.windows": {}
+}

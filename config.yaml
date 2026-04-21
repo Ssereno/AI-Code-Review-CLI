@@ -1,0 +1,129 @@
+# =============================================================================
+# AI Code Review v2.0 - Configuration File
+# This file is the official configuration source.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# LLM Configuration
+# ---------------------------------------------------------------------------
+# Available providers: "openai", "gemini", "claude", "ollama", "azure_openai", "copilot", "bedrock"
+llm:
+  provider: bedrock
+
+  # Generic API Key (or use the provider-specific keys below)
+  # api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxx
+
+  # API base URL (leave empty to use the provider default)
+  # api_base_url: https://api.openai.com/v1
+
+  # Model to use (empty = provider default)
+  # Examples by provider:
+  #   openai:  gpt-4o, gpt-4-turbo, gpt-4
+  #   gemini:  gemini-1.5-pro, gemini-pro, gemini-2.0-flash
+  #   claude:  claude-3-5-sonnet-latest, claude-3-opus-latest, claude-3-haiku-20240307
+  #   ollama:  llama3, codellama, mistral, deepseek-coder
+  #   copilot: gpt-4o, gpt-4o-mini, o1, o1-mini, claude-3.5-sonnet
+  #   bedrock: anthropic.claude-3-5-sonnet-20240620-v1:0, meta.llama3-70b-instruct-v1:0
+  #   model: gemini-2.0-flash
+
+  # Maximum tokens in response
+  max_tokens: 4096
+
+  # Temperature (0.0 = deterministic, 1.0 = creative)
+  temperature: 0.3
+
+# ---------------------------------------------------------------------------
+# Provider-specific credentials (alternative to the generic key)
+# RECOMMENDED: protect this file with restricted access permissions
+# ---------------------------------------------------------------------------
+# openai:
+#   api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxx
+
+#gemini:
+#   api_key:
+
+# claude:
+#   api_key: sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
+
+# ollama:
+#   base_url: http://localhost:11434
+
+# copilot:
+#   github_token: ghp_xxxxxxxxxxxxxxxxxxxxxxxx
+#   # Requires active GitHub Copilot subscription
+#   # Models: gpt-4o, gpt-4o-mini, o1, o1-mini, claude-3.5-sonnet
+
+#bedrock:
+#  region: eu-north-1
+#  profile: default
+#  access_key_id: 
+#  secret_access_key:
+#  session_token: 
+
+# ---------------------------------------------------------------------------
+# TFS / Azure DevOps Configuration
+# ---------------------------------------------------------------------------
+#tfs:
+#   base_url: 
+#   collection: 
+#   project: 
+#   pat: 
+#   verify_ssl: false
+#   ca_bundle: C:/certs/corporate-root-ca.pem
+#   Default repository filter (empty = show PRs from all repositories)
+#   repository: 
+
+# ---------------------------------------------------------------------------
+# Review Preferences
+# ---------------------------------------------------------------------------
+review:
+  # Language: "pt" or "en"
+  language: en
+
+  # Default verbosity: "quick", "detailed" or "security"
+  verbosity: detailed
+
+  # Review scope:
+  #   diff_only (default): focuses only on differences introduced in the PR
+  #   full_code: allows full code review of changed files
+  scope: diff_only
+
+  # Markdown file with custom rules/context/samples for the prompt
+  # The content of this file is injected into LLM instructions on each review
+  custom_prompt_file: review_prompt.md
+
+  # Limit of diff files sent to the LLM (remaining files are omitted)
+  max_diff_files: 50
+
+  # Limit of diff lines per file (larger sections are truncated)
+  max_diff_lines: 4500
+
+  # Filter by file extensions (empty list = all)
+  # Example: [".py", ".js", ".cs", ".java"]
+  file_extensions_filter: [".sql", ".cs", ".ts"]
+
+# ---------------------------------------------------------------------------
+# Pull Request Review Configuration
+# ---------------------------------------------------------------------------
+pr:
+  # Post comments automatically without confirmation
+  auto_post_comments: false
+
+  # Run review without posting comments
+  dry_run: false
+
+  # Comment mode: "structured" (inline per file) or "general" (single comment)
+  comment_mode: structured
+
+# ---------------------------------------------------------------------------
+# Output Configuration
+# ---------------------------------------------------------------------------
+output:
+  # Format: "terminal", "markdown" or "json"
+  format: terminal
+
+  # Output file (empty = terminal only)
+  file: ""
+
+  # Terminal colors
+  color: true

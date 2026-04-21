@@ -1,0 +1,92 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "AI Review: Pull Request (Interativo)",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/ai_review.py",
+                "pr-review"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": [],
+            "isBackground": true
+        },
+        {
+            "label": "AI Review: PR (Dry-Run)",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/ai_review.py",
+                "pr-review",
+                "${input:prId}",
+                "--dry-run"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "AI Review: Listar PRs Activos",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/ai_review.py",
+                "list-prs"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "AI Review: Modo Interativo",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/ai_review.py"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": [],
+            "isBackground": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "prId",
+            "description": "ID do Pull Request para review",
+            "type": "promptString",
+            "default": ""
+        }
+    ]
+}

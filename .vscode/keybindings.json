@@ -1,0 +1,29 @@
+// =============================================================================
+// Atalhos de Teclado para AI Code Review
+// =============================================================================
+// Para utilizar estes atalhos, copie o conteúdo para o ficheiro
+// keybindings.json do VSCode:
+//   Ctrl+Shift+P > "Preferences: Open Keyboard Shortcuts (JSON)"
+// =============================================================================
+[
+    {
+        "key": "ctrl+shift+r",
+        "command": "workbench.action.tasks.runTask",
+        "args": "🤖 AI Review: Staged Changes"
+    },
+    {
+        "key": "ctrl+shift+alt+r",
+        "command": "workbench.action.tasks.runTask",
+        "args": "🤖 AI Review: Staged (Quick)"
+    },
+    {
+        "key": "ctrl+shift+alt+s",
+        "command": "workbench.action.tasks.runTask",
+        "args": "🤖 AI Review: Segurança (Staged)"
+    },
+    {
+        "key": "ctrl+shift+alt+i",
+        "command": "workbench.action.tasks.runTask",
+        "args": "🤖 AI Review: Modo Interativo"
+    }
+]
