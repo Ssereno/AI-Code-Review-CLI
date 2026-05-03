@@ -169,35 +169,6 @@ Bedrock notes:
 - You can use `profile` or explicit credentials in YAML.
 - If explicit credentials are not defined, the AWS SDK uses the default credentials chain.
 
-## Review Flow
-
-The main `pr-review` workflow is:
-
-1. load and validate configuration
-2. fetch Pull Request metadata from Azure DevOps/TFS
-3. fetch the PR diff
-4. filter and truncate the diff according to configuration
-5. request textual analysis and structured comments from the LLM provider
-6. display a preview in the terminal
-7. post inline or general PR comments when applicable
-
-## Tests
-
-The project's functional coverage is reflected in the `tests/` folder, including:
-
-- `tests/test_ai_review.py` for the CLI and main workflow
-- `tests/test_config.py` for configuration and validation
-- `tests/test_formatter.py` for terminal/markdown/json rendering
-- `tests/test_git_utils.py` for diffs and Git utilities
-- `tests/test_llm_client.py` for prompts, parsing, and LLM providers
-- `tests/test_tfs_client.py` for TFS/Azure DevOps integration
-
-Run the suite:
-
-```bash
-python -m pytest --cov=src --cov-report=term
-```
-
 ## CLI Usage
 
 ### Help
@@ -386,3 +357,20 @@ Avoid `verify_ssl: false` except for temporary troubleshooting.
 - Confirm `bedrock.region`.
 - Confirm `llm.model` with a valid Bedrock model ID in the chosen region.
 - Validate AWS credentials (`profile` or explicit keys).
+
+## Tests
+
+The project's functional coverage is reflected in the `tests/` folder, including:
+
+- `tests/test_ai_review.py` for the CLI and main workflow
+- `tests/test_config.py` for configuration and validation
+- `tests/test_formatter.py` for terminal/markdown/json rendering
+- `tests/test_git_utils.py` for diffs and Git utilities
+- `tests/test_llm_client.py` for prompts, parsing, and LLM providers
+- `tests/test_tfs_client.py` for TFS/Azure DevOps integration
+
+Run the suite:
+
+```bash
+python -m pytest --cov=src --cov-report=term
+```
