@@ -36,7 +36,7 @@ Examples:
     python ai_review.py list-prs --author "John Smith"
 
 Author: Development Team
-Version: 2.0.0
+Version: see pyproject.toml
 """
 
 import argparse
@@ -81,12 +81,7 @@ from src.config import ReviewConfig, VALID_PROVIDERS
 from src.git_utils import GitUtils, GitError
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
-
-
-# ---------------------------------------------------------------------------
-# Version
-# ---------------------------------------------------------------------------
-VERSION = "2.0.0"
+from src import __version__ as VERSION
 
 
 def _get_spinner_frames() -> list[str]:
@@ -152,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai_review",
         description=(
-            "🤖 AI Code Review v2.0 - Automated code review using AI.\n"
+            "🤖 AI Code Review - Automated code review using AI.\n"
             "Main mode: Pull Request review with comments on Azure DevOps.\n"
             "Providers: OpenAI GPT-4 | Google Gemini | Anthropic Claude | Ollama | GitHub Copilot | AWS Bedrock"
         ),
@@ -186,6 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="Filter PRs by author")
     sub_pr_review.add_argument("--target-branch", default=None,
                                 help="Filter PRs by target branch")
+
+    # --- init ---
+    subparsers.add_parser(
+        "init", help="Create a config.yaml template in the current directory"
+    )
 
     # --- list-prs ---
     sub_list_prs = subparsers.add_parser(
@@ -869,6 +869,58 @@ def _show_config(config: ReviewConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Init command
+# ---------------------------------------------------------------------------
+def cmd_init() -> int:
+    """Copies a config.yaml template to the current working directory.
+
+    Creates a ``config.yaml`` file pre-populated with all available options
+    and inline documentation. If the file already exists in the current
+    directory the user is prompted for confirmation before overwriting.
+
+    The template is bundled with the package at
+    ``src/prompts/config.yaml.template`` and is resolved at runtime via
+    :mod:`importlib.resources`, so it works regardless of how the package
+    was installed.
+
+    Returns:
+        int: Exit code. ``0`` on success or user cancellation, ``1`` on error.
+
+    Example:
+        Run from any directory to bootstrap a new configuration::
+
+            $ ai-review init
+            ✅ config.yaml created at: /home/user/my-project/config.yaml
+               Edit it to add your credentials and preferences.
+    """
+    import importlib.resources as pkg_resources
+
+    dest = os.path.join(os.getcwd(), "config.yaml")
+    c = Colors()
+
+    if os.path.exists(dest):
+        print(f"{c.YELLOW}config.yaml already exists in the current directory.{c.RESET}")
+        answer = input("Overwrite? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.")
+            return 0
+
+    try:
+        ref = pkg_resources.files("src.prompts").joinpath("config.yaml.template")
+        template_content = ref.read_text(encoding="utf-8")
+    except (FileNotFoundError, TypeError) as exc:
+        print(f"{c.RED}Error: could not locate template file: {exc}{c.RESET}")
+        return 1
+
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(template_content)
+
+    print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {dest}")
+    print(f"   Edit it to add your credentials and preferences.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -883,6 +935,9 @@ def main() -> int:
     if not args.command:
         parser.print_help()
         return 0
+
+    if args.command == "init":
+        return cmd_init()
 
     return run_review(args)
 

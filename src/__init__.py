@@ -1,2 +1,7 @@
 # AI Code Review - Internal modules
-__version__ = "1.0.0"
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("ai-code-review-cli")
+except PackageNotFoundError:
+    __version__ = "dev"

@@ -15,23 +15,57 @@ The main entry point is in `src/ai_review.py`. The project also includes dedicat
 
 ## Installation
 
-Create and activate a virtual environment, then install project dependencies:
+Install from PyPI:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+pip install ai-code-review-cli
 ```
+
+Or install with optional LLM SDK extras:
+
+```bash
+pip install "ai-code-review-cli[bedrock]"    # AWS Bedrock
+pip install "ai-code-review-cli[openai]"     # OpenAI SDK
+pip install "ai-code-review-cli[gemini]"     # Google Gemini SDK
+pip install "ai-code-review-cli[claude]"     # Anthropic Claude SDK
+pip install "ai-code-review-cli[all]"        # All optional SDKs
+```
+
+All providers also work without their optional SDK — the tool communicates via HTTP directly.
 
 If you plan to run the test suite locally, also install development dependencies:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install "ai-code-review-cli[dev]"
 ```
 
 ## Configuration
 
-Configuration is done only in `config.yaml`.
+After installing the package, generate a ready-to-edit `config.yaml` in your working directory:
+
+```bash
+ai-review init
+```
+
+This copies the bundled template with all available options and inline documentation:
+
+```
+✅ config.yaml created at: /home/user/my-project/config.yaml
+   Edit it to add your credentials and preferences.
+```
+
+If a `config.yaml` already exists you will be prompted before it is overwritten:
+
+```
+config.yaml already exists in the current directory.
+Overwrite? [y/N]
+```
+
+The tool looks for `config.yaml` in the **current working directory** at runtime. You can also pass a different path with `--config`:
+
+```bash
+ai-review pr-review --config ~/configs/ai-review.yaml
+```
 
 ### Minimal Example
 
@@ -169,6 +203,14 @@ python -m pytest --cov=src --cov-report=term
 ### Help
 ```bash
 python src/ai_review.py --help
+```
+
+### Bootstrap configuration
+
+Generate a `config.yaml` template in the current directory:
+
+```bash
+ai-review init
 ```
 
 ### Interactive Mode
