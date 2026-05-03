@@ -53,13 +53,18 @@ def test_get_spinner_frames_keeps_unicode_for_utf8(mocker) -> None:
 
 def test_ensure_project_root_on_path_inserts_parent_directory(mocker) -> None:
     """It should add the repository root instead of the src directory itself."""
+    import os
+
     fake_sys = SimpleNamespace(path=[])
     mocker.patch("src.ai_review.sys", new=fake_sys)
 
-    project_root = ai_review._ensure_project_root_on_path(r"C:\repo\src\ai_review.py")
+    fake_script = os.path.join("repo", "src", "ai_review.py")
+    expected_root = os.path.abspath(os.path.join(fake_script, "..", ".."))
 
-    assert project_root == r"C:\repo"
-    assert fake_sys.path == [r"C:\repo"]
+    project_root = ai_review._ensure_project_root_on_path(fake_script)
+
+    assert project_root == expected_root
+    assert fake_sys.path == [expected_root]
 
 
 def test_configure_console_streams_reconfigures_non_utf8_streams(mocker) -> None:
