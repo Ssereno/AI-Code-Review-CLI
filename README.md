@@ -18,17 +18,17 @@ The main entry point is in `src/ai_review.py`. The project also includes dedicat
 Install from PyPI:
 
 ```bash
-pip install ai-code-review-cli
+pip install code-review-ai-cli
 ```
 
 Or install with optional LLM SDK extras:
 
 ```bash
-pip install "ai-code-review-cli[bedrock]"    # AWS Bedrock
-pip install "ai-code-review-cli[openai]"     # OpenAI SDK
-pip install "ai-code-review-cli[gemini]"     # Google Gemini SDK
-pip install "ai-code-review-cli[claude]"     # Anthropic Claude SDK
-pip install "ai-code-review-cli[all]"        # All optional SDKs
+pip install "code-review-ai-cli[bedrock]"    # AWS Bedrock
+pip install "code-review-ai-cli[openai]"     # OpenAI SDK
+pip install "code-review-ai-cli[gemini]"     # Google Gemini SDK
+pip install "code-review-ai-cli[claude]"     # Anthropic Claude SDK
+pip install "code-review-ai-cli[all]"        # All optional SDKs
 ```
 
 All providers also work without their optional SDK — the tool communicates via HTTP directly.
@@ -36,7 +36,7 @@ All providers also work without their optional SDK — the tool communicates via
 If you plan to run the test suite locally, also install development dependencies:
 
 ```bash
-pip install "ai-code-review-cli[dev]"
+pip install "code-review-ai-cli[dev]"
 ```
 
 ## Configuration

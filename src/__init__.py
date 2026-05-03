@@ -2,6 +2,6 @@
 from importlib.metadata import version, PackageNotFoundError
 
 try:
-    __version__ = version("ai-code-review-cli")
+    __version__ = version("code-review-ai-cli")
 except PackageNotFoundError:
     __version__ = "dev"
