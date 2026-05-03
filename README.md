@@ -202,7 +202,7 @@ python -m pytest --cov=src --cov-report=term
 
 ### Help
 ```bash
-python src/ai_review.py --help
+ai-review pr-review --help
 ```
 
 ### Bootstrap configuration
@@ -216,7 +216,7 @@ ai-review init
 ### Interactive Mode
 
 ```bash
-python ai_review.py
+ ai-review pr-review
 ```
 
 ### Pull Request Review
@@ -224,51 +224,51 @@ python ai_review.py
 List PRs and select interactively:
 
 ```bash
-python ai_review.py pr-review
+ ai-review pr-review pr-review
 ```
 
 Review a specific PR:
 
 ```bash
-python ai_review.py pr-review 42
+ ai-review pr-review pr-review 42
 ```
 
 Dry-run:
 
 ```bash
-python ai_review.py pr-review 42 --dry-run
+ ai-review pr-review pr-review 42 --dry-run
 ```
 
 Full review of changed files (in addition to diff-focused review):
 
 ```bash
-python ai_review.py pr-review 42 --review-scope full_code
+ ai-review pr-review pr-review 42 --review-scope full_code
 ```
 
 Automatic posting (without confirmation):
 
 ```bash
-python ai_review.py pr-review 42 --auto-post
+ ai-review pr-review pr-review 42 --auto-post
 ```
 
 Filter PRs in interactive selection:
 
 ```bash
-python ai_review.py pr-review --author "John Smith" --target-branch main
+ ai-review pr-review pr-review --author "John Smith" --target-branch main
 ```
 
 Choose provider/model via CLI:
 
 ```bash
-python ai_review.py pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
+ ai-review pr-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
 ```
 
 ### List Pull Requests
 
 ```bash
-python ai_review.py list-prs
-python ai_review.py list-prs --status completed
-python ai_review.py list-prs --repo-name backend --author "John"
+ ai-review pr-review list-prs
+ ai-review pr-review list-prs --status completed
+ ai-review pr-review list-prs --repo-name backend --author "John"
 ```
 
 ## Execution Flow
@@ -277,7 +277,7 @@ The diagram below summarizes how the review application moves from CLI entry to 
 
 ```mermaid
 flowchart TD
-  A[Start: python ai_review.py] --> B{Arguments provided?}
+  A[Start:  ai-review pr-review] --> B{Arguments provided?}
   B -->|No| C[Interactive mode]
   B -->|Yes| D[Parse CLI command]
 
@@ -327,7 +327,7 @@ flowchart TD
 ### `pr-review`
 
 ```bash
-python ai_review.py pr-review [pr_id]
+ ai-review pr-review pr-review [pr_id]
 ```
 
 Options:
@@ -351,7 +351,7 @@ Options:
 ### `list-prs`
 
 ```bash
-python ai_review.py list-prs
+ ai-review pr-review list-prs
 ```
 
 Options:
@@ -362,10 +362,10 @@ Options:
 
 ## Available VS Code Tasks
 
-- `🌟 AI Review: Pull Request (Interactive)`
-- `🌟 AI Review: PR (Dry-Run)`
-- `📋 AI Review: List Active PRs`
-- `🤖 AI Review: Interactive Mode`
+- `AI Review: Pull Request (Interactive)`
+- `AI Review: PR (Dry-Run)`
+- `AI Review: List Active PRs`
+- `AI Review: Interactive Mode`
 
 ## Troubleshooting
 
@@ -386,19 +386,3 @@ Avoid `verify_ssl: false` except for temporary troubleshooting.
 - Confirm `bedrock.region`.
 - Confirm `llm.model` with a valid Bedrock model ID in the chosen region.
 - Validate AWS credentials (`profile` or explicit keys).
-
-## Architecture
-
-```text
-ai_code_review_script/
-├── src/
-│   ├── config.py         # YAML-only configuration
-│   ├── ai_review.py      # Main PR CLI and workflow
-│   ├── llm_client.py     # LLM provider integration (includes Bedrock)
-│   ├── tfs_client.py     # Azure DevOps/TFS (PRs and comments)
-│   ├── formatter.py      # Output formatting
-│   └── git_utils.py      # Utilities for diff parsing/truncation
-├── config.yaml           # Single configuration file
-├── requirements.txt      # Python dependencies
-└── .vscode/tasks.json    # PR review tasks
-```
