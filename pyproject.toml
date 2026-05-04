@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-review-ai-cli"
-version = "1.0.0"
+version = "1.0.1"
 description = "Automated AI-powered code review CLI for Azure DevOps / TFS Pull Requests"
 readme = "README.md"
 requires-python = ">=3.10"
