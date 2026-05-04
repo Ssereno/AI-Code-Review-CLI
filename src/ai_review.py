@@ -40,6 +40,7 @@ Version: see pyproject.toml
 """
 
 import argparse
+import importlib.resources
 import os
 import sys
 import time
@@ -872,16 +873,16 @@ def _show_config(config: ReviewConfig) -> None:
 # Init command
 # ---------------------------------------------------------------------------
 def cmd_init() -> int:
-    """Copies a config.yaml template to the current working directory.
+    """Copies a config.yaml template and review_prompt.md to the current working directory.
 
     Creates a ``config.yaml`` file pre-populated with all available options
-    and inline documentation. If the file already exists in the current
-    directory the user is prompted for confirmation before overwriting.
+    and inline documentation, and a ``review_prompt.md`` file with default
+    review style rules. If either file already exists in the current directory
+    the user is prompted for confirmation before overwriting.
 
-    The template is bundled with the package at
-    ``src/prompts/config.yaml.template`` and is resolved at runtime via
-    :mod:`importlib.resources`, so it works regardless of how the package
-    was installed.
+    Both files are bundled with the package at ``src/prompts/`` and are
+    resolved at runtime via :mod:`importlib.resources`, so they work
+    regardless of how the package was installed.
 
     Returns:
         int: Exit code. ``0`` on success or user cancellation, ``1`` on error.
@@ -891,14 +892,15 @@ def cmd_init() -> int:
 
             $ ai-review init
             ✅ config.yaml created at: /home/user/my-project/config.yaml
-               Edit it to add your credentials and preferences.
+            ✅ review_prompt.md created at: /home/user/my-project/review_prompt.md
+               Edit them to add your credentials, preferences and review rules.
     """
-    import importlib.resources as pkg_resources
-
-    dest = os.path.join(os.getcwd(), "config.yaml")
+    cwd = os.getcwd()
     c = Colors()
 
-    if os.path.exists(dest):
+    # --- config.yaml ---
+    config_dest = os.path.join(cwd, "config.yaml")
+    if os.path.exists(config_dest):
         print(f"{c.YELLOW}config.yaml already exists in the current directory.{c.RESET}")
         answer = input("Overwrite? [y/N] ").strip().lower()
         if answer != "y":
@@ -906,17 +908,38 @@ def cmd_init() -> int:
             return 0
 
     try:
-        ref = pkg_resources.files("src.prompts").joinpath("config.yaml.template")
-        template_content = ref.read_text(encoding="utf-8")
+        ref = importlib.resources.files("src.prompts").joinpath("config.yaml.template")
+        config_content = ref.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError) as exc:
-        print(f"{c.RED}Error: could not locate template file: {exc}{c.RESET}")
+        print(f"{c.RED}Error: could not locate config template: {exc}{c.RESET}")
         return 1
 
-    with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(template_content)
+    with open(config_dest, "w", encoding="utf-8") as fh:
+        fh.write(config_content)
 
-    print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {dest}")
-    print(f"   Edit it to add your credentials and preferences.")
+    # --- review_prompt.md ---
+    prompt_dest = os.path.join(cwd, "review_prompt.md")
+    if os.path.exists(prompt_dest):
+        print(f"{c.YELLOW}review_prompt.md already exists in the current directory.{c.RESET}")
+        answer = input("Overwrite? [y/N] ").strip().lower()
+        if answer != "y":
+            print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
+            print("   Skipped review_prompt.md (kept existing).")
+            return 0
+
+    try:
+        ref = importlib.resources.files("src.prompts").joinpath("review_prompt.md")
+        prompt_content = ref.read_text(encoding="utf-8")
+    except (FileNotFoundError, TypeError) as exc:
+        print(f"{c.RED}Error: could not locate review_prompt template: {exc}{c.RESET}")
+        return 1
+
+    with open(prompt_dest, "w", encoding="utf-8") as fh:
+        fh.write(prompt_content)
+
+    print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
+    print(f"{c.GREEN}✅ review_prompt.md created at:{c.RESET} {prompt_dest}")
+    print("   Edit them to add your credentials, preferences and review rules.")
     return 0
 
 
