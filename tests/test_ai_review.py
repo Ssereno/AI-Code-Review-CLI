@@ -547,7 +547,7 @@ def _fake_pkg_resources(package: str) -> _FakeResource:
         def joinpath(self, name: str) -> _FakeResource:
             if name == "config.yaml.template":
                 return _FakeResource("config-template")
-            if name == "review_prompt.md":
+            if name == "review_prompt.md.template":
                 return _FakeResource("prompt-template")
             raise FileNotFoundError(name)
 
