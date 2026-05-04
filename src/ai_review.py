@@ -928,7 +928,7 @@ def cmd_init() -> int:
             return 0
 
     try:
-        ref = importlib.resources.files("src.prompts").joinpath("review_prompt.md")
+        ref = importlib.resources.files("src.prompts").joinpath("review_prompt.md.template")
         prompt_content = ref.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError) as exc:
         print(f"{c.RED}Error: could not locate review_prompt template: {exc}{c.RESET}")
