@@ -41,20 +41,24 @@ pip install "code-review-ai-cli[dev]"
 
 ## Configuration
 
-After installing the package, generate a ready-to-edit `config.yaml` in your working directory:
+After installing the package, generate ready-to-edit configuration files in your working directory:
 
 ```bash
 ai-review init
 ```
 
-This copies the bundled template with all available options and inline documentation:
+This copies two bundled templates:
+
+- **`config.yaml`** — all available options with inline documentation
+- **`review_prompt.md`** — default review style rules, injected into every LLM prompt
 
 ```
-✅ config.yaml created at: /home/user/my-project/config.yaml
-   Edit it to add your credentials and preferences.
+config.yaml created at: /home/user/my-project/config.yaml
+review_prompt.md created at: /home/user/my-project/review_prompt.md
+Edit them to add your credentials, preferences and review rules.
 ```
 
-If a `config.yaml` already exists you will be prompted before it is overwritten:
+If either file already exists you will be prompted individually before it is overwritten:
 
 ```
 config.yaml already exists in the current directory.
@@ -128,22 +132,21 @@ review:
 
 ### Markdown-Customizable Prompt
 
-You can adjust review rules, context, and examples in `review_prompt.md`.
-This file is loaded automatically and injected into LLM instructions on each run.
+`ai-review init` creates a `review_prompt.md` alongside `config.yaml`. This file is loaded automatically and injected into LLM instructions on every run.
 
-Example in `config.yaml`:
-
-```yaml
-review:
-  custom_prompt_file: review_prompt.md
-```
-
-Suggested usage for this file:
+Edit it to tailor the review to your team:
 
 - Define comment tone and format
 - Add mandatory validation rules
 - Include business/architecture context
 - Add examples of good/bad comments
+
+The path is configurable in `config.yaml` (default: `review_prompt.md` in the current directory):
+
+```yaml
+review:
+  custom_prompt_file: review_prompt.md
+```
 
 ### Bedrock Example
 
@@ -178,7 +181,7 @@ ai-review pr-review --help
 
 ### Bootstrap configuration
 
-Generate a `config.yaml` template in the current directory:
+Generate `config.yaml` and `review_prompt.md` templates in the current directory:
 
 ```bash
 ai-review init
