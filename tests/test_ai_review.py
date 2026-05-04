@@ -391,3 +391,164 @@ def test_main_prints_help_when_no_command_is_parsed(mocker) -> None:
 
     assert ai_review.main() == 0
     parser.print_help.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# cmd_init
+# ---------------------------------------------------------------------------
+
+def test_cmd_init_creates_both_files(mocker, tmp_path) -> None:
+    """It should create config.yaml and review_prompt.md in the current directory."""
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+    mocker.patch(
+        "src.ai_review.importlib.resources.files",
+        side_effect=_fake_pkg_resources,
+    )
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 0
+    assert (tmp_path / "config.yaml").read_text() == "config-template"
+    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+
+
+def test_cmd_init_aborts_when_user_declines_config_overwrite(mocker, tmp_path) -> None:
+    """It should abort without writing either file when user declines config overwrite."""
+    (tmp_path / "config.yaml").write_text("existing")
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+    mocker.patch("builtins.input", return_value="n")
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 0
+    assert (tmp_path / "config.yaml").read_text() == "existing"
+    assert not (tmp_path / "review_prompt.md").exists()
+
+
+def test_cmd_init_skips_prompt_overwrite_when_user_declines(mocker, tmp_path) -> None:
+    """It should write config.yaml but keep existing review_prompt.md when user declines."""
+    (tmp_path / "review_prompt.md").write_text("existing-prompt")
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+    mocker.patch(
+        "src.ai_review.importlib.resources.files",
+        side_effect=_fake_pkg_resources,
+    )
+    mocker.patch("builtins.input", return_value="n")
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 0
+    assert (tmp_path / "config.yaml").read_text() == "config-template"
+    assert (tmp_path / "review_prompt.md").read_text() == "existing-prompt"
+
+
+def test_cmd_init_returns_error_when_template_missing(mocker, tmp_path) -> None:
+    """It should return 1 when the bundled config template cannot be found."""
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("missing")
+
+    mocker.patch("src.ai_review.importlib.resources.files", side_effect=_raise)
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 1
+
+
+def test_cmd_init_returns_error_when_prompt_template_missing(mocker, tmp_path) -> None:
+    """It should return 1 when the review_prompt.md template cannot be found.
+
+    config.yaml is already written at that point; the function still surfaces the error.
+    """
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+
+    class _ConfigOnlyResources(_FakeResource):
+        def __init__(self) -> None:
+            super().__init__("")
+
+        def joinpath(self, name: str) -> "_FakeResource":
+            if name == "config.yaml.template":
+                return _FakeResource("config-template")
+            raise FileNotFoundError(name)
+
+    mocker.patch(
+        "src.ai_review.importlib.resources.files",
+        return_value=_ConfigOnlyResources(),
+    )
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 1
+    # config.yaml was already written before the error
+    assert (tmp_path / "config.yaml").read_text() == "config-template"
+    assert not (tmp_path / "review_prompt.md").exists()
+
+
+def test_cmd_init_overwrites_both_files_when_user_accepts(mocker, tmp_path) -> None:
+    """It should overwrite both existing files when the user confirms both prompts."""
+    (tmp_path / "config.yaml").write_text("old-config")
+    (tmp_path / "review_prompt.md").write_text("old-prompt")
+    mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
+    mocker.patch(
+        "src.ai_review.importlib.resources.files",
+        side_effect=_fake_pkg_resources,
+    )
+    mocker.patch("builtins.input", return_value="y")
+    mocker.patch("builtins.print")
+
+    result = ai_review.cmd_init()
+
+    assert result == 0
+    assert (tmp_path / "config.yaml").read_text() == "config-template"
+    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+
+
+def test_main_dispatches_to_cmd_init(mocker) -> None:
+    """It should call cmd_init when the init subcommand is provided."""
+    mocker.patch("src.ai_review.sys.argv", ["ai_review.py", "init"])
+    cmd_init_mock = mocker.patch("src.ai_review.cmd_init", return_value=0)
+
+    result = ai_review.main()
+
+    assert result == 0
+    cmd_init_mock.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for cmd_init tests
+# ---------------------------------------------------------------------------
+
+class _FakeResource:
+    """Minimal stand-in for an importlib.resources path object."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def joinpath(self, name: str) -> "_FakeResource":
+        return self
+
+    def read_text(self, encoding: str = "utf-8") -> str:
+        return self._text
+
+
+def _fake_pkg_resources(package: str) -> _FakeResource:
+    """Return a fake resource root whose joinpath distinguishes template names."""
+
+    class _Dispatcher(_FakeResource):
+        def __init__(self) -> None:
+            super().__init__("")
+
+        def joinpath(self, name: str) -> _FakeResource:
+            if name == "config.yaml.template":
+                return _FakeResource("config-template")
+            if name == "review_prompt.md":
+                return _FakeResource("prompt-template")
+            raise FileNotFoundError(name)
+
+    return _Dispatcher()
