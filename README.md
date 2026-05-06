@@ -1,27 +1,29 @@
-# AI Code Review
+# AI Code Review CLI
 
 Automated code review tool with Pull Request integration for Azure DevOps/TFS and support for multiple LLM providers.
-
-The main entry point is in `src/ai_review.py`. The project also includes dedicated modules for configuration, output formatting, Git diff capture, TFS/Azure DevOps integration, and communication with the LLM provider.
+**Documentation where** [docs/index.md](docs/index.md) for complete guides on CLI usage, LLM configuration, and architecture.
 
 ## Features
 
-- AI Pull Request review (`pr-review`)
-- Structured PR comments (inline + general summary)
-- `dry-run` mode to validate without posting
-- PR listing with filters (`list-prs`)
-- Configuration exclusively via `config.yaml`
-- Providers LLM: OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
+- **AI Pull Request Review** — Automated code analysis with configurable LLM providers
+- **Structured Comments** — Inline suggestions + general summary comments
+- **Dry-run Mode** — Validate reviews before posting
+- **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
+- **Smart Filtering** — Filter by file extensions, limit diff size
+- **Customizable Prompts** — Markdown-based review guidelines
+- **Interactive CLI** — Menu-driven selection and confirmation
 
-## Installation
+## Installation & Quick Start
 
-Install from PyPI:
+### 1. Install Package
+
+From PyPI:
 
 ```bash
 pip install code-review-ai-cli
 ```
 
-Or install with optional LLM SDK extras:
+With optional LLM SDK extras:
 
 ```bash
 pip install "code-review-ai-cli[bedrock]"    # AWS Bedrock
@@ -31,378 +33,126 @@ pip install "code-review-ai-cli[claude]"     # Anthropic Claude SDK
 pip install "code-review-ai-cli[all]"        # All optional SDKs
 ```
 
-All providers also work without their optional SDK — the tool communicates via HTTP directly.
-
-If you plan to run the test suite locally, also install development dependencies:
+For development:
 
 ```bash
-pip install "code-review-ai-cli[dev]"
+pip install -r requirements.txt
+pip install "code-review-ai-cli[dev]"        # Test suite + linting
 ```
 
-## Configuration
+### 2. Initialize Configuration
 
-After installing the package, generate ready-to-edit configuration files in your working directory:
+Generate config templates in your project directory:
 
 ```bash
 ai-review init
 ```
 
-This copies two bundled templates:
+Creates:
+- `config.yaml` — LLM and review settings
+- `review_prompt.md` — Customizable review guidelines
 
-- **`config.yaml`** — all available options with inline documentation
-- **`review_prompt.md`** — default review style rules, injected into every LLM prompt
-
-```text
-✅ config.yaml created at: /home/user/my-project/config.yaml
-✅ review_prompt.md created at: /home/user/my-project/review_prompt.md
-   Edit them to add your credentials, preferences and review rules.
-```
-
-If either file already exists you will be prompted individually before it is overwritten:
-
-```text
-config.yaml already exists in the current directory.
-Overwrite? [y/N]
-```
-
-The tool looks for `config.yaml` in the **current working directory** at runtime. You can also pass a different path with `--config`:
+### 3. Run Your First Review
 
 ```bash
-ai-review pr-review --config ~/configs/ai-review.yaml
+# List active PRs
+ai-review list-prs
+
+# Review a specific PR
+ai-review pr-review 42
+
+# Dry-run (preview without posting)
+ai-review pr-review 42 --dry-run
 ```
 
-### Minimal Example
+## Configuration File
+
+After `ai-review init`, edit `config.yaml`:
 
 ```yaml
 llm:
-  provider: openai
-  model: gpt-4o
-
-openai:
-  api_key: sk-xxxx
-
-tfs:
-  base_url: https://dev.azure.com/your-organization
-  project: ProjectName
-  pat: xxxxxxxxx
-  verify_ssl: true
-  # ca_bundle: C:/certs/corporate-root-ca.pem
-
-review:
-  language: pt
-  verbosity: detailed
-  scope: diff_only
-  custom_prompt_file: review_prompt.md
-  # file limit sent to the LLM
-  max_diff_files: 50
-  # per-file limit
-  max_diff_lines: 2000
-  # extension allowlist (empty list = all files)
-  file_extensions_filter: [".cs", ".ts", ".py"]
-
-pr:
-  auto_post_comments: false
-  dry_run: false
-  comment_mode: structured
-
-output:
-  format: terminal
-  file: ""
-  color: true
-```
-
-### Filter by File Extension
-
-`file_extensions_filter` works as an **allowlist**: only files with listed extensions are sent to the LLM for review. Remaining files are excluded from the diff before any processing.
-
-```yaml
-review:
-  # Review only C#, TypeScript, and Python code
-  file_extensions_filter: [".cs", ".ts", ".py"]
-```
-
-To review **all** PR files, leave the list empty:
-
-```yaml
-review:
-  file_extensions_filter: []
-```
-
-> **Note:** If no eligible files remain after filtering, the review ends with a warning without calling the LLM.
-
-### Markdown-Customizable Prompt
-
-`ai-review init` creates a `review_prompt.md` alongside `config.yaml`. This file is loaded automatically and injected into LLM instructions on every run.
-
-Edit it to tailor the review to your team:
-
-- Define comment tone and format
-- Add mandatory validation rules
-- Include business/architecture context
-- Add examples of good/bad comments
-
-The path is configurable in `config.yaml` (default: `review_prompt.md` in the current directory):
-
-```yaml
-review:
-  custom_prompt_file: review_prompt.md
-```
-
-### Bedrock Example
-
-**Option 1 — Bedrock long-term API key** (AWS Console → Amazon Bedrock → API Keys):
-```yaml
-llm:
-  provider: bedrock
-  model: arn:aws:bedrock:eu-north-1:123456789:application-inference-profile/xxxxxxxx
-
-bedrock:
-  region: eu-north-1
-  access_key_id: ABSK...   # long-term API key — no secret_access_key
-```
-
-**Option 2 — IAM explicit credentials** (access key ID + secret):
-```yaml
-llm:
-  provider: bedrock
+  provider: bedrock                    # or: openai, gemini, claude, etc.
   model: anthropic.claude-3-5-sonnet-20240620-v1:0
 
 bedrock:
   region: us-east-1
-  access_key_id: AKIA...
-  secret_access_key: wJalr...
-  # session_token: ...   # optional, for temporary STS credentials
-```
 
-**Option 3 — AWS SSO / named profile**:
-```yaml
-bedrock:
-  region: us-east-1
-  profile: my-sso-profile
-```
-
-**Option 4 — Default credential chain** (env vars, instance role, etc.):
-```yaml
-bedrock:
-  region: us-east-1
-  # no credentials needed
-```
-
-Bedrock authentication is auto-detected:
-
-| `access_key_id` | `secret_access_key` | Mode |
-|---|---|---|
-| set | not set | Long-term API key (HTTP Bearer) |
-| set | set | IAM credentials (SigV4) |
-| not set | not set + `profile` | AWS SSO / named profile |
-| not set | not set | Default credential chain |
-
-## CLI Usage
-
-### Help
-
-```bash
-ai-review pr-review --help
-```
-
-### Bootstrap configuration
-
-Generate `config.yaml` and `review_prompt.md` templates in the current directory:
-
-```bash
-ai-review init
-```
-
-### Interactive Mode
-
-```bash
- ai-review pr-review
-```
-
-### Pull Request Review
-
-List PRs and select interactively:
-
-```bash
- ai-review pr-review pr-review
-```
-
-Review a specific PR:
-
-```bash
- ai-review pr-review pr-review 42
-```
-
-Dry-run:
-
-```bash
- ai-review pr-review pr-review 42 --dry-run
-```
-
-Full review of changed files (in addition to diff-focused review):
-
-```bash
- ai-review pr-review pr-review 42 --review-scope full_code
-```
-
-Automatic posting (without confirmation):
-
-```bash
- ai-review pr-review pr-review 42 --auto-post
-```
-
-Filter PRs in interactive selection:
-
-```bash
- ai-review pr-review pr-review --author "John Smith" --target-branch main
-```
-
-Choose provider/model via CLI:
-
-```bash
- ai-review pr-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
-```
-
-### List Pull Requests
-
-```bash
- ai-review pr-review list-prs
- ai-review pr-review list-prs --status completed
- ai-review pr-review list-prs --repo-name backend --author "John"
-```
-
-## Execution Flow
-
-The diagram below summarizes how the review application moves from CLI entry to PR analysis and comment posting.
-
-```mermaid
-flowchart TD
-  A[Start:  ai-review pr-review] --> B{Arguments provided?}
-  B -->|No| C[Interactive mode]
-  B -->|Yes| D[Parse CLI command]
-
-  C --> E{Choose action}
-  E -->|PR review| F[Start PR review workflow]
-  E -->|List PRs| G[List pull requests]
-  E -->|Show config| H[Display current configuration]
-
-  D --> I{Command}
-  I -->|pr-review| F
-  I -->|list-prs| G
-
-  F --> J[Load and validate config]
-  J --> K[Initialize TFS client]
-  K --> L{PR ID provided?}
-  L -->|No| M[Fetch active PRs and select one]
-  L -->|Yes| N[Use provided PR ID]
-  M --> O[Get PR details]
-  N --> O
-  O --> P[Get PR diff or full changed-file context]
-  P --> Q[Filter by allowed file extensions]
-  Q --> R[Keep additions only]
-  R --> S[Limit files with max_diff_files]
-  S --> T[Build changed-files summary]
-  T --> U[Truncate each file with max_diff_lines]
-  U --> V[Run AI general review]
-  V --> W[Run AI structured comment generation]
-  W --> X[Preview review and suggested comments]
-  X --> Y{Dry-run enabled?}
-  Y -->|Yes| Z[Stop after preview]
-  Y -->|No| AA{Auto-post enabled?}
-  AA -->|Yes| AB[Post all review comments]
-  AA -->|No| AC[Select comments to post]
-  AC --> AB
-  AB --> AD[Post general PR summary]
-  AD --> AE{Output file configured?}
-  AE -->|Yes| AF[Save formatted review output]
-  AE -->|No| AG[Finish]
-  AF --> AG
-
-  G --> AH[Fetch PR list with filters]
-  AH --> AI[Display PR list]
-```
-
-## Supported Commands and Options
-
-### `pr-review`
-
-```bash
- ai-review pr-review pr-review [pr_id]
-```
-
-Options:
-
-- `--repo-name`, `-r`
-- `--dry-run`
-- `--auto-post`
-- `--author`
-- `--target-branch`
-- `--quick` / `--detailed` / `--security`
-- `--review-scope {diff_only,full_code}` (default: `diff_only`)
-- `--max-diff-files N` — overrides `review.max_diff_files` from config.yaml
-- `--context`, `-c`
-- `--format {terminal,markdown,json}`
-- `--output`, `-o`
-- `--no-color`
-- `--model`, `-m`
-- `--provider`, `-p`
-- `--config`
-
-### `list-prs`
-
-```bash
- ai-review pr-review list-prs
-```
-
-Options:
-
-- `--repo-name`, `-r`
-- `--status {active,completed,abandoned,all}`
-- `--author`
-
-## Available VS Code Tasks
-
-- `AI Review: Pull Request (Interactive)`
-- `AI Review: PR (Dry-Run)`
-- `AI Review: List Active PRs`
-- `AI Review: Interactive Mode`
-
-## Troubleshooting
-
-### TLS/SSL Error in On-Prem TFS
-
-Prefer using a CA bundle:
-
-```yaml
 tfs:
-  verify_ssl: true
-  ca_bundle: C:/certs/corporate-root-ca.pem
+  base_url: https://dev.azure.com/your-org
+  project: YourProject
+  pat: xxxxxxxxx
+
+review:
+  language: pt
+  verbosity: detailed                  # or: quick, security
+  file_extensions_filter: [".cs", ".ts", ".py"]
+  max_diff_files: 50
 ```
 
-Avoid `verify_ssl: false` except for temporary troubleshooting.
+## Development & Testing
 
-### Bedrock Authentication Error
+This is a standard Python project with the following structure:
 
-- Confirm `bedrock.region` matches the region of the model/inference profile.
-- Confirm `llm.model` with a valid Bedrock model ID or inference profile ARN.
-- **Long-term API key**: set only `bedrock.access_key_id` (no `secret_access_key`).
-- **IAM credentials**: set both `bedrock.access_key_id` and `bedrock.secret_access_key`.
-- **Profile/SSO**: set `bedrock.profile` and ensure the profile is configured in `~/.aws/config`.
-- If none of the above are set, the AWS default credential chain is used (env vars, instance role, etc.).
+```
+src/
+  ai_review.py        # CLI entry point
+  config.py           # Configuration management
+  llm_client.py       # LLM provider abstraction
+  tfs_client.py       # Azure DevOps integration
+  git_utils.py        # Git diff processing
+  formatter.py        # Output formatting (terminal, markdown, JSON)
 
-## Tests
+tests/
+  test_*.py           # Unit and integration tests
+```
 
-The project's functional coverage is reflected in the `tests/` folder, including:
-
-- `tests/test_ai_review.py` for the CLI and main workflow
-- `tests/test_config.py` for configuration and validation
-- `tests/test_formatter.py` for terminal/markdown/json rendering
-- `tests/test_git_utils.py` for diffs and Git utilities
-- `tests/test_llm_client.py` for prompts, parsing, and LLM providers
-- `tests/test_tfs_client.py` for TFS/Azure DevOps integration
-
-Run the suite:
+### Run Tests
 
 ```bash
 python -m pytest --cov=src --cov-report=term
 ```
+
+### Code Quality
+
+Project follows PEP8 with Black formatter and Ruff linter:
+
+```bash
+# Format code
+black src/ tests/
+
+# Lint
+ruff check src/ tests/
+
+# Type checking (if using mypy)
+mypy src/
+```
+
+
+## Integração com VS Code
+
+Tarefas predefinidas para execução rápida no VS Code:
+
+### Tasks Disponíveis
+
+1. **AI Review: Pull Request (Interactive)**
+   - Modo interativo com menu principal
+   - Executar com: `Ctrl+Shift+B` → Selecionar task
+
+2. **AI Review: PR (Dry-Run)**
+   - Dry-run de um PR específico
+   - Pede o ID do PR
+
+3. **AI Review: List Active PRs**
+   - Lista PRs ativos
+   - Rápido diagnóstico
+
+4. **AI Review: Interactive Mode**
+   - Menu completo da ferramenta
+   - Execução em background
+
+### Como executar tasks
+
+Nos VS Code:
+1. `Ctrl+Shift+P` → "Tasks: Run Task"
+2. Seleciona a task desejada
+3. Preenche parâmetros se necessário
