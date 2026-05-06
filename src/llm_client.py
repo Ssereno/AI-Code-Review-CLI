@@ -12,6 +12,7 @@ Supported providers:
 - AWS Bedrock (Claude, Llama, Mistral, etc. via Runtime API)
 """
 
+import datetime
 import json
 import os
 
@@ -904,7 +905,276 @@ class LLMClient:
     # AWS Bedrock
     # ------------------------------------------------------------------
     def _call_bedrock(self, system_prompt: str, user_message: str) -> str:
-        """Calls the AWS Bedrock Runtime via the Converse API."""
+        """Calls the AWS Bedrock Runtime, auto-detecting the auth mode.
+
+        Routing: Bearer (access_key_id only) → SigV4 (key + secret) → boto3 (default chain).
+
+        Args:
+            system_prompt: System-role instructions for the model.
+            user_message: User-role message containing the diff.
+
+        Returns:
+            The model's text response.
+
+        Raises:
+            LLMError: On missing region, auth failure, or unexpected response.
+        """
+        region = self.config.bedrock_region
+        if not region:
+            raise LLMError(
+                "Provider 'bedrock' requires bedrock.region in config.yaml."
+            )
+
+        access_key = self.config.bedrock_access_key_id
+        secret_key = self.config.bedrock_secret_access_key
+
+        # Bedrock long-term API key: single value, no secret — use HTTP Bearer
+        if access_key and not secret_key:
+            return self._call_bedrock_bearer(region, access_key, system_prompt, user_message)
+
+        # IAM key pair: use SigV4 signing
+        if access_key and secret_key:
+            return self._call_bedrock_sigv4(
+                region, access_key, secret_key,
+                self.config.bedrock_session_token,
+                system_prompt, user_message,
+            )
+
+        # Profile / SSO / default credential chain: delegate to boto3
+        return self._call_bedrock_boto3(region, system_prompt, user_message)
+
+    def _call_bedrock_bearer(
+        self,
+        region: str,
+        api_key: str,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        """Calls Bedrock InvokeModel using an HTTP Bearer token (long-term API key).
+
+        Args:
+            region: AWS region, e.g. ``us-east-1``.
+            api_key: Bedrock long-term API key used as the Bearer token.
+            system_prompt: System-role instructions for the model.
+            user_message: User-role message containing the diff.
+
+        Returns:
+            The model's text response.
+
+        Raises:
+            LLMError: On auth failure (401), non-200 status, or invalid response.
+        """
+        import urllib.parse
+
+        try:
+            import requests
+        except ImportError:
+            raise LLMError("'requests' is not installed.\nInstall with: pip install requests")
+
+        # The model ARN contains ':' and '/' that must be URL-encoded in the path
+        model_encoded = urllib.parse.quote(self.config.model, safe="")
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_encoded}/invoke"
+
+        payload = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+        }, separators=(",", ":"))
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(url, headers=headers, data=payload, timeout=180)
+        except requests.exceptions.RequestException as exc:
+            raise LLMError(f"Bedrock HTTP request failed: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise LLMError(
+                "Bedrock authentication failed (401). "
+                "Check that bedrock.access_key_id is a valid long-term API key."
+            )
+        if resp.status_code != 200:
+            raise LLMError(f"Bedrock returned HTTP {resp.status_code}: {resp.text[:500]}")
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise LLMError(f"Invalid JSON from Bedrock: {resp.text[:500]}") from exc
+
+        content = data.get("content", [])
+        text_parts = [
+            item["text"] for item in content
+            if item.get("type") == "text" and "text" in item
+        ]
+        text = "\n".join(part for part in text_parts if part).strip()
+        if not text:
+            raise LLMError(f"Unexpected Bedrock response: {json.dumps(data)[:500]}")
+        return text
+
+    def _call_bedrock_sigv4(
+        self,
+        region: str,
+        access_key_id: str,
+        secret_access_key: str,
+        session_token: str,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        """Calls Bedrock InvokeModel with manual AWS SigV4 HMAC-SHA256 signing.
+
+        Equivalent to the C# BedrockLlmClient implementation.
+
+        Args:
+            region: AWS region, e.g. ``us-east-1``.
+            access_key_id: IAM access key ID.
+            secret_access_key: IAM secret access key.
+            session_token: Optional STS session token (empty string if unused).
+            system_prompt: System-role instructions for the model.
+            user_message: User-role message containing the diff.
+
+        Returns:
+            The model's text response.
+
+        Raises:
+            LLMError: On auth failure (401), non-200 status, or invalid response.
+        """
+        import hashlib
+        import hmac
+        import urllib.parse
+
+        try:
+            import requests
+        except ImportError:
+            raise LLMError(
+                "'requests' is not installed.\n"
+                "Install with: pip install requests"
+            )
+
+        host = f"bedrock-runtime.{region}.amazonaws.com"
+        model_encoded = urllib.parse.quote(self.config.model, safe="")
+        endpoint = f"https://{host}/model/{model_encoded}/invoke"
+        service = "bedrock"
+
+        payload = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+        }, separators=(",", ":"))
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        date_stamp = now.strftime("%Y%m%d")
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+
+        payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+        # --- Canonical request ---
+        # Use the ORIGINAL (unencoded) model to build the canonical URI.
+        # Splitting by '/' and encoding each segment mirrors the C# SigV4 implementation.
+        canonical_uri = "/".join(
+            urllib.parse.quote(seg, safe="")
+            for seg in f"/model/{self.config.model}/invoke".split("/")
+        )
+
+        headers_to_sign = {
+            "content-type": "application/json",
+            "host": host,
+            "x-amz-content-sha256": payload_hash,
+            "x-amz-date": amz_date,
+        }
+        if session_token:
+            headers_to_sign["x-amz-security-token"] = session_token
+
+        signed_headers = ";".join(sorted(headers_to_sign))
+        canonical_headers = "".join(
+            f"{k}:{v}\n" for k, v in sorted(headers_to_sign.items())
+        )
+        canonical_request = "\n".join([
+            "POST", canonical_uri, "",
+            canonical_headers, signed_headers, payload_hash,
+        ])
+
+        # --- String to sign ---
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256", amz_date, credential_scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ])
+
+        # --- Signing key ---
+        def _hmac(key: bytes, msg: str) -> bytes:
+            return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+        k_date = _hmac(f"AWS4{secret_access_key}".encode("utf-8"), date_stamp)
+        k_region = _hmac(k_date, region)
+        k_service = _hmac(k_region, service)
+        k_signing = _hmac(k_service, "aws4_request")
+        signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        # --- Authorization header ---
+        authorization = (
+            f"AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+
+        http_headers = {
+            "Authorization": authorization,
+            "Content-Type": "application/json",
+            "x-amz-date": amz_date,
+            "x-amz-content-sha256": payload_hash,
+            **({} if not session_token else {"x-amz-security-token": session_token}),
+        }
+
+        try:
+            resp = requests.post(endpoint, headers=http_headers, data=payload, timeout=180)
+        except requests.exceptions.RequestException as exc:
+            raise LLMError(f"Bedrock HTTP request failed: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise LLMError(
+                "Bedrock authentication failed (401). "
+                "Check bedrock.access_key_id and bedrock.secret_access_key in config.yaml."
+            )
+        if resp.status_code != 200:
+            raise LLMError(f"Bedrock returned HTTP {resp.status_code}: {resp.text[:500]}")
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise LLMError(f"Invalid JSON from Bedrock: {resp.text[:500]}") from exc
+
+        content = data.get("content", [])
+        text_parts = [
+            item["text"] for item in content
+            if item.get("type") == "text" and "text" in item
+        ]
+        text = "\n".join(part for part in text_parts if part).strip()
+        if not text:
+            raise LLMError(f"Unexpected Bedrock response: {json.dumps(data)[:500]}")
+        return text
+
+    def _call_bedrock_boto3(self, region: str, system_prompt: str, user_message: str) -> str:
+        """Calls Bedrock via the boto3 ``converse()`` API.
+
+        Supports AWS SSO, named profiles, and the default credential chain.
+
+        Args:
+            region: AWS region, e.g. ``us-east-1``.
+            system_prompt: System-role instructions for the model.
+            user_message: User-role message containing the diff.
+
+        Returns:
+            The model's text response.
+
+        Raises:
+            LLMError: On boto3 import failure, BotoCoreError, or unexpected response.
+        """
         try:
             import boto3
             from botocore.exceptions import BotoCoreError, ClientError
@@ -914,18 +1184,12 @@ class LLMClient:
                 "Install with: pip install boto3"
             )
 
-        region = self.config.bedrock_region
-        if not region:
-            raise LLMError(
-                "Provider 'bedrock' requires bedrock.region in config.yaml."
-            )
-
         try:
-            session_kwargs = {}
+            session_kwargs: dict = {}
             if self.config.bedrock_profile:
                 session_kwargs["profile_name"] = self.config.bedrock_profile
 
-            # Allows explicit credentials in YAML or AWS default credential chain.
+            # Explicit IAM credentials override the default credential chain.
             if self.config.bedrock_access_key_id and self.config.bedrock_secret_access_key:
                 session_kwargs["aws_access_key_id"] = self.config.bedrock_access_key_id
                 session_kwargs["aws_secret_access_key"] = self.config.bedrock_secret_access_key
@@ -956,7 +1220,7 @@ class LLMClient:
                 .get("content", [])
             )
             text_parts = [item.get("text", "") for item in content if "text" in item]
-            text = "\n".join([part for part in text_parts if part]).strip()
+            text = "\n".join(part for part in text_parts if part).strip()
             if not text:
                 raise LLMError(
                     f"Unexpected Bedrock response: {json.dumps(response)[:500]}"

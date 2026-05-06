@@ -150,6 +150,18 @@ review:
 
 ### Bedrock Example
 
+**Option 1 — Bedrock long-term API key** (AWS Console → Amazon Bedrock → API Keys):
+```yaml
+llm:
+  provider: bedrock
+  model: arn:aws:bedrock:eu-north-1:123456789:application-inference-profile/xxxxxxxx
+
+bedrock:
+  region: eu-north-1
+  access_key_id: ABSK...   # long-term API key — no secret_access_key
+```
+
+**Option 2 — IAM explicit credentials** (access key ID + secret):
 ```yaml
 llm:
   provider: bedrock
@@ -157,21 +169,33 @@ llm:
 
 bedrock:
   region: us-east-1
-  # profile: default
-  # access_key_id: AKIA...
-  # secret_access_key: ...
-  # session_token: ...
-
-tfs:
-  base_url: https://dev.azure.com/your-organization
-  project: ProjectName
-  pat: xxxxxxxxx
+  access_key_id: AKIA...
+  secret_access_key: wJalr...
+  # session_token: ...   # optional, for temporary STS credentials
 ```
 
-Bedrock notes:
+**Option 3 — AWS SSO / named profile**:
+```yaml
+bedrock:
+  region: us-east-1
+  profile: my-sso-profile
+```
 
-- You can use `profile` or explicit credentials in YAML.
-- If explicit credentials are not defined, the AWS SDK uses the default credentials chain.
+**Option 4 — Default credential chain** (env vars, instance role, etc.):
+```yaml
+bedrock:
+  region: us-east-1
+  # no credentials needed
+```
+
+Bedrock authentication is auto-detected:
+
+| `access_key_id` | `secret_access_key` | Mode |
+|---|---|---|
+| set | not set | Long-term API key (HTTP Bearer) |
+| set | set | IAM credentials (SigV4) |
+| not set | not set + `profile` | AWS SSO / named profile |
+| not set | not set | Default credential chain |
 
 ## CLI Usage
 
@@ -359,9 +383,12 @@ Avoid `verify_ssl: false` except for temporary troubleshooting.
 
 ### Bedrock Authentication Error
 
-- Confirm `bedrock.region`.
-- Confirm `llm.model` with a valid Bedrock model ID in the chosen region.
-- Validate AWS credentials (`profile` or explicit keys).
+- Confirm `bedrock.region` matches the region of the model/inference profile.
+- Confirm `llm.model` with a valid Bedrock model ID or inference profile ARN.
+- **Long-term API key**: set only `bedrock.access_key_id` (no `secret_access_key`).
+- **IAM credentials**: set both `bedrock.access_key_id` and `bedrock.secret_access_key`.
+- **Profile/SSO**: set `bedrock.profile` and ensure the profile is configured in `~/.aws/config`.
+- If none of the above are set, the AWS default credential chain is used (env vars, instance role, etc.).
 
 ## Tests
 
