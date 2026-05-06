@@ -52,6 +52,25 @@ def install_requests(monkeypatch: pytest.MonkeyPatch, response: FakeResponse) ->
     return module
 
 
+def install_requests_raw(monkeypatch: pytest.MonkeyPatch, response: FakeResponse) -> ModuleType:
+    """Install a fake requests module that captures raw-body (data=) POST calls."""
+    module = ModuleType("requests")
+    module._calls = []
+
+    def post(url: str, headers: dict | None = None, data: str | None = None, timeout: int = 0) -> FakeResponse:
+        module._calls.append({"url": url, "headers": headers, "data": data, "timeout": timeout})
+        return response
+
+    module.post = post
+    module.exceptions = SimpleNamespace(
+        ConnectionError=type("ConnectionError", (Exception,), {}),
+        Timeout=type("Timeout", (Exception,), {}),
+        RequestException=type("RequestException", (Exception,), {}),
+    )
+    monkeypatch.setitem(sys.modules, "requests", module)
+    return module
+
+
 def make_llm_config(**changes: object) -> ReviewConfig:
     """Build a valid baseline LLM configuration."""
     config = ReviewConfig(
@@ -306,13 +325,16 @@ def test_copilot_provider_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
             client._call_copilot("sys", "user")
 
 
-def test_bedrock_provider_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    """It should create a Bedrock client with configured credentials and parse output."""
+def test_bedrock_boto3_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It should call boto3 when no explicit credentials are set and parse output."""
     botocore_exceptions = ModuleType("botocore.exceptions")
+
     class FakeBotoCoreError(Exception):
         """Stub boto core exception."""
+
     class FakeClientError(Exception):
         """Stub client error exception."""
+
     botocore_exceptions.BotoCoreError = FakeBotoCoreError
     botocore_exceptions.ClientError = FakeClientError
     monkeypatch.setitem(sys.modules, "botocore.exceptions", botocore_exceptions)
@@ -321,13 +343,16 @@ def test_bedrock_provider_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
 
     class FakeBedrockClient:
         """Stub Bedrock runtime client."""
+
         def converse(self, **kwargs: object) -> dict:
             return {"output": {"message": {"content": [{"text": "bedrock ok"}]}}}
 
     class FakeSession:
         """Stub boto3 session."""
+
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+
         def client(self, service_name: str, region_name: str) -> FakeBedrockClient:
             assert service_name == "bedrock-runtime"
             assert region_name == "us-east-1"
@@ -336,6 +361,7 @@ def test_bedrock_provider_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
     boto3_module.Session = FakeSession
     monkeypatch.setitem(sys.modules, "boto3", boto3_module)
 
+    # No access_key / secret → routes to boto3 path
     client = LLMClient(
         make_llm_config(
             llm_provider="bedrock",
@@ -343,21 +369,163 @@ def test_bedrock_provider_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
             model="anthropic.claude-3-5-sonnet",
             bedrock_region="us-east-1",
             bedrock_profile="dev",
-            bedrock_access_key_id="access",
-            bedrock_secret_access_key="secret",
-            bedrock_session_token="token",
+            bedrock_access_key_id="",
+            bedrock_secret_access_key="",
         )
     )
     assert client._call_bedrock("sys", "user") == "bedrock ok"
-
-    with pytest.raises(LLMError, match="requires bedrock.region"):
-        LLMClient(make_llm_config(llm_provider="bedrock", api_key="", bedrock_region=""))._call_bedrock("sys", "user")
+    assert client._call_bedrock_boto3("us-east-1", "sys", "user") == "bedrock ok"
 
     class BrokenSession(FakeSession):
         """Session that raises provider-side failures."""
+
         def client(self, service_name: str, region_name: str) -> FakeBedrockClient:
             raise FakeClientError("boom")
 
     boto3_module.Session = BrokenSession
     with pytest.raises(LLMError, match="Error calling AWS Bedrock"):
-        client._call_bedrock("sys", "user")
+        client._call_bedrock_boto3("us-east-1", "sys", "user")
+
+
+def test_call_bedrock_routing_dispatches_correct_method(mocker) -> None:
+    """_call_bedrock should route to bearer, sigv4, or boto3 based on credential fields."""
+    bearer_mock = mocker.patch("src.llm_client.LLMClient._call_bedrock_bearer", return_value="bearer")
+    client_bearer = LLMClient(
+        make_llm_config(
+            llm_provider="bedrock", api_key="", model="m",
+            bedrock_region="us-east-1", bedrock_access_key_id="api-key",
+            bedrock_secret_access_key="",
+        )
+    )
+    assert client_bearer._call_bedrock("sys", "user") == "bearer"
+    bearer_mock.assert_called_once_with("us-east-1", "api-key", "sys", "user")
+
+    sigv4_mock = mocker.patch("src.llm_client.LLMClient._call_bedrock_sigv4", return_value="sigv4")
+    client_sigv4 = LLMClient(
+        make_llm_config(
+            llm_provider="bedrock", api_key="", model="m",
+            bedrock_region="us-east-1", bedrock_access_key_id="AKID",
+            bedrock_secret_access_key="secret", bedrock_session_token="tok",
+        )
+    )
+    assert client_sigv4._call_bedrock("sys", "user") == "sigv4"
+    sigv4_mock.assert_called_once_with("us-east-1", "AKID", "secret", "tok", "sys", "user")
+
+    boto3_mock = mocker.patch("src.llm_client.LLMClient._call_bedrock_boto3", return_value="boto3")
+    client_boto3 = LLMClient(
+        make_llm_config(
+            llm_provider="bedrock", api_key="", model="m",
+            bedrock_region="us-east-1", bedrock_access_key_id="",
+            bedrock_secret_access_key="",
+        )
+    )
+    assert client_boto3._call_bedrock("sys", "user") == "boto3"
+    boto3_mock.assert_called_once_with("us-east-1", "sys", "user")
+
+    with pytest.raises(LLMError, match="requires bedrock.region"):
+        LLMClient(make_llm_config(llm_provider="bedrock", api_key="", bedrock_region=""))._call_bedrock("sys", "user")
+
+
+def test_call_bedrock_bearer_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_call_bedrock_bearer should use Bearer auth, URL-encode the model ARN and parse content."""
+    model_arn = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet"
+    client = LLMClient(
+        make_llm_config(
+            llm_provider="bedrock",
+            api_key="",
+            model=model_arn,
+            bedrock_region="us-east-1",
+            bedrock_access_key_id="my-bearer-key",
+            bedrock_secret_access_key="",
+        )
+    )
+
+    # Success path: response parsed correctly, model ARN URL-encoded in URL
+    success_resp = FakeResponse(json_data={"content": [{"type": "text", "text": "bearer ok"}]})
+    req_module = install_requests_raw(monkeypatch, success_resp)
+    result = client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+    assert result == "bearer ok"
+    call = req_module._calls[0]
+    assert "arn%3Aaws%3Abedrock" in call["url"]  # ':' encoded as %3A
+    assert "anthropic.claude-3-sonnet" in call["url"]
+    assert call["headers"]["Authorization"] == "Bearer my-bearer-key"
+    assert call["headers"]["Content-Type"] == "application/json"
+
+    # 401 → specific authentication error message
+    install_requests_raw(monkeypatch, FakeResponse(status_code=401))
+    with pytest.raises(LLMError, match=r"authentication failed \(401\)"):
+        client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+
+    # Non-200 → generic HTTP error
+    install_requests_raw(monkeypatch, FakeResponse(status_code=500, text="server error"))
+    with pytest.raises(LLMError, match="Bedrock returned HTTP 500"):
+        client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+
+    # Empty content list → Unexpected response error
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": []}))
+    with pytest.raises(LLMError, match="Unexpected Bedrock response"):
+        client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+
+    # Content items with no text type → Unexpected response error
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": [{"type": "image", "data": "..."}]}))
+    with pytest.raises(LLMError, match="Unexpected Bedrock response"):
+        client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+
+    # Connection error → wrapped LLMError
+    req_module = install_requests_raw(monkeypatch, FakeResponse())
+    req_module.post = lambda *a, **kw: (_ for _ in ()).throw(req_module.exceptions.RequestException("conn failed"))
+    with pytest.raises(LLMError, match="Bedrock HTTP request failed"):
+        client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
+
+
+def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_call_bedrock_sigv4 should add SigV4 headers and parse content correctly."""
+    client = LLMClient(
+        make_llm_config(
+            llm_provider="bedrock",
+            api_key="",
+            model="anthropic.claude-3-sonnet",
+            bedrock_region="us-east-1",
+            bedrock_access_key_id="AKID",
+            bedrock_secret_access_key="secret",
+        )
+    )
+    success_resp = FakeResponse(json_data={"content": [{"type": "text", "text": "sigv4 ok"}]})
+
+    # Success path: SigV4 headers present in request
+    req_module = install_requests_raw(monkeypatch, success_resp)
+    result = client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
+    assert result == "sigv4 ok"
+    call = req_module._calls[0]
+    assert call["headers"]["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKID/")
+    assert "x-amz-date" in call["headers"]
+    assert "x-amz-content-sha256" in call["headers"]
+    assert "x-amz-security-token" not in call["headers"]
+
+    # Session token is forwarded as x-amz-security-token
+    req_module = install_requests_raw(monkeypatch, success_resp)
+    result2 = client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "sess-tok", "sys", "user")
+    assert result2 == "sigv4 ok"
+    call2 = req_module._calls[0]
+    assert call2["headers"]["x-amz-security-token"] == "sess-tok"
+
+    # 401 → specific authentication error message
+    install_requests_raw(monkeypatch, FakeResponse(status_code=401))
+    with pytest.raises(LLMError, match=r"authentication failed \(401\)"):
+        client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
+
+    # Non-200 → generic HTTP error
+    install_requests_raw(monkeypatch, FakeResponse(status_code=503, text="down"))
+    with pytest.raises(LLMError, match="Bedrock returned HTTP 503"):
+        client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
+
+    # Empty content → Unexpected response error
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": []}))
+    with pytest.raises(LLMError, match="Unexpected Bedrock response"):
+        client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
+
+    # Connection error → wrapped LLMError
+    req_module = install_requests_raw(monkeypatch, FakeResponse())
+    req_module.post = lambda *a, **kw: (_ for _ in ()).throw(req_module.exceptions.RequestException("timeout"))
+    with pytest.raises(LLMError, match="Bedrock HTTP request failed"):
+        client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")

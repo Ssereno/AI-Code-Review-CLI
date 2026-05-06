@@ -246,7 +246,7 @@ def test_validate_returns_early_for_unknown_provider() -> None:
         ({"llm_provider": "gemini", "api_key": "", "gemini_api_key": ""}, ["Provider 'gemini' requires an API key"]),
         ({"llm_provider": "claude", "api_key": "", "anthropic_api_key": ""}, ["Provider 'claude' requires an API key"]),
         ({"llm_provider": "copilot", "api_key": "", "github_token": ""}, ["Provider 'copilot' requires a GitHub token"]),
-        ({"llm_provider": "bedrock", "bedrock_region": "", "bedrock_access_key_id": "a", "bedrock_secret_access_key": ""}, ["requires an AWS region", "secret_access_key is missing"]),
+        ({"llm_provider": "bedrock", "bedrock_region": "", "bedrock_access_key_id": "", "bedrock_secret_access_key": "s"}, ["requires an AWS region", "access_key_id is missing"]),
     ],
 )
 def test_validate_provider_specific_errors(
@@ -301,6 +301,44 @@ def test_get_provider_info_variants(review_config_factory) -> None:
     assert "Region: eu-west-1" in bedrock_info
     assert "Credentials: profile" in bedrock_info
     assert "API Key: ✅ Configured" in default_info
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_fragment"),
+    [
+        (
+            {"bedrock_access_key_id": "key", "bedrock_secret_access_key": "", "bedrock_profile": ""},
+            "long-term API key (Bearer)",
+        ),
+        (
+            {"bedrock_access_key_id": "key", "bedrock_secret_access_key": "secret", "bedrock_profile": ""},
+            "IAM explicit (SigV4)",
+        ),
+        (
+            {"bedrock_access_key_id": "", "bedrock_secret_access_key": "", "bedrock_profile": ""},
+            "default credential chain",
+        ),
+        (
+            {"bedrock_access_key_id": "", "bedrock_secret_access_key": "", "bedrock_profile": "prod"},
+            "profile: prod",
+        ),
+    ],
+)
+def test_get_provider_info_bedrock_credential_modes(
+    review_config_factory,
+    changes: dict[str, str],
+    expected_fragment: str,
+) -> None:
+    """get_provider_info should report the active Bedrock credential mode."""
+    info = review_config_factory(
+        llm_provider="bedrock",
+        api_key="",
+        model="anthropic.claude-3",
+        bedrock_region="us-east-1",
+        **changes,
+    ).get_provider_info()
+
+    assert expected_fragment in info
 
 
 def test_find_file_checks_cwd_then_repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

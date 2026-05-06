@@ -291,11 +291,6 @@ class ReviewConfig:
                     "Provider 'bedrock' requires an AWS region.\n"
                     "  Configure bedrock.region in config.yaml (e.g., us-east-1)."
                 )
-            if self.bedrock_access_key_id and not self.bedrock_secret_access_key:
-                issues.append(
-                    "Provider 'bedrock': secret_access_key is missing.\n"
-                    "  Configure bedrock.secret_access_key when access_key_id is set."
-                )
             if self.bedrock_secret_access_key and not self.bedrock_access_key_id:
                 issues.append(
                     "Provider 'bedrock': access_key_id is missing.\n"
@@ -329,7 +324,14 @@ class ReviewConfig:
         return issues
 
     def get_provider_info(self) -> str:
-        """Returns formatted information about the configured provider."""
+        """Returns a formatted string describing the configured LLM provider.
+
+        For ``bedrock``, reports one of four credential modes: long-term API key
+        (Bearer), IAM explicit (SigV4), named profile, or default credential chain.
+
+        Returns:
+            Human-readable summary of provider, model, and credential status.
+        """
         provider = self.llm_provider
         model = self.get_effective_model()
         has_key = bool(self.api_key or self.get_effective_api_key())
@@ -338,7 +340,14 @@ class ReviewConfig:
             url = self.get_effective_base_url()
             return f"{provider} | {model} | URL: {url}"
         if provider == "bedrock":
-            creds_mode = "profile" if self.bedrock_profile else "explicit/default"
+            if self.bedrock_access_key_id and not self.bedrock_secret_access_key:
+                creds_mode = "long-term API key (Bearer)"
+            elif self.bedrock_access_key_id and self.bedrock_secret_access_key:
+                creds_mode = "IAM explicit (SigV4)"
+            elif self.bedrock_profile:
+                creds_mode = f"profile: {self.bedrock_profile}"
+            else:
+                creds_mode = "default credential chain"
             region = self.bedrock_region or "(not configured)"
             return f"{provider} | {model} | Region: {region} | Credentials: {creds_mode}"
         else:
