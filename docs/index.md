@@ -1,6 +1,6 @@
 # AI Code Review CLI - Documentation
 
-Ferramenta automatizada de revisão de código utilizando Inteligência Artificial para Pull Requests em Azure DevOps/TFS.
+Automated code review tool using Artificial Intelligence for Pull Requests in Azure DevOps/TFS.
 
 ## Installation
 
@@ -10,21 +10,21 @@ Install the CLI from pypi.org
 pip install code-review-ai-cli
 ```
 
-Inicializa a configuração gerando templates:
+Initialize configuration by generating templates:
 
 ```bash
 ai-review init
 ```
 
-**Saída:**
+**Output:**
 ```
 config.yaml created at: /home/user/my-project/config.yaml
 review_prompt.md created at: /home/user/my-project/review_prompt.md
 
-Edit them to add your credentials, preferences and review rules.
+Edit them to add your credentials, preferences, and review rules.
 ```
 
-Se ficheiros já existem, é pedida confirmação:
+If files already exist, confirmation is requested:
 
 ```
 config.yaml already exists in the current directory.
@@ -34,22 +34,22 @@ Overwrite? [y/N]
 ## Quick Start
 
 ```bash
-# Instalação
+# Install dependencies
 pip install -r requirements.txt
 
-# Inicializar configuração
+# Initialize configuration
 ai-review init
 
-# Editar config.yaml com credenciais e preferências
+# Edit config.yaml with credentials and preferences
 config.yaml
 
-# Listar PRs ativos
+# List active PRs
 ai-review list-prs
 
-# Revisar um PR específico
+# Review a specific PR
 ai-review pr-review 42
 
-# Modo dry-run (sem postar comentários)
+# Dry-run mode (without posting comments)
 ai-review pr-review 42 --dry-run
 ```
 

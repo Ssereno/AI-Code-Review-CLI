@@ -1,56 +1,56 @@
-# Parâmetros de Revisão
+# Review Parameters
 
-## Parâmetros Gerais
+## General Parameters
 
 ```yaml
 review:
-  language: pt               # Idioma dos comentários
+  language: en               # Language for comments
   verbosity: detailed        # detailed | quick | security
   scope: diff_only           # diff_only | full_code
-  custom_prompt_file: review_prompt.md  # Prompt customizado
-  max_diff_files: 50         # Máx ficheiros enviados ao LLM
-  max_diff_lines: 2000       # Máx linhas por ficheiro
-  file_extensions_filter: [".cs", ".ts", ".py"]  # Allowlist (vazio = todos)
+  custom_prompt_file: review_prompt.md  # Custom prompt
+  max_diff_files: 50         # Max files sent to LLM
+  max_diff_lines: 2000       # Max lines per file
+  file_extensions_filter: [".cs", ".ts", ".py"]  # Allowlist (empty = all)
 ```
 
-## Parâmetros de Comentários
+## Comment Parameters
 
 ```yaml
 pr:
-  auto_post_comments: false  # Postar automaticamente
-  dry_run: false             # Não postar, apenas visualizar
+  auto_post_comments: false  # Automatically post comments
+  dry_run: false             # Do not post, only preview
   comment_mode: structured   # structured | inline
 ```
 
-## Filtragem por Extensão de Ficheiro
+## File Extension Filtering
 
-A opção `file_extensions_filter` funciona como um **allowlist**: apenas ficheiros com as extensões listadas são enviados ao LLM.
+The `file_extensions_filter` option works as an **allowlist**: only files with the listed extensions are sent to the LLM.
 
-Revisar apenas C#, TypeScript e Python
+Review only C#, TypeScript, and Python files
 
 ```yaml
 review:
   file_extensions_filter: [".cs", ".ts", ".py"]
 ```
 
-Revisar todos os ficheiros
+Review all files
 
 ```yaml
 review:
-  file_extensions_filter: []  # Lista vazia = sem filtro
+  file_extensions_filter: []  # Empty list = no filter
 ```
 
-> **Nota:** Se nenhum ficheiro elegível permanecer após filtragem, a revisão termina com aviso sem chamar o LLM.
+> **Note:** If no eligible files remain after filtering, the review ends with a warning without calling the LLM.
 
-## Prompt Customizado (Markdown)
+## Custom Prompt (Markdown)
 
-O ficheiro `review_prompt.md` é injetado automaticamente em cada execução e permite dar mais contexto a LLM sobre o teu projecto.
+The `review_prompt.md` file is automatically injected on each run and allows you to give more context to the LLM about your project.
 
 ```markdown
 # Code Review Guidelines
 
 ## Style
-- Use Portuguese comments
+- Use English comments
 - Be respectful and constructive
 - Focus on logic and best practices
 
@@ -64,7 +64,7 @@ O ficheiro `review_prompt.md` é injetado automaticamente em cada execução e p
 - Bad: `if user:`
 ```
 
-Personaliza o prompt para adequar a revisão ao teu projeto:
+Customize the prompt to fit your project:
 
 ```yaml
 review:

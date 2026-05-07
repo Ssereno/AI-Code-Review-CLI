@@ -1,63 +1,63 @@
 # CLI Usage Guide
 
-Documentação completa de uso da ferramenta de linha de comando.
+Complete usage guide for the command-line tool.
 
-## pr-review - Revisão de Pull Requests
+## pr-review - Pull Request Review
 
-Comando principal para revisar Pull Requests.
+Main command to review Pull Requests.
 
-### Modo Interativo
+### Interactive Mode
 
-Lista PRs ativos e permite selecionar qual revisar:
+Lists active PRs and allows you to select which one to review:
 
 ```bash
 ai-review pr-review
 ```
 
-**Interação:**
-1. Seleciona um PR da lista
-2. Opcionalmente configura filtros (autor, branch, etc.)
-3. Escolhe modelo e provider
-4. Revê os comentários propostos
-5. Confirma posting ou aborta
+**Interaction:**
+1. Select a PR from the list
+2. Optionally configure filters (author, branch, etc.)
+3. Choose model and provider
+4. Review the proposed comments
+5. Confirm posting or abort
 
-### Revisar PR Específico
+### Review a Specific PR
 
-Fornece o ID do PR diretamente:
+Provide the PR ID directly:
 
 ```bash
 ai-review pr-review 42
 ```
 
-### Revisar com Filtros Interativos
+### Review with Interactive Filters
 
-Filtra PRs antes de selecionar:
+Filter PRs before selecting:
 
 ```bash
 ai-review pr-review --author "John Smith" --target-branch main
 ai-review pr-review -r backend --author "Jane"
 ```
 
-**Filtros disponíveis:**
-- `--author TEXT` — Filtrar por autor
-- `--repo-name TEXT`, `-r` — Filtrar por repositório
-- `--target-branch TEXT` — Filtrar por branch de destino
+**Available filters:**
+- `--author TEXT` — Filter by author
+- `--repo-name TEXT`, `-r` — Filter by repository
+- `--target-branch TEXT` — Filter by target branch
 
-### Opções de Revisão
+### Review Options
 
-#### Dry-run (sem postar comentários)
+#### Dry-run (without posting comments)
 
-Executa a revisão completa mas não posta comentários:
+Performs the full review but does not post comments:
 
 ```bash
 ai-review pr-review 42 --dry-run
 ```
 
-Útil para validar antes de posting real.
+Useful to validate before real posting.
 
-#### Auto-post (sem confirmação)
+#### Auto-post (no confirmation)
 
-Posta comentários automaticamente sem confirmação:
+Automatically posts comments without confirmation:
 
 ```bash
 ai-review pr-review 42 --auto-post
