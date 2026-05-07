@@ -128,31 +128,31 @@ mypy src/
 ```
 
 
-## Integração com VS Code
+## VS Code Integration
 
-Tarefas predefinidas para execução rápida no VS Code:
+Predefined tasks for quick execution in VS Code:
 
-### Tasks Disponíveis
+### Available Tasks
 
 1. **AI Review: Pull Request (Interactive)**
-   - Modo interativo com menu principal
-   - Executar com: `Ctrl+Shift+B` → Selecionar task
+  - Interactive mode with main menu
+  - Run with: `Ctrl+Shift+B` → Select task
 
 2. **AI Review: PR (Dry-Run)**
-   - Dry-run de um PR específico
-   - Pede o ID do PR
+  - Dry-run for a specific PR
+  - Prompts for PR ID
 
 3. **AI Review: List Active PRs**
-   - Lista PRs ativos
-   - Rápido diagnóstico
+  - Lists active PRs
+  - Quick diagnostics
 
 4. **AI Review: Interactive Mode**
-   - Menu completo da ferramenta
-   - Execução em background
+  - Full tool menu
+  - Runs in background
 
-### Como executar tasks
+### How to run tasks
 
-Nos VS Code:
+In VS Code:
 1. `Ctrl+Shift+P` → "Tasks: Run Task"
-2. Seleciona a task desejada
-3. Preenche parâmetros se necessário
+2. Select the desired task
+3. Fill in parameters if needed

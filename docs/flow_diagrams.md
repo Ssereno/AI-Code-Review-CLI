@@ -1,4 +1,4 @@
-# Fluxo Principal da Aplicação
+# Main Application Flow
 
 ```mermaid
 flowchart TD
@@ -47,7 +47,7 @@ flowchart TD
   AH --> AI["📊 Display PR list"]
 ```
 
-# Integração com TFS/Azure DevOps
+# TFS/Azure DevOps Integration
 
 ```mermaid
 flowchart TD
