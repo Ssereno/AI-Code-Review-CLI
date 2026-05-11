@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import ai_review
+from src.usage_tracker import TokenUsage
 
 
 def make_args(**overrides: object) -> argparse.Namespace:
@@ -231,6 +232,46 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     save_output.assert_called_once()
     tfs.post_review_comments.assert_not_called()
     print_mock.assert_any_call("REVIEW")
+
+
+def test_store_pr_usage_persists_usage_record(mocker, tmp_path, review_config) -> None:
+    """It should write token usage for a reviewed PR."""
+    review_config.usage_file = str(tmp_path / "usage.jsonl")
+    review_config.usage_pricing = {
+        "openai": {
+            "gpt-4o-mini": {
+                "input_per_1m": 0.10,
+                "output_per_1m": 0.20,
+                "currency": "USD",
+            }
+        }
+    }
+
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: f"INFO:{message}"
+    print_mock = mocker.patch("builtins.print")
+
+    ai_review._store_pr_usage(
+        review_config,
+        formatter,
+        repo_name="repo-a",
+        pr_id=123,
+        dry_run=True,
+        comments_generated=2,
+        usage_events=[
+            TokenUsage(
+                provider="openai",
+                model="gpt-4o-mini",
+                operation="general_review",
+                prompt_tokens=100,
+                completion_tokens=50,
+            )
+        ],
+    )
+
+    stored = (tmp_path / "usage.jsonl").read_text(encoding="utf-8")
+    assert '"pull_request_id": 123' in stored
+    print_mock.assert_called_once()
 
 
 def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_config) -> None:

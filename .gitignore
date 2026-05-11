@@ -35,6 +35,7 @@ build/
 # Config with local secrets (keep config.yaml.example committed, not the real one)
 # Uncomment the line below if config.yaml contains real secrets:
 # config.yaml
+.ai-review-usage.jsonl
 
 # IDEs
 .vscode/

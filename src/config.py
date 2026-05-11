@@ -103,6 +103,11 @@ class ReviewConfig:
     output_file: str = ""                   # Path to save output
     color_output: bool = True               # Terminal colors
 
+    # --- Usage Tracking -----------------------------------------------
+    usage_tracking_enabled: bool = True
+    usage_file: str = ".ai-review-usage.jsonl"
+    usage_pricing: dict = field(default_factory=dict)
+
     def get_effective_model(self) -> str:
         """Returns the effective model (configured or provider default)."""
         if self.model:
@@ -222,6 +227,10 @@ class ReviewConfig:
             "output_format": ("output", "format"),
             "output_file": ("output", "file"),
             "color_output": ("output", "color"),
+            # Usage tracking
+            "usage_tracking_enabled": ("usage", "enabled"),
+            "usage_file": ("usage", "file"),
+            "usage_pricing": ("usage", "pricing"),
         }
 
         for attr, keys in mapping.items():

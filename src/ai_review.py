@@ -82,6 +82,7 @@ from src.config import ReviewConfig, VALID_PROVIDERS
 from src.git_utils import GitUtils, GitError
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
+from src.usage_tracker import append_usage_record, build_pr_usage_record
 from src import __version__ as VERSION
 
 
@@ -289,6 +290,67 @@ def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
         md_formatter.format_footer(truncated=was_truncated),
     ])
     save_output(md_output, output_file)
+
+
+def _get_llm_usage_events(llm: LLMClient) -> list:
+    """Returns usage events from an LLM client, ignoring test doubles."""
+    events = getattr(llm, "usage_events", [])
+    return events if isinstance(events, list) else []
+
+
+def _format_usage_summary(record: dict) -> str:
+    """Builds a short terminal summary for persisted usage."""
+    tokens = record.get("tokens", {})
+    total = tokens.get("total_tokens", 0)
+    prompt = tokens.get("prompt_tokens", 0)
+    completion = tokens.get("completion_tokens", 0)
+    suffix = " estimated" if tokens.get("estimated") else ""
+
+    message = (
+        f"LLM usage stored: {total}{suffix} tokens "
+        f"(input {prompt}, output {completion})"
+    )
+
+    cost = record.get("cost")
+    if cost:
+        message += f" | estimated cost: {cost['amount']:.6f} {cost['currency']}"
+    elif record.get("missing_pricing"):
+        message += " | cost not estimated (configure usage.pricing)"
+
+    return message
+
+
+def _store_pr_usage(
+    config: ReviewConfig,
+    formatter: ReviewFormatter,
+    *,
+    repo_name: str,
+    pr_id: int,
+    dry_run: bool,
+    comments_generated: int,
+    usage_events: list,
+) -> None:
+    """Persists token usage for a completed PR review."""
+    if not config.usage_tracking_enabled or not usage_events:
+        return
+
+    try:
+        record = build_pr_usage_record(
+            repository=repo_name,
+            pr_id=pr_id,
+            provider=config.llm_provider,
+            model=config.model,
+            review_scope=config.review_scope,
+            verbosity=config.verbosity,
+            dry_run=dry_run,
+            comments_generated=comments_generated,
+            events=usage_events,
+            pricing_config=config.usage_pricing,
+        )
+        path = append_usage_record(config.usage_file, record)
+        print(formatter.format_info(f"{_format_usage_summary(record)} -> {path}"))
+    except OSError as exc:
+        print(formatter.format_warning(f"Could not store LLM usage: {exc}"))
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +588,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
+
+    _store_pr_usage(
+        config,
+        formatter,
+        repo_name=repo_name,
+        pr_id=pr_id,
+        dry_run=dry_run,
+        comments_generated=len(structured_comments),
+        usage_events=_get_llm_usage_events(llm),
+    )
 
     # --- Show general review ---
     print(formatter.format_review(review_text))
