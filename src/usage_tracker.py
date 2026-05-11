@@ -142,6 +142,130 @@ def append_usage_record(file_path: str, record: dict[str, Any]) -> str:
     return resolved
 
 
+def load_usage_records(file_path: str) -> list[dict[str, Any]]:
+    """Loads usage records from a JSON Lines file."""
+    resolved = resolve_usage_file(file_path)
+    if not os.path.exists(resolved):
+        return []
+
+    records: list[dict[str, Any]] = []
+    with open(resolved, "r", encoding="utf-8") as fh:
+        for line in fh:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def summarize_usage_by_pr(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregates persisted usage records by repository and pull request."""
+    buckets: dict[tuple[str, int], dict[str, Any]] = {}
+
+    for record in records:
+        pr_id = _int_value(record.get("pull_request_id"))
+        if pr_id <= 0:
+            continue
+
+        repository = str(record.get("repository") or "(unknown)")
+        key = (repository, pr_id)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "repository": repository,
+                "pull_request_id": pr_id,
+                "reviews": 0,
+                "comments_generated": 0,
+                "latest_timestamp": "",
+                "providers": set(),
+                "models": set(),
+                "tokens": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "calls": 0,
+                    "estimated": False,
+                },
+                "_cost_amount": 0.0,
+                "_cost_count": 0,
+                "_cost_currencies": set(),
+                "_cost_estimated": False,
+                "_missing_pricing": set(),
+            },
+        )
+
+        bucket["reviews"] += 1
+        bucket["comments_generated"] += _int_value(record.get("comments_generated"))
+        timestamp = str(record.get("timestamp") or "")
+        if timestamp > bucket["latest_timestamp"]:
+            bucket["latest_timestamp"] = timestamp
+
+        if record.get("provider"):
+            bucket["providers"].add(str(record["provider"]))
+        if record.get("model"):
+            bucket["models"].add(str(record["model"]))
+
+        tokens = record.get("tokens") or {}
+        if isinstance(tokens, dict):
+            bucket["tokens"]["prompt_tokens"] += _int_value(tokens.get("prompt_tokens"))
+            bucket["tokens"]["completion_tokens"] += _int_value(tokens.get("completion_tokens"))
+            bucket["tokens"]["total_tokens"] += _int_value(tokens.get("total_tokens"))
+            bucket["tokens"]["calls"] += _int_value(tokens.get("calls"))
+            bucket["tokens"]["estimated"] = (
+                bucket["tokens"]["estimated"]
+                or bool(tokens.get("estimated"))
+            )
+
+        cost = record.get("cost")
+        if isinstance(cost, dict):
+            bucket["_cost_amount"] += _float_value(cost.get("amount"))
+            bucket["_cost_count"] += 1
+            if cost.get("currency"):
+                bucket["_cost_currencies"].add(str(cost["currency"]))
+            bucket["_cost_estimated"] = (
+                bucket["_cost_estimated"]
+                or bool(cost.get("estimated"))
+            )
+
+        missing_pricing = record.get("missing_pricing") or []
+        if isinstance(missing_pricing, list):
+            bucket["_missing_pricing"].update(str(item) for item in missing_pricing)
+
+    summaries: list[dict[str, Any]] = []
+    for bucket in buckets.values():
+        currencies = sorted(bucket.pop("_cost_currencies"))
+        cost_count = bucket.pop("_cost_count")
+        cost_amount = bucket.pop("_cost_amount")
+        cost_estimated = bucket.pop("_cost_estimated")
+        missing_pricing = sorted(bucket.pop("_missing_pricing"))
+
+        bucket["providers"] = sorted(bucket["providers"])
+        bucket["models"] = sorted(bucket["models"])
+        bucket["missing_pricing"] = missing_pricing
+        if cost_count:
+            bucket["cost"] = {
+                "amount": round(cost_amount, 8),
+                "currency": currencies[0] if len(currencies) == 1 else ("mixed" if currencies else "USD"),
+                "estimated": cost_estimated,
+            }
+        else:
+            bucket["cost"] = None
+        summaries.append(bucket)
+
+    return sorted(
+        summaries,
+        key=lambda item: (
+            str(item["repository"]).lower(),
+            int(item["pull_request_id"]),
+        ),
+    )
+
+
 def resolve_usage_file(file_path: str) -> str:
     """Resolves the configured usage file path."""
     configured = file_path or DEFAULT_USAGE_FILE
@@ -224,3 +348,17 @@ def _price_value(pricing: dict[str, Any], *keys: str) -> float:
         if key in pricing and pricing[key] is not None:
             return float(pricing[key])
     return 0.0
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float_value(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

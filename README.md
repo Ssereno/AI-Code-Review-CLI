@@ -64,6 +64,9 @@ ai-review pr-review 42
 
 # Dry-run (preview without posting)
 ai-review pr-review 42 --dry-run
+
+# Check stored token/cost usage
+ai-review usage
 ```
 
 ## Configuration File

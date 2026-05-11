@@ -82,7 +82,13 @@ from src.config import ReviewConfig, VALID_PROVIDERS
 from src.git_utils import GitUtils, GitError
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
-from src.usage_tracker import append_usage_record, build_pr_usage_record
+from src.usage_tracker import (
+    append_usage_record,
+    build_pr_usage_record,
+    load_usage_records,
+    resolve_usage_file,
+    summarize_usage_by_pr,
+)
 from src import __version__ as VERSION
 
 
@@ -199,6 +205,26 @@ def build_parser() -> argparse.ArgumentParser:
                               choices=["active", "completed", "abandoned", "all"])
     sub_list_prs.add_argument("--author", default=None,
                               help="Filter by author")
+
+    # --- usage ---
+    sub_usage = subparsers.add_parser(
+        "usage", help="Check stored token/cost usage by Pull Request"
+    )
+    sub_usage.add_argument(
+        "--usage-file",
+        default=None,
+        help="Usage JSONL file (defaults to usage.file in config.yaml)",
+    )
+    sub_usage.add_argument(
+        "--config",
+        default=None,
+        help="Configuration file (config.yaml)",
+    )
+    sub_usage.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable terminal colors",
+    )
 
     # --- Global options ---
     all_subs = [sub_pr_review, sub_list_prs]
@@ -353,6 +379,130 @@ def _store_pr_usage(
         print(formatter.format_warning(f"Could not store LLM usage: {exc}"))
 
 
+def _format_cost_value(cost: dict | None) -> str:
+    """Formats a cost value from a usage summary."""
+    if not cost:
+        return "not estimated"
+
+    amount = float(cost.get("amount") or 0.0)
+    currency = str(cost.get("currency") or "USD")
+    suffix = " estimated" if cost.get("estimated") else ""
+    return f"{amount:.6f} {currency}{suffix}"
+
+
+def _format_usage_pr_list(summaries: list[dict], usage_file: str) -> str:
+    """Formats the reviewed PR usage list."""
+    c = Colors
+    lines = [
+        f"\n{c.BOLD}📊 Reviewed Pull Requests ({len(summaries)}):{c.RESET}",
+        f"{c.DIM}Usage file: {usage_file}{c.RESET}\n",
+    ]
+
+    for index, summary in enumerate(summaries, 1):
+        tokens = summary.get("tokens", {})
+        cost = _format_cost_value(summary.get("cost"))
+        latest = summary.get("latest_timestamp") or "unknown"
+        lines.append(
+            f"  {c.CYAN}{index:>3}){c.RESET} "
+            f"{c.BOLD}#{summary['pull_request_id']:<6}{c.RESET} "
+            f"{summary['repository']} "
+            f"{c.DIM}({summary['reviews']} review run(s)){c.RESET}"
+        )
+        lines.append(
+            f"       Tokens: {tokens.get('total_tokens', 0)} total "
+            f"(input {tokens.get('prompt_tokens', 0)}, "
+            f"output {tokens.get('completion_tokens', 0)}) | Cost: {cost}"
+        )
+        lines.append(f"       {c.DIM}Latest: {latest}{c.RESET}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _select_usage_summary_interactive(summaries: list[dict]) -> dict | None:
+    """Lets the user select a PR usage summary."""
+    c = Colors
+    try:
+        choice = input(
+            f"\n{c.BOLD}Select PR usage (list number or PR ID, 0 to cancel): {c.RESET}"
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        return None
+
+    if not choice or choice == "0":
+        return None
+
+    try:
+        value = int(choice)
+    except ValueError:
+        print(f"{c.RED}Invalid option.{c.RESET}")
+        return None
+
+    if 1 <= value <= len(summaries):
+        return summaries[value - 1]
+
+    matching = [s for s in summaries if int(s.get("pull_request_id", 0)) == value]
+    if len(matching) == 1:
+        return matching[0]
+
+    if len(matching) > 1:
+        print(f"{c.YELLOW}Multiple repositories contain PR #{value}. Select by list number.{c.RESET}")
+        return None
+
+    print(f"{c.RED}PR #{value} was not found in the usage log.{c.RESET}")
+    return None
+
+
+def _format_usage_details(summary: dict) -> str:
+    """Formats detailed token and cost values for one PR."""
+    c = Colors
+    tokens = summary.get("tokens", {})
+    cost = summary.get("cost")
+
+    lines = [
+        f"\n{c.BLUE}{c.BOLD}{'─' * 60}{c.RESET}",
+        f"{c.BOLD}  Usage for PR #{summary['pull_request_id']}{c.RESET}",
+        f"{c.BLUE}{'─' * 60}{c.RESET}",
+        f"{c.CYAN}  Repository:{c.RESET} {summary['repository']}",
+        f"{c.CYAN}  Review runs:{c.RESET} {summary.get('reviews', 0)}",
+        f"{c.CYAN}  LLM calls:{c.RESET} {tokens.get('calls', 0)}",
+        f"{c.CYAN}  Comments generated:{c.RESET} {summary.get('comments_generated', 0)}",
+        f"{c.CYAN}  Latest review:{c.RESET} {summary.get('latest_timestamp') or 'unknown'}",
+        "",
+        f"{c.BOLD}  Tokens{c.RESET}",
+        f"    Input:  {tokens.get('prompt_tokens', 0)}",
+        f"    Output: {tokens.get('completion_tokens', 0)}",
+        f"    Total:  {tokens.get('total_tokens', 0)}",
+    ]
+
+    if tokens.get("estimated"):
+        lines.append(f"    {c.YELLOW}Some token values are estimated.{c.RESET}")
+
+    lines.extend([
+        "",
+        f"{c.BOLD}  Cost{c.RESET}",
+        f"    Total: {_format_cost_value(cost)}",
+    ])
+
+    if summary.get("missing_pricing"):
+        lines.append(
+            "    Missing pricing: "
+            + ", ".join(summary.get("missing_pricing", []))
+        )
+
+    providers = ", ".join(summary.get("providers", [])) or "unknown"
+    models = ", ".join(summary.get("models", [])) or "unknown"
+    lines.extend([
+        "",
+        f"{c.CYAN}  Providers:{c.RESET} {providers}",
+        f"{c.CYAN}  Models:{c.RESET} {models}",
+        f"{c.BLUE}{'─' * 60}{c.RESET}\n",
+    ])
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Command execution functions
 # ---------------------------------------------------------------------------
@@ -383,6 +533,19 @@ def run_review(args: argparse.Namespace) -> int:
         config.dry_run = True
     if getattr(args, "auto_post", False):
         config.auto_post_comments = True
+    if getattr(args, "usage_file", None):
+        config.usage_file = args.usage_file
+
+    command = args.command
+
+    # Usage inspection only reads the local usage log, so it should work
+    # even when LLM or TFS credentials are not configured.
+    if command == "usage":
+        formatter = ReviewFormatter(
+            color=config.color_output,
+            output_format=config.output_format,
+        )
+        return run_usage(args, config, formatter)
 
     # --- Validate configuration ---
     issues = config.validate()
@@ -401,8 +564,6 @@ def run_review(args: argparse.Namespace) -> int:
     )
 
     # --- Commands that don't need a Git repo ---
-    command = args.command
-
     if command == "pr-review":
         return run_pr_review_workflow(args, config, formatter)
     elif command == "list-prs":
@@ -815,6 +976,37 @@ def run_list_prs(args: argparse.Namespace, config: ReviewConfig,
 
 
 # ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+def run_usage(args: argparse.Namespace, config: ReviewConfig,
+              formatter: ReviewFormatter) -> int:
+    """Lists reviewed PRs and shows token/cost usage for the selected PR."""
+    usage_file = getattr(args, "usage_file", None) or config.usage_file
+    resolved_usage_file = resolve_usage_file(usage_file)
+
+    try:
+        records = load_usage_records(usage_file)
+    except OSError as exc:
+        print(formatter.format_error(f"Could not read usage file: {exc}"))
+        return 1
+
+    summaries = summarize_usage_by_pr(records)
+    if not summaries:
+        print(formatter.format_info(
+            f"No PR usage records found at {resolved_usage_file}."
+        ))
+        return 0
+
+    print(_format_usage_pr_list(summaries, resolved_usage_file))
+    selected = _select_usage_summary_interactive(summaries)
+    if selected is None:
+        return 0
+
+    print(_format_usage_details(selected))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Interactive mode
 # ---------------------------------------------------------------------------
 def interactive_mode() -> int:
@@ -834,13 +1026,14 @@ def interactive_mode() -> int:
     print(f"  {c.CYAN}{c.BOLD}── Pull Requests (recommended) ──{c.RESET}")
     print(f"  {c.CYAN}1{c.RESET}) 🌟 Pull Request Review (list PRs and select)")
     print(f"  {c.CYAN}2{c.RESET}) 📋 List active Pull Requests")
+    print(f"  {c.CYAN}3{c.RESET}) 📊 Check review usage")
     print(f"")
     print(f"  {c.CYAN}{c.BOLD}── Other ──{c.RESET}")
-    print(f"  {c.CYAN}3{c.RESET}) Current configuration")
+    print(f"  {c.CYAN}4{c.RESET}) Current configuration")
     print(f"  {c.CYAN}0{c.RESET}) Exit")
 
     try:
-        choice = input(f"\n{c.BOLD}Choose [0-3]: {c.RESET}").strip()
+        choice = input(f"\n{c.BOLD}Choose [0-4]: {c.RESET}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\n")
         return 0
@@ -856,6 +1049,9 @@ def interactive_mode() -> int:
         return _interactive_list_prs(config)
 
     if choice == "3":
+        return _interactive_usage(config)
+
+    if choice == "4":
         _show_config(config)
         return 0
 
@@ -898,6 +1094,14 @@ def _interactive_pr_review(config: ReviewConfig) -> int:
 def _interactive_list_prs(config: ReviewConfig) -> int:
     """Lists PRs interactively."""
     argv = ["list-prs"]
+    parser = build_parser()
+    parsed = parser.parse_args(argv)
+    return run_review(parsed)
+
+
+def _interactive_usage(config: ReviewConfig) -> int:
+    """Shows usage records interactively."""
+    argv = ["usage"]
     parser = build_parser()
     parsed = parser.parse_args(argv)
     return run_review(parsed)

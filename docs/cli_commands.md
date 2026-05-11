@@ -268,6 +268,40 @@ ai-review init --help
 | `--status` | `active`, `completed`, `abandoned`, `all` | Status do PR |
 
 
+## usage - Verificar uso de tokens e custo
+
+Lista os Pull Requests já revistos a partir do ficheiro de usage e permite
+selecionar um PR para ver os totais de tokens e custo.
+
+```bash
+ai-review usage
+```
+
+Usar um ficheiro de usage específico:
+
+```bash
+ai-review usage --usage-file ./reports/ai-review-usage.jsonl
+```
+
+O comando mostra os PRs agregados por repositório e ID de PR. Depois de
+selecionar um PR por número da lista ou ID, apresenta:
+
+- Tokens de input
+- Tokens de output
+- Total de tokens
+- Custo total estimado, se `usage.pricing` estiver configurado
+- Providers/modelos usados
+- Número de execuções de review e chamadas ao LLM
+
+## Opções de `usage`
+
+| Flag | Valores | Descrição |
+|------|--------|-----------|
+| `--usage-file` | caminho | Ficheiro JSONL com usage guardado |
+| `--config` | caminho | Ficheiro de configuração |
+| `--no-color` | — | Desabilitar cores |
+
+
 ## Configuração por Ficheiro
 
 Embora muitas opções sejam disponíveis via CLI, a configuração padrão vem de `config.yaml`:

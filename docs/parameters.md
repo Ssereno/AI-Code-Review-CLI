@@ -43,6 +43,13 @@ Cost is only calculated when `usage.pricing` contains the provider/model price.
 Prices are intentionally configurable because provider prices and enterprise
 contracts can change independently from this CLI.
 
+Inspect stored usage interactively:
+
+```bash
+ai-review usage
+ai-review usage --usage-file .ai-review-usage.jsonl
+```
+
 ## File Extension Filtering
 
 The `file_extensions_filter` option works as an **allowlist**: only files with the listed extensions are sent to the LLM.
