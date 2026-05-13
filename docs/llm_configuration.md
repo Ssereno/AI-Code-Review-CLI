@@ -24,6 +24,7 @@ llm:
   provider: openai
   model: gpt-4o
   max_tokens: 4096
+  max_prompt_tokens: 0
   temperature: 0.3
 
 openai:
@@ -41,6 +42,10 @@ openai:
 - `gpt-4-turbo` — Cheaper than GPT-4o
 - `gpt-4` — More powerful, more expensive
 - `gpt-3.5-turbo` — Fast and cheap
+
+`max_prompt_tokens` controls the estimated prompt budget before repository
+context is trimmed. Use `0` for the provider default. Bedrock defaults to
+`180000` so full repository context stays below its hard prompt limit.
 
 ### Azure OpenAI
 

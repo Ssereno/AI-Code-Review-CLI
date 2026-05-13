@@ -3,6 +3,9 @@
 ## General Parameters
 
 ```yaml
+llm:
+  max_prompt_tokens: 0      # 0 = provider default/no limit; Bedrock defaults to 180000
+
 review:
   language: en               # Language for comments
   verbosity: detailed        # detailed | quick | security
@@ -55,7 +58,7 @@ review:
 
 ## Full Repository Context
 
-The default review scope, `diff_with_context`, reviews modified PR lines while also sending the unified diff context plus read-only full repository and work item context to the LLM. Context and deleted lines are used for understanding only; findings and inline comments must still point to added or modified PR lines. Comments outside changed PR lines are discarded before posting. Use `diff_only` to review only the PR changes without surrounding context, or `full_code` to review the full content of changed files.
+The default review scope, `diff_with_context`, reviews modified PR lines while also sending the unified diff context plus read-only full repository and work item context to the LLM. Context and deleted lines are used for understanding only; findings and inline comments must still point to added or modified PR lines. Comments outside changed PR lines are discarded before posting. If the combined prompt would exceed `llm.max_prompt_tokens`, only repository context is trimmed; the PR diff and work item documentation are preserved. Use `diff_only` to review only the PR changes without surrounding context, or `full_code` to review the full content of changed files.
 
 The `review.project_context` block controls the full eligible repository snapshot sent to the LLM alongside the PR diff when `scope: diff_with_context` is selected. This context is read-only: the prompt tells the model to use it for architecture, contracts, dependencies, and call sites, while findings and inline comments must still point to modified PR lines. Set `max_files` or `max_chars` to a positive value only when you need to cap very large repositories.
 

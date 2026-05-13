@@ -61,6 +61,7 @@ class ReviewConfig:
     api_base_url: str = ""                  # Base URL for APIs (override)
     model: str = ""                         # Model to use (empty = provider default)
     max_tokens: int = 4096
+    max_prompt_tokens: int = 0              # 0 = provider default/no prompt limit
     temperature: float = 0.3
 
     # --- Provider-specific keys (alternatives) -------------------------
@@ -226,6 +227,7 @@ class ReviewConfig:
             "api_base_url": ("llm", "api_base_url"),
             "model": ("llm", "model"),
             "max_tokens": ("llm", "max_tokens"),
+            "max_prompt_tokens": ("llm", "max_prompt_tokens"),
             "temperature": ("llm", "temperature"),
             # Provider-specific
             "openai_api_key": ("openai", "api_key"),
@@ -368,6 +370,12 @@ class ReviewConfig:
             issues.append(
                 f"Invalid max_diff_lines: '{self.max_diff_lines}'. "
                 "Use an integer greater than 0."
+            )
+
+        if self.max_prompt_tokens < 0:
+            issues.append(
+                f"Invalid llm.max_prompt_tokens: '{self.max_prompt_tokens}'. "
+                "Use 0 for provider default/no limit or an integer greater than 0."
             )
 
         if self.project_context_max_files < 0:

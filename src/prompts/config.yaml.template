@@ -26,6 +26,10 @@ llm:
   # Maximum tokens in response
   max_tokens: 4096
 
+  # Maximum estimated prompt tokens before repository context is trimmed.
+  # 0 = provider default; Bedrock defaults to 180000 to stay below hard limits.
+  max_prompt_tokens: 0
+
   # Temperature (0.0 = deterministic, 1.0 = creative)
   temperature: 0.3
 

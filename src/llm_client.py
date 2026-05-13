@@ -24,6 +24,12 @@ class LLMError(Exception):
     pass
 
 
+ESTIMATED_CHARS_PER_TOKEN = 3
+DEFAULT_PROMPT_TOKEN_LIMITS = {
+    "bedrock": 180000,
+}
+
+
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
@@ -349,6 +355,99 @@ class LLMClient:
     def __init__(self, config: ReviewConfig):
         self.config = config
 
+    def _effective_prompt_token_limit(self) -> int:
+        """Returns the configured/provider prompt budget, or 0 when unlimited."""
+        configured = int(getattr(self.config, "max_prompt_tokens", 0) or 0)
+        if configured > 0:
+            return configured
+        return DEFAULT_PROMPT_TOKEN_LIMITS.get(self.config.llm_provider.lower(), 0)
+
+    def _estimate_prompt_tokens(self, *parts: str) -> int:
+        """Conservative token estimate used only to avoid provider hard limits."""
+        total_chars = sum(len(part or "") for part in parts)
+        return (total_chars + ESTIMATED_CHARS_PER_TOKEN - 1) // ESTIMATED_CHARS_PER_TOKEN
+
+    def _trim_project_context_for_prompt_budget(
+        self,
+        *,
+        system_prompt: str,
+        diff: str,
+        files_summary: list[dict],
+        context: str,
+        project_context: str,
+        work_item_context: str,
+    ) -> str:
+        """Trims repository context when the full prompt would exceed the budget."""
+        limit = self._effective_prompt_token_limit()
+        if limit <= 0 or not project_context:
+            return project_context
+
+        full_message = build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+        if self._estimate_prompt_tokens(system_prompt, full_message) <= limit:
+            return project_context
+
+        base_message = build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context="",
+            work_item_context=work_item_context,
+        )
+        base_tokens = self._estimate_prompt_tokens(system_prompt, base_message)
+        available_tokens = limit - base_tokens
+        if available_tokens <= 0:
+            return (
+                "[Repository context omitted because the PR diff, work item "
+                "documentation, and prompt instructions already reached the "
+                f"configured prompt budget of {limit} estimated tokens.]"
+            )
+
+        notice = (
+            "\n\n[Repository context truncated to fit the configured prompt "
+            f"budget of {limit} estimated tokens.]"
+        )
+        char_budget = max(
+            0,
+            (available_tokens * ESTIMATED_CHARS_PER_TOKEN) - len(notice),
+        )
+        if char_budget <= 0:
+            return notice.strip()
+
+        return project_context[:char_budget].rstrip() + notice
+
+    def _build_user_message_with_prompt_budget(
+        self,
+        *,
+        system_prompt: str,
+        diff: str,
+        files_summary: list[dict],
+        context: str,
+        project_context: str,
+        work_item_context: str,
+    ) -> str:
+        """Builds the user prompt, trimming only repo context if necessary."""
+        project_context = self._trim_project_context_for_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+        return build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+
     def _load_custom_prompt_text(self) -> str:
         """Loads extra instructions from a configurable Markdown file."""
         path = (self.config.custom_prompt_file or "").strip()
@@ -400,10 +499,11 @@ class LLMClient:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
             merged_context = context
 
-        user_message = build_user_message(
-            diff,
-            files_summary,
-            merged_context,
+        user_message = self._build_user_message_with_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
         )
@@ -466,10 +566,11 @@ class LLMClient:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
             merged_context = context
 
-        user_message = build_user_message(
-            diff,
-            files_summary,
-            merged_context,
+        user_message = self._build_user_message_with_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
         )

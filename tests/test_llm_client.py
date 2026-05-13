@@ -124,6 +124,31 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "```diff" in message
 
 
+def test_prompt_budget_trims_repository_context() -> None:
+    """It should trim only repository context when a prompt budget is configured."""
+    client = LLMClient(make_llm_config(max_prompt_tokens=160))
+    message = client._build_user_message_with_prompt_budget(
+        system_prompt="system",
+        diff="+print('x')",
+        files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
+        context="manual context",
+        project_context="repo-context-line\n" * 500,
+        work_item_context="acceptance criteria",
+    )
+
+    assert "acceptance criteria" in message
+    assert "+print('x')" in message
+    assert "Repository context truncated" in message
+    assert len(message) < len("repo-context-line\n" * 500)
+
+
+def test_bedrock_has_default_prompt_budget() -> None:
+    """It should reserve a default prompt budget for Bedrock hard limits."""
+    client = LLMClient(make_llm_config(llm_provider="bedrock"))
+
+    assert client._effective_prompt_token_limit() == 180000
+
+
 def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
     """It should handle empty, missing and readable prompt files."""
     config = make_llm_config(custom_prompt_file="")

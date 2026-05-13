@@ -146,6 +146,7 @@ llm:
   api_base_url: https://proxy.local
   model: gpt-4o-mini
   max_tokens: 1024
+  max_prompt_tokens: 123456
   temperature: 0.7
 openai:
   api_key: openai-key
@@ -215,6 +216,7 @@ output:
     assert config.api_base_url == "https://proxy.local"
     assert config.model == "gpt-4o-mini"
     assert config.max_tokens == 1024
+    assert config.max_prompt_tokens == 123456
     assert config.temperature == 0.7
     assert config.openai_api_key == "openai-key"
     assert config.gemini_api_key == "gemini-key"
@@ -293,6 +295,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     config = review_config_factory(
         verbosity="verbose",
         review_scope="everything",
+        max_prompt_tokens=-1,
         max_diff_files=0,
         max_diff_lines=0,
         project_context_max_files=-1,
@@ -305,6 +308,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
 
     assert any("Invalid verbosity" in issue for issue in issues)
     assert any("Invalid review scope" in issue for issue in issues)
+    assert any("Invalid llm.max_prompt_tokens" in issue for issue in issues)
     assert any("Invalid max_diff_files" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
     assert any("Invalid project_context.max_files" in issue for issue in issues)

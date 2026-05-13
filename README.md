@@ -98,6 +98,11 @@ review:
     max_items: 20
 ```
 
+For providers with hard prompt limits, repository context is trimmed before the
+LLM call when needed. Bedrock uses a default estimated prompt budget of 180000
+tokens; override it with `llm.max_prompt_tokens` if your model supports more or
+less.
+
 ## Development & Testing
 
 This is a standard Python project with the following structure:
