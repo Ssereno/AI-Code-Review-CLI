@@ -22,6 +22,34 @@ pr:
   comment_mode: structured   # structured | inline
 ```
 
+## Usage Tracking
+
+Each completed PR review can append one JSON record with the LLM calls, token
+totals, and optional cost estimate.
+
+```yaml
+usage:
+  enabled: true
+  file: .ai-review-usage.jsonl
+  pricing:
+    openai:
+      gpt-4o-mini:
+        input_per_1m: 0.15
+        output_per_1m: 0.60
+        currency: USD
+```
+
+Cost is only calculated when `usage.pricing` contains the provider/model price.
+Prices are intentionally configurable because provider prices and enterprise
+contracts can change independently from this CLI.
+
+Inspect stored usage interactively:
+
+```bash
+ai-review usage
+ai-review usage --usage-file .ai-review-usage.jsonl
+```
+
 ## File Extension Filtering
 
 The `file_extensions_filter` option works as an **allowlist**: only files with the listed extensions are sent to the LLM.

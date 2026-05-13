@@ -11,6 +11,7 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
 - **Customizable Prompts** — Markdown-based review guidelines
+- **Usage Tracking** — Store per-PR token usage and optional cost estimates
 - **Interactive CLI** — Menu-driven selection and confirmation
 
 ## Installation & Quick Start
@@ -63,6 +64,9 @@ ai-review pr-review 42
 
 # Dry-run (preview without posting)
 ai-review pr-review 42 --dry-run
+
+# Check stored token/cost usage
+ai-review usage
 ```
 
 ## Configuration File

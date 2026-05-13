@@ -188,6 +188,15 @@ output:
   format: json
   file: review.json
   color: false
+usage:
+  enabled: false
+  file: usage.jsonl
+  pricing:
+    openai:
+      gpt-4o-mini:
+        input_per_1m: 0.15
+        output_per_1m: 0.60
+        currency: USD
 """.strip()
         )
     )
@@ -228,6 +237,9 @@ output:
     assert config.output_format == "json"
     assert config.output_file == "review.json"
     assert config.color_output is False
+    assert config.usage_tracking_enabled is False
+    assert config.usage_file == "usage.jsonl"
+    assert config.usage_pricing["openai"]["gpt-4o-mini"]["input_per_1m"] == 0.15
 
 
 def test_validate_returns_early_for_unknown_provider() -> None:
