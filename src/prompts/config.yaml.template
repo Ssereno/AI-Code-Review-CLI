@@ -97,6 +97,54 @@ review:
   # Example: [".py", ".js", ".cs", ".ts"]
   file_extensions_filter: []
 
+  # Project context sent to the LLM as read-only reference.
+  # Review comments are still restricted to modified PR lines.
+  project_context:
+    enabled: true
+    max_files: 500
+    max_chars: 300000
+    # Empty list = common text/code files. Set an allowlist to narrow context.
+    # Example: [".py", ".cs", ".ts", ".yaml"]
+    file_extensions: []
+    exclude_patterns:
+      - .git
+      - .hg
+      - .svn
+      - .venv
+      - venv
+      - node_modules
+      - __pycache__
+      - .pytest_cache
+      - .mypy_cache
+      - .ruff_cache
+      - dist
+      - build
+      - coverage
+      - bin
+      - obj
+      - .env
+      - .env.*
+      - "*.lock"
+      - package-lock.json
+      - yarn.lock
+      - pnpm-lock.yaml
+      - poetry.lock
+
+  # Documentation fields from work items linked to the PR.
+  # This is also read-only context; findings still need modified PR lines.
+  work_item_context:
+    enabled: true
+    max_items: 20
+    max_chars: 100000
+    fields:
+      - System.Title
+      - System.WorkItemType
+      - System.State
+      - System.Description
+      - Microsoft.VSTS.Common.AcceptanceCriteria
+      - Microsoft.VSTS.TCM.ReproSteps
+      - Microsoft.VSTS.TCM.SystemInfo
+
 # ---------------------------------------------------------------------------
 # Pull Request Review Configuration
 # ---------------------------------------------------------------------------

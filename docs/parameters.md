@@ -11,6 +11,17 @@ review:
   max_diff_files: 50         # Max files sent to LLM
   max_diff_lines: 2000       # Max lines per file
   file_extensions_filter: [".cs", ".ts", ".py"]  # Allowlist (empty = all)
+  project_context:
+    enabled: true            # Include repository context from the PR source branch
+    max_files: 500           # Max project files included as context
+    max_chars: 300000        # Max project-context characters
+    file_extensions: []      # Empty = common text/code files
+    exclude_patterns: ["node_modules", "dist", ".env", "*.lock"]
+  work_item_context:
+    enabled: true            # Include documentation from linked work items
+    max_items: 20            # Max linked work items included as context
+    max_chars: 100000        # Max work-item context characters
+    fields: ["System.Description", "Microsoft.VSTS.Common.AcceptanceCriteria"]
 ```
 
 ## Comment Parameters
@@ -41,6 +52,52 @@ review:
 ```
 
 > **Note:** If no eligible files remain after filtering, the review ends with a warning without calling the LLM.
+
+## Project Context
+
+The `review.project_context` block controls the repository snapshot sent to the LLM alongside the PR diff. This context is read-only: the prompt tells the model to use it for architecture, contracts, dependencies, and call sites, while findings and inline comments must still point to modified PR lines.
+
+```yaml
+review:
+  project_context:
+    enabled: true
+    max_files: 500
+    max_chars: 300000
+    file_extensions: []      # Empty = common text/code files
+    exclude_patterns:
+      - node_modules
+      - dist
+      - .env
+      - "*.lock"
+```
+
+Use `file_extensions` to narrow context for very large repositories:
+
+```yaml
+review:
+  project_context:
+    file_extensions: [".cs", ".ts", ".py", ".yaml"]
+```
+
+## Linked Work Item Documentation
+
+The `review.work_item_context` block fetches work items linked to the PR and sends selected documentation fields to the LLM. Common fields include title, description, acceptance criteria, repro steps, and system info. This context is read-only: findings and inline comments must still point to modified PR lines.
+
+```yaml
+review:
+  work_item_context:
+    enabled: true
+    max_items: 20
+    max_chars: 100000
+    fields:
+      - System.Title
+      - System.WorkItemType
+      - System.State
+      - System.Description
+      - Microsoft.VSTS.Common.AcceptanceCriteria
+      - Microsoft.VSTS.TCM.ReproSteps
+      - Microsoft.VSTS.TCM.SystemInfo
+```
 
 ## Custom Prompt (Markdown)
 

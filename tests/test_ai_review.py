@@ -190,6 +190,8 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
     tfs.get_pull_request_diff.return_value = diff
+    tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
+    tfs.get_project_context.return_value = "PROJECT CONTEXT"
 
     llm = MagicMock()
     llm.review.return_value = "General review"
@@ -230,6 +232,26 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert result == 0
     save_output.assert_called_once()
     tfs.post_review_comments.assert_not_called()
+    tfs.get_work_item_context.assert_called_once_with(
+        "repo-a",
+        123,
+        max_items=review_config.work_item_context_max_items,
+        max_chars=review_config.work_item_context_max_chars,
+        fields=review_config.work_item_context_fields,
+    )
+    tfs.get_project_context.assert_called_once_with(
+        "repo-a",
+        "feature/test",
+        max_files=review_config.project_context_max_files,
+        max_chars=review_config.project_context_max_chars,
+        file_extensions=review_config.project_context_file_extensions,
+        exclude_patterns=review_config.project_context_exclude_patterns,
+    )
+    assert llm.review.call_args.kwargs["project_context"] == "PROJECT CONTEXT"
+    assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == "PROJECT CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    assert llm.review.call_args.kwargs["diff"] == diff
     print_mock.assert_any_call("REVIEW")
 
 
@@ -255,6 +277,8 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
     tfs.get_pull_request_diff.return_value = diff
+    tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
+    tfs.get_project_context.return_value = "PROJECT CONTEXT"
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()

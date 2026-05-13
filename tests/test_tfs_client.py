@@ -349,6 +349,95 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "No textual differences detected" in no_text[-1]
 
 
+def test_get_project_context_fetches_source_branch_files(mocker) -> None:
+    """It should build bounded repository context from the PR source branch."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/node_modules/pkg/index.js", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+                {"path": "/src", "isFolder": True},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["# docs", "print('x')"],
+    )
+
+    context = client.get_project_context(
+        "repo-a",
+        "refs/heads/feature/context",
+        max_files=10,
+        max_chars=1000,
+    )
+
+    assert "### Project context" in context
+    assert "Source branch: feature/context" in context
+    assert "/README.md" in context
+    assert "/src/app.py" in context
+    assert "node_modules" not in context
+    assert "logo.png" not in context
+    path, params = get_mock.call_args.args[:2]
+    assert path == "git/repositories/repo-a/items"
+    assert params["recursionLevel"] == "Full"
+    assert params["versionDescriptor.version"] == "feature/context"
+    assert get_file.call_count == 2
+    assert get_file.call_args_list[0].kwargs["version"] == "feature/context"
+
+
+def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
+    """It should build read-only context from PR-linked work item fields."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": "101"}, {"id": "not-a-number"}]},
+            {
+                "value": [
+                    {
+                        "id": 101,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Validate checkout totals</p>",
+                            "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>Total includes tax</li></ul>",
+                        },
+                        "relations": [
+                            {
+                                "rel": "Hyperlink",
+                                "url": "https://example.invalid/spec",
+                                "attributes": {"comment": "Spec"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context("repo-a", 42, max_items=5, max_chars=5000)
+
+    assert "Linked work item documentation" in context
+    assert "Work Item 101: Checkout validation" in context
+    assert "Validate checkout totals" in context
+    assert "Total includes tax" in context
+    assert "Spec: https://example.invalid/spec" in context
+    work_item_call = get_mock.call_args_list[0]
+    assert work_item_call.args[0] == "git/repositories/repo-a/pullRequests/42/workitems"
+    assert work_item_call.kwargs["api_version"] == "7.1"
+    details_call = get_mock.call_args_list[1]
+    assert details_call.args[0] == "wit/workitems"
+    assert details_call.args[1]["ids"] == "101"
+    assert details_call.args[1]["$expand"] == "relations"
+    assert details_call.kwargs["api_version"] == "7.1"
+
+
 def test_raw_get_and_comment_endpoints(mocker) -> None:
     """It should expose raw file content and build comment payloads correctly."""
     client = TFSClient(make_tfs_config())

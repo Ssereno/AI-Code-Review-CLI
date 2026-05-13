@@ -15,7 +15,10 @@ Works with both on-premises TFS and Azure DevOps Services.
 
 import base64
 import difflib
+import fnmatch
+import html
 import os
+import re
 from typing import Optional
 
 from .config import ReviewConfig
@@ -24,6 +27,81 @@ from .config import ReviewConfig
 class TFSError(Exception):
     """Exception for TFS/Azure DevOps communication errors."""
     pass
+
+
+DEFAULT_PROJECT_CONTEXT_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cfg",
+    ".cmd",
+    ".conf",
+    ".cpp",
+    ".cs",
+    ".csproj",
+    ".css",
+    ".fs",
+    ".fsproj",
+    ".go",
+    ".gradle",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".less",
+    ".md",
+    ".php",
+    ".props",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".rst",
+    ".sass",
+    ".scala",
+    ".scss",
+    ".sh",
+    ".sln",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".targets",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".vb",
+    ".vue",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+
+DEFAULT_PROJECT_CONTEXT_FILENAMES = {
+    "dockerfile",
+    "makefile",
+    "rakefile",
+    "gemfile",
+    "procfile",
+    "requirements",
+}
+
+WORK_ITEM_CONTEXT_FIELD_LABELS = {
+    "System.Title": "Title",
+    "System.WorkItemType": "Type",
+    "System.State": "State",
+    "System.Description": "Description",
+    "Microsoft.VSTS.Common.AcceptanceCriteria": "Acceptance Criteria",
+    "Microsoft.VSTS.TCM.ReproSteps": "Repro Steps",
+    "Microsoft.VSTS.TCM.SystemInfo": "System Info",
+}
+
+DEFAULT_WORK_ITEM_CONTEXT_FIELDS = list(WORK_ITEM_CONTEXT_FIELD_LABELS)
 
 
 class TFSClient:
@@ -474,6 +552,373 @@ class TFSClient:
             params["versionDescriptor.versionType"] = version_type
 
         return self._get_raw(path, params)
+
+    # ==================================================================
+    # Repository Context
+    # ==================================================================
+    def get_project_context(self, repository: str, branch: str,
+                            max_files: int = 500,
+                            max_chars: int = 300000,
+                            file_extensions: Optional[list[str]] = None,
+                            exclude_patterns: Optional[list[str]] = None) -> str:
+        """
+        Builds a repository snapshot to use as read-only LLM context.
+
+        The returned text is intentionally separate from the review diff. The
+        LLM can use it to understand contracts and call sites, but findings
+        must still be anchored to lines in the PR diff.
+        """
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name:
+            return ""
+
+        files = self._list_repository_files(repository, branch_name)
+        extensions = self._normalize_extensions(file_extensions)
+        eligible_paths = [
+            item.get("path", "")
+            for item in files
+            if self._is_project_context_file(
+                item=item,
+                file_extensions=extensions,
+                exclude_patterns=exclude_patterns,
+            )
+        ]
+
+        if not eligible_paths:
+            return ""
+
+        eligible_paths = sorted(set(eligible_paths))
+        selected_paths = eligible_paths[:max_files]
+        omitted_files = max(0, len(eligible_paths) - len(selected_paths))
+
+        parts = [
+            "### Project context",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            "Use this project snapshot only to understand existing architecture, "
+            "contracts, dependencies, and call sites. Do not report issues from "
+            "this context unless the issue is on a modified line in the PR diff.",
+            "",
+        ]
+
+        used_chars = 0
+        included_files = 0
+        truncated = False
+
+        for path in selected_paths:
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+
+            try:
+                content = self._get_file_content(
+                    repository,
+                    path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                continue
+
+            if len(content) > remaining:
+                content = content[:remaining]
+                truncated = True
+
+            parts.extend([
+                f"#### {path}",
+                "````text",
+                content,
+                "````",
+                "",
+            ])
+            used_chars += len(content)
+            included_files += 1
+
+            if truncated:
+                break
+
+        if included_files == 0:
+            return ""
+
+        if truncated or omitted_files:
+            parts.append(
+                "[Project context truncated: "
+                f"included {included_files} file(s), omitted {omitted_files} file(s), "
+                f"used {used_chars} of {max_chars} configured characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def _list_repository_files(self, repository: str, branch: str) -> list[dict]:
+        """Lists files in a repository branch recursively."""
+        path = f"git/repositories/{repository}/items"
+        params = {
+            "scopePath": "/",
+            "recursionLevel": "Full",
+            "includeContentMetadata": True,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+        }
+        data = self._get(path, params)
+        return data.get("value", [])
+
+    def _is_project_context_file(self, item: dict, file_extensions: list[str],
+                                 exclude_patterns: Optional[list[str]]) -> bool:
+        """Returns whether a repository item should be included as context."""
+        if item.get("isFolder") or item.get("gitObjectType") == "tree":
+            return False
+
+        path = item.get("path", "")
+        if not path or self._is_context_path_excluded(path, exclude_patterns):
+            return False
+
+        filename = os.path.basename(path).lower()
+        extension = os.path.splitext(filename)[1].lower()
+
+        if file_extensions:
+            return extension in file_extensions
+
+        return (
+            extension in DEFAULT_PROJECT_CONTEXT_EXTENSIONS
+            or filename in DEFAULT_PROJECT_CONTEXT_FILENAMES
+        )
+
+    def _is_context_path_excluded(self, path: str,
+                                  exclude_patterns: Optional[list[str]]) -> bool:
+        """Checks path against configured directory, file and glob exclusions."""
+        patterns = (
+            exclude_patterns
+            if exclude_patterns is not None
+            else self.config.project_context_exclude_patterns
+        )
+        normalized = path.replace("\\", "/").lstrip("/").lower()
+        path_parts = normalized.split("/")
+
+        for pattern in patterns or []:
+            candidate = str(pattern).replace("\\", "/").strip().lower()
+            if not candidate:
+                continue
+
+            glob_candidate = candidate.lstrip("/")
+            if fnmatch.fnmatch(normalized, glob_candidate):
+                return True
+            if any(fnmatch.fnmatch(part, glob_candidate) for part in path_parts):
+                return True
+
+            plain = glob_candidate.strip("/")
+            if plain in path_parts:
+                return True
+            if normalized == plain or normalized.startswith(f"{plain}/"):
+                return True
+
+        return False
+
+    def _normalize_extensions(self, extensions: Optional[list[str]]) -> list[str]:
+        """Normalizes extension allowlists to dot-prefixed lowercase strings."""
+        normalized = []
+        for ext in extensions or []:
+            value = str(ext).strip().lower()
+            if not value:
+                continue
+            if not value.startswith("."):
+                value = f".{value}"
+            normalized.append(value)
+        return normalized
+
+    # ==================================================================
+    # Work Item Context
+    # ==================================================================
+    def get_work_item_context(self, repository: str, pr_id: int,
+                              max_items: int = 20,
+                              max_chars: int = 100000,
+                              fields: Optional[list[str]] = None) -> str:
+        """
+        Builds read-only context from documentation fields on PR-linked work items.
+        """
+        refs = self._list_pull_request_work_items(repository, pr_id)
+        ids = [
+            int(ref["id"])
+            for ref in refs
+            if str(ref.get("id", "")).isdigit()
+        ]
+        if not ids:
+            return ""
+
+        selected_ids = ids[:max_items]
+        omitted_items = max(0, len(ids) - len(selected_ids))
+        requested_fields = self._resolve_work_item_fields(fields)
+        work_items = self._get_work_items(selected_ids, requested_fields)
+
+        if not work_items:
+            return ""
+
+        parts = [
+            "### Linked work item documentation",
+            "Use this work item context only to understand the product intent, "
+            "requirements, acceptance criteria, and test notes behind the PR. "
+            "Do not report issues from this context unless the issue is on a "
+            "modified line in the PR diff.",
+            "",
+        ]
+
+        used_chars = 0
+        included_items = 0
+        truncated = False
+
+        for work_item in work_items:
+            rendered = self._format_work_item_context(work_item, requested_fields)
+            if not rendered:
+                continue
+
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+
+            if len(rendered) > remaining:
+                rendered = rendered[:remaining]
+                truncated = True
+
+            parts.append(rendered.rstrip())
+            parts.append("")
+            used_chars += len(rendered)
+            included_items += 1
+
+            if truncated:
+                break
+
+        if included_items == 0:
+            return ""
+
+        if truncated or omitted_items:
+            parts.append(
+                "[Work item context truncated: "
+                f"included {included_items} item(s), omitted {omitted_items} item(s), "
+                f"used {used_chars} of {max_chars} configured characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def _list_pull_request_work_items(self, repository: str, pr_id: int) -> list[dict]:
+        """Lists work item references associated with a pull request."""
+        path = f"git/repositories/{repository}/pullRequests/{pr_id}/workitems"
+        data = self._get(path, api_version="7.1")
+        return data.get("value", [])
+
+    def _get_work_items(self, ids: list[int], fields: list[str]) -> list[dict]:
+        """Fetches work item details, falling back if optional fields are unavailable."""
+        params = {
+            "ids": ",".join(str(item_id) for item_id in ids),
+            "fields": ",".join(fields),
+            "$expand": "relations",
+            "errorPolicy": "Omit",
+        }
+        try:
+            data = self._get("wit/workitems", params, api_version="7.1")
+        except TFSError:
+            required_fields = [
+                "System.Title",
+                "System.WorkItemType",
+                "System.State",
+                "System.Description",
+            ]
+            params["fields"] = ",".join(required_fields)
+            data = self._get("wit/workitems", params, api_version="7.1")
+
+        return data.get("value", [])
+
+    def _resolve_work_item_fields(self, fields: Optional[list[str]]) -> list[str]:
+        """Returns deduplicated work item fields, preserving required metadata."""
+        requested = fields or DEFAULT_WORK_ITEM_CONTEXT_FIELDS
+        required = ["System.Title", "System.WorkItemType", "System.State"]
+        resolved = []
+
+        for field_name in [*required, *requested]:
+            value = str(field_name).strip()
+            if value and value not in resolved:
+                resolved.append(value)
+
+        return resolved
+
+    def _format_work_item_context(self, work_item: dict, fields: list[str]) -> str:
+        """Formats one work item as Markdown-ish read-only context."""
+        values = work_item.get("fields", {})
+        work_item_id = work_item.get("id", "")
+        title = self._field_text(values.get("System.Title", "")).strip()
+        header = f"#### Work Item {work_item_id}"
+        if title:
+            header += f": {title}"
+
+        lines = [header]
+
+        item_type = self._field_text(values.get("System.WorkItemType", "")).strip()
+        state = self._field_text(values.get("System.State", "")).strip()
+        if item_type:
+            lines.append(f"- Type: {item_type}")
+        if state:
+            lines.append(f"- State: {state}")
+
+        for field_name in fields:
+            if field_name in ("System.Title", "System.WorkItemType", "System.State"):
+                continue
+
+            text = self._field_text(values.get(field_name, "")).strip()
+            if not text:
+                continue
+
+            label = WORK_ITEM_CONTEXT_FIELD_LABELS.get(field_name, field_name)
+            lines.extend(["", f"##### {label}", text])
+
+        doc_links = self._extract_work_item_document_links(work_item)
+        if doc_links:
+            lines.extend(["", "##### Work Item Links"])
+            for link in doc_links:
+                lines.append(f"- {link}")
+
+        return "\n".join(lines)
+
+    def _extract_work_item_document_links(self, work_item: dict) -> list[str]:
+        """Extracts hyperlink/attachment references from work item relations."""
+        links = []
+        for relation in work_item.get("relations", []) or []:
+            rel = str(relation.get("rel", ""))
+            if rel not in ("Hyperlink", "AttachedFile"):
+                continue
+
+            attributes = relation.get("attributes", {}) or {}
+            label = (
+                attributes.get("name")
+                or attributes.get("comment")
+                or attributes.get("resourceCreatedDate")
+                or rel
+            )
+            url = relation.get("url", "")
+            if url:
+                links.append(f"{label}: {url}")
+
+        return links
+
+    def _field_text(self, value: object) -> str:
+        """Converts Azure DevOps HTML-rich text fields to readable plain text."""
+        if value is None:
+            return ""
+
+        text = str(value)
+        text = re.sub(
+            r"(?is)<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            lambda match: f"{match.group(2)} ({match.group(1)})",
+            text,
+        )
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", text)
+        text = re.sub(r"(?i)<li[^>]*>", "- ", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     # ==================================================================
     # Pull Requests - Comments

@@ -92,6 +92,46 @@ class ReviewConfig:
     max_diff_lines: int = 2000              # Max diff lines
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)
+    project_context_enabled: bool = True     # Include repository files as read-only context
+    project_context_max_files: int = 500     # Max project files used as context
+    project_context_max_chars: int = 300000  # Max project-context characters
+    project_context_file_extensions: list = field(default_factory=list)
+    project_context_exclude_patterns: list = field(default_factory=lambda: [
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        "coverage",
+        "bin",
+        "obj",
+        ".env",
+        ".env.*",
+        "*.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+    ])
+    work_item_context_enabled: bool = True   # Include linked work item docs as context
+    work_item_context_max_items: int = 20
+    work_item_context_max_chars: int = 100000
+    work_item_context_fields: list = field(default_factory=lambda: [
+        "System.Title",
+        "System.WorkItemType",
+        "System.State",
+        "System.Description",
+        "Microsoft.VSTS.Common.AcceptanceCriteria",
+        "Microsoft.VSTS.TCM.ReproSteps",
+        "Microsoft.VSTS.TCM.SystemInfo",
+    ])
 
     # --- PR Review ----------------------------------------------------
     auto_post_comments: bool = False        # Post comments automatically
@@ -214,6 +254,15 @@ class ReviewConfig:
             "max_diff_lines": ("review", "max_diff_lines"),
             "custom_prompt_file": ("review", "custom_prompt_file"),
             "file_extensions_filter": ("review", "file_extensions_filter"),
+            "project_context_enabled": ("review", "project_context", "enabled"),
+            "project_context_max_files": ("review", "project_context", "max_files"),
+            "project_context_max_chars": ("review", "project_context", "max_chars"),
+            "project_context_file_extensions": ("review", "project_context", "file_extensions"),
+            "project_context_exclude_patterns": ("review", "project_context", "exclude_patterns"),
+            "work_item_context_enabled": ("review", "work_item_context", "enabled"),
+            "work_item_context_max_items": ("review", "work_item_context", "max_items"),
+            "work_item_context_max_chars": ("review", "work_item_context", "max_chars"),
+            "work_item_context_fields": ("review", "work_item_context", "fields"),
             # PR
             "auto_post_comments": ("pr", "auto_post_comments"),
             "dry_run": ("pr", "dry_run"),
@@ -318,6 +367,30 @@ class ReviewConfig:
         if self.max_diff_lines <= 0:
             issues.append(
                 f"Invalid max_diff_lines: '{self.max_diff_lines}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_max_files <= 0:
+            issues.append(
+                f"Invalid project_context.max_files: '{self.project_context_max_files}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.max_chars: '{self.project_context_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.work_item_context_max_items <= 0:
+            issues.append(
+                f"Invalid work_item_context.max_items: '{self.work_item_context_max_items}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.work_item_context_max_chars <= 0:
+            issues.append(
+                f"Invalid work_item_context.max_chars: '{self.work_item_context_max_chars}'. "
                 "Use an integer greater than 0."
             )
 

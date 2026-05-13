@@ -180,6 +180,23 @@ review:
   file_extensions_filter:
     - .py
     - .md
+  project_context:
+    enabled: false
+    max_files: 123
+    max_chars: 7890
+    file_extensions:
+      - .py
+      - .yaml
+    exclude_patterns:
+      - node_modules
+      - "*.lock"
+  work_item_context:
+    enabled: false
+    max_items: 7
+    max_chars: 12345
+    fields:
+      - System.Description
+      - Custom.Documentation
 pr:
   auto_post_comments: true
   dry_run: true
@@ -222,6 +239,15 @@ output:
     assert config.max_diff_lines == 456
     assert config.custom_prompt_file == "prompt.md"
     assert config.file_extensions_filter == [".py", ".md"]
+    assert config.project_context_enabled is False
+    assert config.project_context_max_files == 123
+    assert config.project_context_max_chars == 7890
+    assert config.project_context_file_extensions == [".py", ".yaml"]
+    assert config.project_context_exclude_patterns == ["node_modules", "*.lock"]
+    assert config.work_item_context_enabled is False
+    assert config.work_item_context_max_items == 7
+    assert config.work_item_context_max_chars == 12345
+    assert config.work_item_context_fields == ["System.Description", "Custom.Documentation"]
     assert config.auto_post_comments is True
     assert config.dry_run is True
     assert config.pr_comment_mode == "general"
@@ -268,6 +294,10 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
         review_scope="everything",
         max_diff_files=0,
         max_diff_lines=0,
+        project_context_max_files=0,
+        project_context_max_chars=0,
+        work_item_context_max_items=0,
+        work_item_context_max_chars=0,
     )
 
     issues = config.validate()
@@ -276,6 +306,10 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     assert any("Invalid review scope" in issue for issue in issues)
     assert any("Invalid max_diff_files" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
+    assert any("Invalid project_context.max_files" in issue for issue in issues)
+    assert any("Invalid project_context.max_chars" in issue for issue in issues)
+    assert any("Invalid work_item_context.max_items" in issue for issue in issues)
+    assert any("Invalid work_item_context.max_chars" in issue for issue in issues)
 
 
 def test_validate_accepts_valid_bedrock_credentials(review_config_factory) -> None:

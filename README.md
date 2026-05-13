@@ -10,6 +10,7 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Dry-run Mode** — Validate reviews before posting
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
+- **Project-aware PR Context** — Sends repository and linked work item context while restricting findings to modified PR lines
 - **Customizable Prompts** — Markdown-based review guidelines
 - **Interactive CLI** — Menu-driven selection and confirmation
 
@@ -87,6 +88,13 @@ review:
   verbosity: detailed                  # or: quick, security
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
+  project_context:
+    enabled: true
+    max_files: 500
+    max_chars: 300000
+  work_item_context:
+    enabled: true
+    max_items: 20
 ```
 
 ## Development & Testing

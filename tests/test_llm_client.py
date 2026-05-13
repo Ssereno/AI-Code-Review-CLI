@@ -102,11 +102,17 @@ def test_build_user_message_includes_files_and_context() -> None:
         diff="+print('x')",
         files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
         context="Please focus on safety.",
+        project_context="Existing helper: src/helpers.py",
+        work_item_context="Acceptance Criteria: totals include tax",
     )
 
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
+    assert "Project context (read-only, not review target)" in message
+    assert "Existing helper" in message
+    assert "Linked work item documentation" in message
+    assert "totals include tax" in message
     assert "```diff" in message
 
 
@@ -136,12 +142,20 @@ def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> N
     client = LLMClient(config)
     openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
 
-    result = client.review("+code", [{"file": "a.py", "additions": 1, "deletions": 0}], context="Focus on bugs")
+    result = client.review(
+        "+code",
+        [{"file": "a.py", "additions": 1, "deletions": 0}],
+        context="Focus on bugs",
+        project_context="Repo contract",
+        work_item_context="Requirement docs",
+    )
 
     assert result == "review text"
     system_prompt, user_message = openai.call_args.args[:2]
     assert "Custom user instructions" in system_prompt
     assert "Custom context loaded from" in user_message
+    assert "Repo contract" in user_message
+    assert "Requirement docs" in user_message
 
 
 def test_review_raises_for_unsupported_provider() -> None:

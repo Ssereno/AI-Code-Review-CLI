@@ -485,6 +485,52 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
 
+    work_item_context = ""
+    if config.work_item_context_enabled:
+        print(formatter.format_progress("Getting documentation from linked work items"))
+        try:
+            work_item_context = tfs.get_work_item_context(
+                repo_name,
+                pr_id,
+                max_items=config.work_item_context_max_items,
+                max_chars=config.work_item_context_max_chars,
+                fields=config.work_item_context_fields,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                "Could not load linked work item documentation; "
+                f"continuing without it: {exc}"
+            ))
+
+        if work_item_context:
+            print(formatter.format_info(
+                f"Linked work item documentation loaded ({len(work_item_context):,} characters). "
+                "Review comments will still be limited to modified PR lines."
+            ))
+
+    project_context = ""
+    if config.project_context_enabled:
+        print(formatter.format_progress("Getting project context from source branch"))
+        try:
+            project_context = tfs.get_project_context(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                max_files=config.project_context_max_files,
+                max_chars=config.project_context_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not load project context; continuing with PR diff only: {exc}"
+            ))
+
+        if project_context:
+            print(formatter.format_info(
+                f"Project context loaded ({len(project_context):,} characters). "
+                "Review comments will still be limited to modified PR lines."
+            ))
+
     # --- Perform structured review ---
     progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")
     progress.start()
@@ -499,6 +545,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             files_summary=files_summary,
             context=getattr(args, "context", ""),
             review_scope=config.review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
         )
 
         # Get structured comments to post
@@ -507,6 +555,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             files_summary=files_summary,
             context=getattr(args, "context", ""),
             review_scope=config.review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
         )
     except LLMError as exc:
         progress.stop()
