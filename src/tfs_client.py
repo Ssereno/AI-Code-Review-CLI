@@ -16,6 +16,7 @@ Works with both on-premises TFS and Azure DevOps Services.
 import base64
 import difflib
 import fnmatch
+import hashlib
 import html
 import os
 import re
@@ -102,6 +103,19 @@ WORK_ITEM_CONTEXT_FIELD_LABELS = {
 }
 
 DEFAULT_WORK_ITEM_CONTEXT_FIELDS = list(WORK_ITEM_CONTEXT_FIELD_LABELS)
+
+TOOL_COMMENT_MARKER = "<!-- ai-code-review-cli -->"
+TOOL_COMMENT_KIND_PREFIX = "<!-- ai-code-review-kind:"
+TOOL_COMMENT_FINGERPRINT_PREFIX = "<!-- ai-code-review-fingerprint:"
+
+THREAD_STATUS_NAMES = {
+    1: "active",
+    2: "fixed",
+    3: "wontfix",
+    4: "closed",
+    5: "bydesign",
+    6: "pending",
+}
 
 
 class TFSClient:
@@ -928,6 +942,55 @@ class TFSClient:
     # ==================================================================
     # Pull Requests - Comments
     # ==================================================================
+    def list_pull_request_comment_threads(self, repository: str, pr_id: int) -> list[dict]:
+        """Lists all comment threads on a pull request."""
+        path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
+        data = self._get(path)
+        return data.get("value", [])
+
+    def plan_review_comments(self, repository: str, pr_id: int,
+                             comments: list[dict]) -> dict:
+        """
+        Compares new review comments with existing PR comments.
+
+        Returns:
+            Dict with new comments to post, duplicate comments to skip, and
+            previously fixed/closed tool comments that should be reopened.
+        """
+        threads = self.list_pull_request_comment_threads(repository, pr_id)
+        new_comments = []
+        skipped_duplicates = []
+        resolved_reappeared = []
+
+        for comment in comments:
+            match = self._find_matching_existing_comment(comment, threads)
+            if not match:
+                new_comments.append(comment)
+                continue
+
+            status_name = match["status_name"]
+            if match["is_tool_comment"] and self._is_resolved_or_closed_status(status_name):
+                resolved_reappeared.append({
+                    "comment": comment,
+                    "thread_id": match["thread_id"],
+                    "status": status_name,
+                    "fingerprint": self._comment_fingerprint(comment),
+                })
+            else:
+                skipped_duplicates.append({
+                    "comment": comment,
+                    "thread_id": match["thread_id"],
+                    "status": status_name,
+                    "is_tool_comment": match["is_tool_comment"],
+                })
+
+        return {
+            "new_comments": new_comments,
+            "skipped_duplicates": skipped_duplicates,
+            "resolved_reappeared": resolved_reappeared,
+            "existing_threads": threads,
+        }
+
     def post_general_comment(self, repository: str, pr_id: int,
                              comment: str, status: str = "active") -> dict:
         """
@@ -1065,6 +1128,45 @@ class TFSClient:
         data = {"status": self._status_to_int(status)}
         return self._patch(path, data)
 
+    def reopen_resolved_tool_comments(self, repository: str, pr_id: int,
+                                      comments_to_reopen: list[dict]) -> list[dict]:
+        """Reopens fixed/closed tool comments when the issue still appears."""
+        results = []
+
+        for item in comments_to_reopen:
+            thread_id = item.get("thread_id")
+            comment = item.get("comment", {})
+            fingerprint = item.get("fingerprint") or self._comment_fingerprint(comment)
+            body = "\n".join([
+                "**AI Code Review re-check**",
+                "",
+                "This issue still appears in the latest review, so this previously "
+                "resolved or closed thread is being reopened.",
+                "",
+                self._format_review_comment_body(comment),
+            ])
+            reply = self.tag_tool_comment(body, fingerprint, kind="recheck")
+
+            try:
+                self.update_thread_status(repository, pr_id, thread_id, "active")
+                self.reply_to_thread(repository, pr_id, thread_id, reply)
+                results.append({
+                    "success": True,
+                    "thread_id": thread_id,
+                    "file": comment.get("file", ""),
+                    "line": comment.get("line", 0),
+                })
+            except TFSError as exc:
+                results.append({
+                    "success": False,
+                    "thread_id": thread_id,
+                    "file": comment.get("file", ""),
+                    "line": comment.get("line", 0),
+                    "error": str(exc),
+                })
+
+        return results
+
     def post_review_comments(self, repository: str, pr_id: int,
                              comments: list[dict],
                              review_scope: str = "diff_with_context",
@@ -1124,7 +1226,16 @@ class TFSClient:
         return results
 
     def _format_review_comment(self, comment: dict) -> str:
-        """Formats a structured comment for Azure DevOps Markdown."""
+        """Formats and tags a structured comment for Azure DevOps Markdown."""
+        body = self._format_review_comment_body(comment)
+        return self.tag_tool_comment(
+            body,
+            self._comment_fingerprint(comment),
+            kind="review-comment",
+        )
+
+    def _format_review_comment_body(self, comment: dict) -> str:
+        """Formats the visible body of a structured review comment."""
         type_labels = {
             "bug": "Bug",
             "security": "Security",
@@ -1153,6 +1264,150 @@ class TFSClient:
             parts.append(f"**Reference:** {reference}")
 
         return "\n".join(parts)
+
+    def tag_tool_comment(self, text: str, fingerprint: str,
+                         kind: str = "comment") -> str:
+        """Adds stable metadata tags to comments created by this tool."""
+        metadata = [
+            TOOL_COMMENT_MARKER,
+            f"{TOOL_COMMENT_KIND_PREFIX}{kind} -->",
+            f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint} -->",
+        ]
+        body = text.strip()
+        if "AI Code Review" not in body:
+            body = (
+                f"{body}\n\n"
+                "---\n"
+                "_Automated comment generated by AI Code Review CLI._"
+            )
+        return "\n".join([*metadata, body])
+
+    def text_fingerprint(self, text: str) -> str:
+        """Builds a stable fingerprint for arbitrary text."""
+        normalized = self._normalize_for_match(text)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+    def has_tool_comment_fingerprint(self, threads: list[dict],
+                                     fingerprint: str) -> bool:
+        """Returns whether any existing tool comment has a fingerprint."""
+        needle = f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint}"
+        for thread in threads or []:
+            for comment in thread.get("comments", []) or []:
+                if needle in str(comment.get("content", "")):
+                    return True
+        return False
+
+    def _comment_fingerprint(self, comment: dict) -> str:
+        """Builds a stable fingerprint for a structured review comment."""
+        values = [
+            self._normalize_path(comment.get("file", "")),
+            str(comment.get("line", 0)),
+            str(comment.get("type", "")),
+            str(comment.get("severity", "")),
+            str(comment.get("comment", "")),
+            str(comment.get("suggestion", "")),
+            str(comment.get("reference", "")),
+        ]
+        return self.text_fingerprint("|".join(values))
+
+    def _find_matching_existing_comment(self, comment: dict,
+                                        threads: list[dict]) -> Optional[dict]:
+        """Finds an existing PR comment matching the generated comment."""
+        fingerprint = self._comment_fingerprint(comment)
+        fingerprint_needle = f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint}"
+
+        for thread in threads or []:
+            for existing_comment in thread.get("comments", []) or []:
+                body = str(existing_comment.get("content", ""))
+                if fingerprint_needle in body:
+                    return self._build_existing_comment_match(thread, body)
+
+        current_text = self._normalize_for_match(comment.get("comment", ""))
+        if not current_text:
+            return None
+
+        for thread in threads or []:
+            if not self._thread_matches_comment_location(thread, comment):
+                continue
+
+            for existing_comment in thread.get("comments", []) or []:
+                body = self._normalize_for_match(
+                    self._strip_tool_metadata(existing_comment.get("content", ""))
+                )
+                if current_text in body:
+                    return self._build_existing_comment_match(
+                        thread,
+                        str(existing_comment.get("content", "")),
+                    )
+
+        return None
+
+    def _build_existing_comment_match(self, thread: dict, body: str) -> dict:
+        """Builds duplicate match metadata from an Azure DevOps thread."""
+        return {
+            "thread_id": thread.get("id"),
+            "status_name": self._thread_status_name(thread.get("status")),
+            "is_tool_comment": TOOL_COMMENT_MARKER in body,
+        }
+
+    def _thread_matches_comment_location(self, thread: dict, comment: dict) -> bool:
+        """Checks whether a thread points to the same file/line as a comment."""
+        comment_file = self._normalize_path(comment.get("file", ""))
+        comment_line = self._to_int(comment.get("line", 0))
+        thread_file, thread_line = self._thread_file_line(thread)
+
+        if comment_file and thread_file and comment_file != thread_file:
+            return False
+        if comment_line > 0 and thread_line > 0 and comment_line != thread_line:
+            return False
+        return True
+
+    def _thread_file_line(self, thread: dict) -> tuple[str, int]:
+        """Returns the normalized file and line for a PR thread."""
+        context = thread.get("threadContext", {}) or {}
+        file_path = self._normalize_path(context.get("filePath", ""))
+        line = 0
+        for key in ("rightFileStart", "leftFileStart"):
+            value = context.get(key) or {}
+            line = self._to_int(value.get("line", 0))
+            if line > 0:
+                break
+        return file_path, line
+
+    def _thread_status_name(self, status: object) -> str:
+        """Normalizes Azure DevOps thread statuses to lower-case names."""
+        if isinstance(status, int):
+            return THREAD_STATUS_NAMES.get(status, "unknown")
+        if str(status).isdigit():
+            return THREAD_STATUS_NAMES.get(int(str(status)), "unknown")
+        return str(status or "unknown").replace(" ", "").lower()
+
+    def _is_resolved_or_closed_status(self, status_name: str) -> bool:
+        """Returns whether a thread status means resolved/closed."""
+        return status_name in ("fixed", "closed", "resolved")
+
+    def _strip_tool_metadata(self, text: object) -> str:
+        """Removes hidden tool metadata tags before text comparisons."""
+        value = str(text or "")
+        value = re.sub(r"<!--\s*ai-code-review-[^>]*-->\s*", "", value)
+        return value
+
+    def _normalize_for_match(self, value: object) -> str:
+        """Normalizes text for duplicate matching."""
+        text = self._field_text(value)
+        text = self._strip_tool_metadata(text)
+        return re.sub(r"\s+", " ", text).strip().lower()
+
+    def _normalize_path(self, path: object) -> str:
+        """Normalizes repository paths for duplicate matching."""
+        return str(path or "").replace("\\", "/").lstrip("/").lower()
+
+    def _to_int(self, value: object) -> int:
+        """Converts values to int with a safe fallback."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     def _status_to_int(self, status: str) -> int:
         """Converts status string to API integer."""

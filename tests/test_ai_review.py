@@ -203,9 +203,16 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
 
     llm = MagicMock()
     llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
+    structured_comments = [
         {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
     ]
+    llm.review_pr_structured.return_value = structured_comments
+    tfs.plan_review_comments.return_value = {
+        "new_comments": structured_comments,
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
@@ -291,9 +298,16 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
 
     llm = MagicMock()
     llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
+    structured_comments = [
         {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
     ]
+    llm.review_pr_structured.return_value = structured_comments
+    tfs.plan_review_comments.return_value = {
+        "new_comments": structured_comments,
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
@@ -345,6 +359,12 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     llm = MagicMock()
     llm.review.return_value = "General review"
     llm.review_pr_structured.return_value = []
+    tfs.plan_review_comments.return_value = {
+        "new_comments": [],
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff

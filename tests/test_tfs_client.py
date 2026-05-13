@@ -532,6 +532,79 @@ def test_post_review_comments_formats_and_routes_comments(mocker) -> None:
     assert results[2]["success"] is False
 
 
+def test_plan_review_comments_skips_duplicates_and_reopens_fixed_tool_comments(mocker) -> None:
+    """It should skip active duplicates and reopen fixed tool comments that reappear."""
+    client = TFSClient(make_tfs_config())
+    comment = {
+        "file": "src/app.py",
+        "line": 7,
+        "type": "bug",
+        "severity": "high",
+        "comment": "Avoid duplicate charge calculation",
+        "suggestion": "Reuse the existing total",
+    }
+    tagged_body = client._format_review_comment(comment)
+    base_thread = {
+        "id": 10,
+        "threadContext": {
+            "filePath": "/src/app.py",
+            "rightFileStart": {"line": 7},
+        },
+        "comments": [{"content": tagged_body}],
+    }
+
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={"value": [{**base_thread, "status": 1}]},
+    )
+    active_plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert active_plan["new_comments"] == []
+    assert len(active_plan["skipped_duplicates"]) == 1
+    assert active_plan["resolved_reappeared"] == []
+
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={"value": [{**base_thread, "status": 2}]},
+    )
+    fixed_plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert fixed_plan["new_comments"] == []
+    assert fixed_plan["skipped_duplicates"] == []
+    assert fixed_plan["resolved_reappeared"][0]["thread_id"] == 10
+    assert fixed_plan["resolved_reappeared"][0]["status"] == "fixed"
+
+
+def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
+    """It should activate the old thread and add a tagged re-check reply."""
+    client = TFSClient(make_tfs_config())
+    update = mocker.patch("src.tfs_client.TFSClient.update_thread_status", return_value={"id": 10})
+    reply = mocker.patch("src.tfs_client.TFSClient.reply_to_thread", return_value={"id": 11})
+
+    results = client.reopen_resolved_tool_comments(
+        "repo-a",
+        1,
+        [
+            {
+                "thread_id": 10,
+                "comment": {
+                    "file": "src/app.py",
+                    "line": 7,
+                    "type": "bug",
+                    "severity": "high",
+                    "comment": "Avoid duplicate charge calculation",
+                },
+            }
+        ],
+    )
+
+    assert results == [{"success": True, "thread_id": 10, "file": "src/app.py", "line": 7}]
+    update.assert_called_once_with("repo-a", 1, 10, "active")
+    reply_body = reply.call_args.args[3]
+    assert "ai-code-review-cli" in reply_body
+    assert "AI Code Review re-check" in reply_body
+
+
 def test_repository_helpers_and_status_formatting(mocker) -> None:
     """It should format review comments and resolve repositories by name."""
     client = TFSClient(make_tfs_config())
@@ -546,6 +619,8 @@ def test_repository_helpers_and_status_formatting(mocker) -> None:
     )
     assert "Security" in comment
     assert "Use a vault" in comment
+    assert "ai-code-review-cli" in comment
+    assert "ai-code-review-fingerprint" in comment
     assert client._status_to_int("wontfix") == 3
     assert client._status_to_int("unknown") == 1
 
