@@ -403,6 +403,26 @@ def test_review_scope_context_note_matches_scope() -> None:
     assert "diff_only mode" in diff_only
 
 
+def test_build_general_summary_comment_is_compact(review_config) -> None:
+    """It should keep the top-level PR comment to metadata only."""
+    rendered = ai_review._build_general_summary_comment(
+        review_config,
+        run_timestamp="2026-05-13T15:20:00Z",
+    )
+
+    assert rendered == "\n".join([
+        "## 🤖 AI Code Review",
+        "",
+        f"**Provider:** {review_config.llm_provider}",
+        f"**Model:** {review_config.model}",
+        f"**Mode:** {review_config.verbosity}",
+        f"**Scope:** {review_config.review_scope}",
+        "**Ran at:** 2026-05-13T15:20:00Z",
+    ])
+    assert "General review" not in rendered
+    assert "Automatic review generated" not in rendered
+
+
 def test_select_pr_interactive_uses_list_index(mocker) -> None:
     """It should map a small numeric choice to the corresponding PR in the list."""
     tfs = MagicMock()
