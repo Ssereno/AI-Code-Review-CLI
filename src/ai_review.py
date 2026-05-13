@@ -491,13 +491,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             print(formatter.format_warning(str(exc)))
             return 0
 
-    # Keep only added lines (+): ignore context and removed lines
-    diff = git_utils.filter_diff_additions_only(diff)
-    if not diff.strip():
-        print(formatter.format_warning(
-            "After filtering additions only, the diff is empty. No new code to review."
-        ))
-        return 0
+    review_scope = (config.review_scope or "diff_with_context").lower()
+
+    if review_scope == "diff_only":
+        # Keep the legacy PR-only mode compact by removing context and deletions.
+        diff = git_utils.filter_diff_additions_only(diff)
+        if not diff.strip():
+            print(formatter.format_warning(
+                "After filtering additions only, the diff is empty. No new code to review."
+            ))
+            return 0
 
     # Limit number of diff files if needed
     diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
@@ -522,7 +525,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
 
-    use_contextual_review = (config.review_scope or "").lower() == "diff_with_context"
+    use_contextual_review = review_scope == "diff_with_context"
 
     work_item_context = ""
     if use_contextual_review and config.work_item_context_enabled:

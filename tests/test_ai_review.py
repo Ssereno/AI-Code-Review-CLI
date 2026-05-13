@@ -196,7 +196,16 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         "source_branch": "feature/test",
         "target_branch": "main",
     }
-    diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " class Example:\n"
+        "-    value = 1\n"
+        "+    value = 2\n"
+        "     other = value\n"
+    )
     tfs.get_pull_request_diff.return_value = diff
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
     tfs.get_project_context.return_value = "PROJECT CONTEXT"
@@ -215,7 +224,6 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     }
 
     git_utils = MagicMock()
-    git_utils.filter_diff_additions_only.return_value = diff
     git_utils.limit_diff_files.return_value = (diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
     git_utils.truncate_diff.return_value = (diff, False)
@@ -267,6 +275,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert llm.review_pr_structured.call_args.kwargs["project_context"] == "PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
     assert llm.review.call_args.kwargs["diff"] == diff
+    git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
 
 
@@ -353,7 +362,17 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
         "source_branch": "feature/test",
         "target_branch": "main",
     }
-    diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " class Example:\n"
+        "-    value = 1\n"
+        "+    value = 2\n"
+        "     other = value\n"
+    )
+    filtered_diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -1,3 +1,4 @@\n+    value = 2"
     tfs.get_pull_request_diff.return_value = diff
 
     llm = MagicMock()
@@ -367,10 +386,10 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     }
 
     git_utils = MagicMock()
-    git_utils.filter_diff_additions_only.return_value = diff
-    git_utils.limit_diff_files.return_value = (diff, False, 0)
+    git_utils.filter_diff_additions_only.return_value = filtered_diff
+    git_utils.limit_diff_files.return_value = (filtered_diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
-    git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.truncate_diff.return_value = (filtered_diff, False)
 
     mocker.patch("src.ai_review.ProgressIndicator")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
@@ -390,6 +409,8 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     tfs.get_project_context.assert_not_called()
     assert llm.review.call_args.kwargs["project_context"] == ""
     assert llm.review.call_args.kwargs["work_item_context"] == ""
+    git_utils.filter_diff_additions_only.assert_called_once_with(diff)
+    assert llm.review.call_args.kwargs["diff"] == filtered_diff
 
 
 def test_review_scope_context_note_matches_scope() -> None:

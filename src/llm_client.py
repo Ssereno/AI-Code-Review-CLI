@@ -227,36 +227,39 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
         if structured:
             if language == "en":
                 return (
-                    "Review scope: diff_with_context. The diff contains only added lines (+) — "
-                    "context and deletions were removed. Use the project context and linked work item "
-                    "documentation only to understand the rest of the repository, product intent, and "
-                    "requirements. Focus exclusively on issues introduced by the new lines in this PR. "
+                    "Review scope: diff_with_context. The diff includes added lines (+), deleted lines (-), "
+                    "and surrounding unchanged context. Use context lines, project context, and linked work "
+                    "item documentation only to understand the rest of the repository, product intent, and "
+                    "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
-                    "The file and line must point to a modified line in the PR diff. "
+                    "The file and line must point to an added or modified line in the PR diff, not a context-only "
+                    "or deleted line. "
                     "Do not emit general problem comments without file/line."
                 )
             return (
-                "Escopo de review: diff_with_context. O diff contém apenas linhas adicionadas (+) — "
-                "contexto e eliminações foram removidos. Usa o contexto do projeto e a documentação dos "
-                "work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
-                "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
+                "Escopo de review: diff_with_context. O diff inclui linhas adicionadas (+), linhas removidas (-) "
+                "e contexto inalterado à volta das alterações. Usa as linhas de contexto, o contexto do projeto "
+                "e a documentação dos work items apenas para compreender o restante repositório, intenção de "
+                "produto e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas "
+                "(+) deste PR. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
-                "O file e line devem apontar para uma linha modificada no diff do PR. "
+                "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
+                "uma linha apenas de contexto ou removida. "
                 "Não emitas comentários gerais de problema sem file/line."
             )
 
         if language == "en":
             return (
-                "Review scope: diff_with_context. The diff contains only added lines (+). "
-                "Use any project context and linked work item documentation only to understand "
-                "the rest of the repository, product intent, and requirements. "
-                "Focus only on issues introduced by the new lines in this PR."
+                "Review scope: diff_with_context. The diff includes added lines (+), deleted lines (-), "
+                "and surrounding unchanged context. Use context lines, project context, and linked work item "
+                "documentation only to understand the rest of the repository, product intent, and requirements. "
+                "Focus only on issues introduced by added lines (+) in this PR."
             )
         return (
-            "Escopo de review: diff_with_context. O diff contém apenas linhas adicionadas (+). "
-            "Usa o contexto do projeto e a documentação dos work items apenas para compreender "
-            "o restante repositório, intenção de produto e requisitos. "
-            "Foca apenas problemas introduzidos pelas novas linhas deste PR."
+            "Escopo de review: diff_with_context. O diff inclui linhas adicionadas (+), linhas removidas (-) "
+            "e contexto inalterado à volta das alterações. Usa as linhas de contexto, o contexto do projeto "
+            "e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
+            "e requisitos. Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
         )
 
     if structured:

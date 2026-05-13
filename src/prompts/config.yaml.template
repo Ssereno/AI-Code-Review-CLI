@@ -79,7 +79,8 @@ review:
   verbosity: detailed
 
   # Review scope:
-  #   diff_with_context (default): reviews PR changes with project/work-item context
+  #   diff_with_context (default): reviews PR changes with unified diff,
+  #     project, and work-item context
   #   diff_only: reviews only differences introduced in the PR
   #   full_code: allows full code review of changed files
   scope: diff_with_context

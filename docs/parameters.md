@@ -55,7 +55,7 @@ review:
 
 ## Project Context
 
-The default review scope, `diff_with_context`, reviews modified PR lines while also sending read-only project and work item context to the LLM. Use `diff_only` to review only the PR changes, or `full_code` to review the full content of changed files.
+The default review scope, `diff_with_context`, reviews modified PR lines while also sending the unified diff context plus read-only project and work item context to the LLM. Context and deleted lines are used for understanding only; findings and inline comments must still point to added or modified PR lines. Use `diff_only` to review only the PR changes without surrounding context, or `full_code` to review the full content of changed files.
 
 The `review.project_context` block controls the repository snapshot sent to the LLM alongside the PR diff when `scope: diff_with_context` is selected. This context is read-only: the prompt tells the model to use it for architecture, contracts, dependencies, and call sites, while findings and inline comments must still point to modified PR lines.
 
