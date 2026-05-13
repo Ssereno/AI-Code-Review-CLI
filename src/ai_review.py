@@ -296,6 +296,19 @@ def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
     save_output(md_output, output_file)
 
 
+def _review_scope_context_note(review_scope: str) -> str:
+    """Returns user-facing context wording for the selected review scope."""
+    scope = (review_scope or "diff_with_context").lower()
+    if scope == "diff_with_context":
+        return (
+            "Context will be used for understanding only; review comments remain "
+            "limited to modified PR lines."
+        )
+    if scope == "full_code":
+        return "Review is running in full_code mode for changed file contents."
+    return "Review is running in diff_only mode."
+
+
 # ---------------------------------------------------------------------------
 # Command execution functions
 # ---------------------------------------------------------------------------
@@ -512,7 +525,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         if work_item_context:
             print(formatter.format_info(
                 f"Linked work item documentation loaded ({len(work_item_context):,} characters). "
-                "Review comments will still be limited to modified PR lines."
+                f"{_review_scope_context_note(config.review_scope)}"
             ))
 
     project_context = ""
@@ -535,7 +548,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         if project_context:
             print(formatter.format_info(
                 f"Project context loaded ({len(project_context):,} characters). "
-                "Review comments will still be limited to modified PR lines."
+                f"{_review_scope_context_note(config.review_scope)}"
             ))
 
     # --- Perform structured review ---

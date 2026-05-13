@@ -392,6 +392,17 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     assert llm.review.call_args.kwargs["work_item_context"] == ""
 
 
+def test_review_scope_context_note_matches_scope() -> None:
+    """It should describe context behavior according to the active scope."""
+    contextual = ai_review._review_scope_context_note("diff_with_context")
+    full_code = ai_review._review_scope_context_note("full_code")
+    diff_only = ai_review._review_scope_context_note("diff_only")
+
+    assert "modified PR lines" in contextual
+    assert "full_code mode" in full_code
+    assert "diff_only mode" in diff_only
+
+
 def test_select_pr_interactive_uses_list_index(mocker) -> None:
     """It should map a small numeric choice to the corresponding PR in the list."""
     tfs = MagicMock()
