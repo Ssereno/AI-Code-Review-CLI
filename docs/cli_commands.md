@@ -268,38 +268,38 @@ ai-review init --help
 | `--status` | `active`, `completed`, `abandoned`, `all` | Status do PR |
 
 
-## usage - Verificar uso de tokens e custo
+## usage - Check token usage and cost
 
-Lista os Pull Requests já revistos a partir do ficheiro de usage e permite
-selecionar um PR para ver os totais de tokens e custo.
+Lists reviewed Pull Requests from the usage file and lets you select one PR
+to view its token and cost totals.
 
 ```bash
 ai-review usage
 ```
 
-Usar um ficheiro de usage específico:
+Use a specific usage file:
 
 ```bash
 ai-review usage --usage-file ./reports/ai-review-usage.jsonl
 ```
 
-O comando mostra os PRs agregados por repositório e ID de PR. Depois de
-selecionar um PR por número da lista ou ID, apresenta:
+The command shows PRs grouped by repository and PR ID. After selecting a PR by
+list number or PR ID, it displays:
 
-- Tokens de input
-- Tokens de output
-- Total de tokens
-- Custo total estimado, se `usage.pricing` estiver configurado
-- Providers/modelos usados
-- Número de execuções de review e chamadas ao LLM
+- Input tokens
+- Output tokens
+- Total tokens
+- Estimated total cost, if `usage.pricing` is configured
+- Providers/models used
+- Number of review runs and LLM calls
 
-## Opções de `usage`
+## `usage` Options
 
-| Flag | Valores | Descrição |
+| Flag | Values | Description |
 |------|--------|-----------|
-| `--usage-file` | caminho | Ficheiro JSONL com usage guardado |
-| `--config` | caminho | Ficheiro de configuração |
-| `--no-color` | — | Desabilitar cores |
+| `--usage-file` | path | JSONL file with saved usage records |
+| `--config` | path | Configuration file |
+| `--no-color` | — | Disable colors |
 
 
 ## Configuração por Ficheiro
