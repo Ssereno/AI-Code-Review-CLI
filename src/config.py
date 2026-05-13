@@ -93,8 +93,8 @@ class ReviewConfig:
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)
     project_context_enabled: bool = True     # Include repository files as read-only context
-    project_context_max_files: int = 500     # Max project files used as context
-    project_context_max_chars: int = 300000  # Max project-context characters
+    project_context_max_files: int = 0       # 0 = include all eligible project files
+    project_context_max_chars: int = 0       # 0 = no repository-context character limit
     project_context_file_extensions: list = field(default_factory=list)
     project_context_exclude_patterns: list = field(default_factory=lambda: [
         ".git",
@@ -370,16 +370,16 @@ class ReviewConfig:
                 "Use an integer greater than 0."
             )
 
-        if self.project_context_max_files <= 0:
+        if self.project_context_max_files < 0:
             issues.append(
                 f"Invalid project_context.max_files: '{self.project_context_max_files}'. "
-                "Use an integer greater than 0."
+                "Use 0 for no limit or an integer greater than 0."
             )
 
-        if self.project_context_max_chars <= 0:
+        if self.project_context_max_chars < 0:
             issues.append(
                 f"Invalid project_context.max_chars: '{self.project_context_max_chars}'. "
-                "Use an integer greater than 0."
+                "Use 0 for no limit or an integer greater than 0."
             )
 
         if self.work_item_context_max_items <= 0:

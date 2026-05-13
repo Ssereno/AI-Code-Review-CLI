@@ -213,7 +213,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     llm = MagicMock()
     llm.review.return_value = "General review"
     structured_comments = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+        {"file": "a.py", "line": 2, "type": "bug", "severity": "high", "comment": "msg"}
     ]
     llm.review_pr_structured.return_value = structured_comments
     tfs.plan_review_comments.return_value = {
@@ -422,6 +422,21 @@ def test_review_scope_context_note_matches_scope() -> None:
     assert "modified PR lines" in contextual
     assert "full_code mode" in full_code
     assert "diff_only mode" in diff_only
+
+
+def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff: str) -> None:
+    """It should keep problem comments anchored to added lines only."""
+    comments = [
+        {"file": "src/app.py", "line": 2, "type": "bug", "comment": "changed"},
+        {"file": "src/app.py", "line": 1, "type": "bug", "comment": "context"},
+        {"file": "", "line": 0, "type": "suggestion", "comment": "general"},
+        {"file": "", "line": 0, "type": "praise", "comment": "looks good"},
+    ]
+
+    kept, discarded = ai_review._filter_comments_to_changed_lines(comments, sample_diff)
+
+    assert kept == [comments[0], comments[3]]
+    assert discarded == [comments[1], comments[2]]
 
 
 def test_build_general_summary_comment_is_compact(review_config) -> None:

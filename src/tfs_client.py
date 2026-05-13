@@ -571,8 +571,8 @@ class TFSClient:
     # Repository Context
     # ==================================================================
     def get_project_context(self, repository: str, branch: str,
-                            max_files: int = 500,
-                            max_chars: int = 300000,
+                            max_files: int = 0,
+                            max_chars: int = 0,
                             file_extensions: Optional[list[str]] = None,
                             exclude_patterns: Optional[list[str]] = None) -> str:
         """
@@ -602,17 +602,24 @@ class TFSClient:
             return ""
 
         eligible_paths = sorted(set(eligible_paths))
-        selected_paths = eligible_paths[:max_files]
+        file_limit = max_files if max_files and max_files > 0 else None
+        char_limit = max_chars if max_chars and max_chars > 0 else None
+        selected_paths = (
+            eligible_paths[:file_limit]
+            if file_limit is not None
+            else eligible_paths
+        )
         omitted_files = max(0, len(eligible_paths) - len(selected_paths))
 
         parts = [
-            "### Project context",
+            "### Full repository context",
             f"Repository: {repository}",
             f"Source branch: {branch_name}",
             "",
-            "Use this project snapshot only to understand existing architecture, "
-            "contracts, dependencies, and call sites. Do not report issues from "
-            "this context unless the issue is on a modified line in the PR diff.",
+            "Use this repository snapshot only to understand existing architecture, "
+            "contracts, dependencies, and call sites. The review target remains "
+            "the PR diff only. Do not report issues from this context unless the "
+            "issue is caused by an added or modified line in the PR diff.",
             "",
         ]
 
@@ -621,8 +628,8 @@ class TFSClient:
         truncated = False
 
         for path in selected_paths:
-            remaining = max_chars - used_chars
-            if remaining <= 0:
+            remaining = char_limit - used_chars if char_limit is not None else None
+            if remaining is not None and remaining <= 0:
                 truncated = True
                 break
 
@@ -636,7 +643,7 @@ class TFSClient:
             except Exception:
                 continue
 
-            if len(content) > remaining:
+            if remaining is not None and len(content) > remaining:
                 content = content[:remaining]
                 truncated = True
 
@@ -657,10 +664,13 @@ class TFSClient:
             return ""
 
         if truncated or omitted_files:
+            configured_chars = (
+                "unlimited" if char_limit is None else str(char_limit)
+            )
             parts.append(
-                "[Project context truncated: "
+                "[Repository context truncated: "
                 f"included {included_files} file(s), omitted {omitted_files} file(s), "
-                f"used {used_chars} of {max_chars} configured characters.]"
+                f"used {used_chars} of {configured_chars} configured characters.]"
             )
 
         return "\n".join(parts).strip()

@@ -350,7 +350,7 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
 
 
 def test_get_project_context_fetches_source_branch_files(mocker) -> None:
-    """It should build bounded repository context from the PR source branch."""
+    """It should build repository context from the PR source branch."""
     client = TFSClient(make_tfs_config())
     get_mock = mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -376,7 +376,7 @@ def test_get_project_context_fetches_source_branch_files(mocker) -> None:
         max_chars=1000,
     )
 
-    assert "### Project context" in context
+    assert "### Full repository context" in context
     assert "Source branch: feature/context" in context
     assert "/README.md" in context
     assert "/src/app.py" in context
@@ -388,6 +388,38 @@ def test_get_project_context_fetches_source_branch_files(mocker) -> None:
     assert params["versionDescriptor.version"] == "feature/context"
     assert get_file.call_count == 2
     assert get_file.call_args_list[0].kwargs["version"] == "feature/context"
+
+
+def test_get_project_context_zero_limits_include_all_eligible_files(mocker) -> None:
+    """It should treat zero project context limits as unlimited."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/src/domain.py", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["# docs", "print('x')", "class Domain: pass"],
+    )
+
+    context = client.get_project_context(
+        "repo-a",
+        "feature/full-context",
+        max_files=0,
+        max_chars=0,
+    )
+
+    assert "/README.md" in context
+    assert "/src/app.py" in context
+    assert "/src/domain.py" in context
+    assert "Repository context truncated" not in context
+    assert get_file.call_count == 3
 
 
 def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:

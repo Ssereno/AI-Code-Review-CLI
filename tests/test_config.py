@@ -295,8 +295,8 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
         review_scope="everything",
         max_diff_files=0,
         max_diff_lines=0,
-        project_context_max_files=0,
-        project_context_max_chars=0,
+        project_context_max_files=-1,
+        project_context_max_chars=-1,
         work_item_context_max_items=0,
         work_item_context_max_chars=0,
     )

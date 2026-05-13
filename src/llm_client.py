@@ -151,12 +151,13 @@ PR_COMMENT_PROMPT = {
         "e retorna os teus comentários em formato JSON estruturado.\n\n"
         "Para CADA problema encontrado, retorna um objeto JSON com:\n"
         '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
-        '- "line": número da linha no diff (inteiro, ou 0 se geral)\n'
+        '- "line": número da linha no ficheiro novo/right-side para a linha adicionada ou modificada do PR (inteiro, ou 0 se não houver localização inline)\n'
         '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
         '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -180,12 +181,13 @@ PR_COMMENT_PROMPT = {
         "and return your comments in structured JSON format.\n\n"
         "For EACH issue found, return a JSON object with:\n"
         '- "file": file path (e.g., "src/auth.py")\n'
-        '- "line": line number in diff (integer, or 0 if general)\n'
+        '- "line": line number in the new/right-side file for the added or modified PR line (integer, or 0 if no inline location)\n'
         '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
+        "Only return problem comments when file and line point to an added or modified PR line. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
@@ -227,39 +229,44 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
         if structured:
             if language == "en":
                 return (
-                    "Review scope: diff_with_context. The diff includes added lines (+), deleted lines (-), "
-                    "and surrounding unchanged context. Use context lines, project context, and linked work "
-                    "item documentation only to understand the rest of the repository, product intent, and "
+                    "Review scope: diff_with_context. The full eligible repository is provided as read-only "
+                    "context, and the diff includes added lines (+), deleted lines (-), and surrounding "
+                    "unchanged context. Use repository context, diff context lines, and linked work item "
+                    "documentation only to understand the rest of the repository, product intent, and "
                     "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
-                    "or deleted line. "
+                    "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
+                    "already exists, do not report it as missing. "
                     "Do not emit general problem comments without file/line."
                 )
             return (
-                "Escopo de review: diff_with_context. O diff inclui linhas adicionadas (+), linhas removidas (-) "
-                "e contexto inalterado à volta das alterações. Usa as linhas de contexto, o contexto do projeto "
-                "e a documentação dos work items apenas para compreender o restante repositório, intenção de "
-                "produto e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas "
-                "(+) deste PR. "
+                "Escopo de review: diff_with_context. O repositório elegível completo é fornecido como contexto "
+                "read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
+                "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a "
+                "documentação dos work items apenas para compreender o restante repositório, intenção de produto "
+                "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
-                "uma linha apenas de contexto ou removida. "
+                "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
+                "propriedade, contrato ou comportamento já existe, não o reportes como ausente. "
                 "Não emitas comentários gerais de problema sem file/line."
             )
 
         if language == "en":
             return (
-                "Review scope: diff_with_context. The diff includes added lines (+), deleted lines (-), "
-                "and surrounding unchanged context. Use context lines, project context, and linked work item "
-                "documentation only to understand the rest of the repository, product intent, and requirements. "
+                "Review scope: diff_with_context. The full eligible repository is provided as read-only context, "
+                "and the diff includes added lines (+), deleted lines (-), and surrounding unchanged context. "
+                "Use repository context, diff context lines, and linked work item documentation only to understand "
+                "the rest of the repository, product intent, and requirements. "
                 "Focus only on issues introduced by added lines (+) in this PR."
             )
         return (
-            "Escopo de review: diff_with_context. O diff inclui linhas adicionadas (+), linhas removidas (-) "
-            "e contexto inalterado à volta das alterações. Usa as linhas de contexto, o contexto do projeto "
-            "e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
-            "e requisitos. Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
+            "Escopo de review: diff_with_context. O repositório elegível completo é fornecido como contexto "
+            "read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
+            "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a documentação "
+            "dos work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
+            "Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
         )
 
     if structured:
@@ -317,10 +324,16 @@ def build_user_message(diff: str, files_summary: list[dict],
 
     if project_context:
         parts.append(
-            "### Project context (read-only, not review target):\n"
+            "### Full repository context (read-only, not review target):\n"
             f"{project_context}\n"
         )
 
+    parts.append(
+        "### Review target:\n"
+        "Review only the PR changes below. Use all context above only to understand "
+        "the repository and requirements. Problem comments must point to added or "
+        "modified lines in this diff.\n"
+    )
     parts.append("### Diff for review:")
     parts.append(f"```diff\n{diff}\n```")
 

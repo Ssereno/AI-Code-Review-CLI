@@ -94,6 +94,7 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
+    assert "full eligible repository" in contextual_guidance
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
@@ -114,10 +115,12 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
-    assert "Project context (read-only, not review target)" in message
+    assert "Full repository context (read-only, not review target)" in message
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
     assert "totals include tax" in message
+    assert "Review target" in message
+    assert "Review only the PR changes below" in message
     assert "```diff" in message
 
 

@@ -43,6 +43,7 @@ import argparse
 import datetime
 import importlib.resources
 import os
+import re
 import sys
 import time
 import threading
@@ -328,6 +329,81 @@ def _build_general_summary_comment(config: ReviewConfig,
     ])
 
 
+def _normalize_review_path(path: object) -> str:
+    """Normalizes a diff or LLM file path for comparisons."""
+    value = str(path or "").replace("\\", "/").strip()
+    if value.startswith(("a/", "b/")):
+        value = value[2:]
+    return value.lstrip("/").lower()
+
+
+def _changed_lines_by_file(diff: str) -> dict[str, set[int]]:
+    """Extracts added/right-side line numbers from a unified diff."""
+    changed_lines: dict[str, set[int]] = {}
+    current_file = ""
+    current_line: int | None = None
+    hunk_re = re.compile(r"@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("+++ "):
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            if file_path != "/dev/null":
+                current_file = _normalize_review_path(file_path)
+                changed_lines.setdefault(current_file, set())
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            match = hunk_re.match(raw_line)
+            if match:
+                current_line = int(match.group(1))
+            elif raw_line.startswith("@@ Change type:"):
+                current_line = 1
+            else:
+                current_line = None
+            continue
+
+        if not current_file or current_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            changed_lines.setdefault(current_file, set()).add(current_line)
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    return {path: lines for path, lines in changed_lines.items() if lines}
+
+
+def _filter_comments_to_changed_lines(comments: list[dict],
+                                      diff: str) -> tuple[list[dict], list[dict]]:
+    """Keeps problem comments only when they point to added PR diff lines."""
+    changed_lines = _changed_lines_by_file(diff)
+    kept: list[dict] = []
+    discarded: list[dict] = []
+
+    for comment in comments:
+        comment_type = str(comment.get("type", "")).lower()
+        if comment_type == "praise":
+            kept.append(comment)
+            continue
+
+        file_path = _normalize_review_path(comment.get("file", ""))
+        try:
+            line = int(comment.get("line", 0))
+        except (TypeError, ValueError):
+            line = 0
+
+        if file_path and line > 0 and line in changed_lines.get(file_path, set()):
+            kept.append(comment)
+        else:
+            discarded.append(comment)
+
+    return kept, discarded
+
+
 # ---------------------------------------------------------------------------
 # Command execution functions
 # ---------------------------------------------------------------------------
@@ -552,7 +628,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     project_context = ""
     if use_contextual_review and config.project_context_enabled:
-        print(formatter.format_progress("Getting project context from source branch"))
+        print(formatter.format_progress("Getting full repository context from source branch"))
         try:
             project_context = tfs.get_project_context(
                 repo_name,
@@ -564,12 +640,12 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             )
         except TFSError as exc:
             print(formatter.format_warning(
-                f"Could not load project context; continuing with PR diff only: {exc}"
+                f"Could not load full repository context; continuing with PR diff only: {exc}"
             ))
 
         if project_context:
             print(formatter.format_info(
-                f"Project context loaded ({len(project_context):,} characters). "
+                f"Full repository context loaded ({len(project_context):,} characters). "
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
 
@@ -605,6 +681,15 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_error(str(exc)))
         return 1
 
+    structured_comments, discarded_comments = _filter_comments_to_changed_lines(
+        structured_comments,
+        diff_truncated,
+    )
+    if discarded_comments:
+        print(formatter.format_info(
+            f"Discarded {len(discarded_comments)} comment(s) outside changed PR lines."
+        ))
+
     existing_threads = []
     skipped_duplicates = []
     resolved_reappeared = []
@@ -629,17 +714,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"{len(resolved_reappeared)} previously resolved/closed tool comment(s) "
             "still appear in the latest review."
         ))
-
-    without_inline = [
-        c for c in structured_comments
-        if not (bool(c.get("file")) and int(c.get("line", 0)) > 0)
-        and str(c.get("type", "")).lower() not in ("praise", "")
-    ]
-    if without_inline:
-        print(formatter.format_info(
-            f"{len(without_inline)} comment(s) without file/line will be posted as a general PR comment."
-        ))
-    discarded_comments = []  # nothing is discarded
 
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))

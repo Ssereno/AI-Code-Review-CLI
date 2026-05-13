@@ -91,8 +91,8 @@ review:
   max_diff_files: 50
   project_context:
     enabled: true
-    max_files: 500
-    max_chars: 300000
+    max_files: 0                         # 0 = all eligible files
+    max_chars: 0                         # 0 = no character limit
   work_item_context:
     enabled: true
     max_items: 20

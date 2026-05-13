@@ -99,12 +99,12 @@ review:
   # Example: [".py", ".js", ".cs", ".ts"]
   file_extensions_filter: []
 
-  # Project context sent to the LLM as read-only reference.
+  # Full repository context sent to the LLM as read-only reference.
   # Review comments are still restricted to modified PR lines.
   project_context:
     enabled: true
-    max_files: 500
-    max_chars: 300000
+    max_files: 0       # 0 = include all eligible files
+    max_chars: 0       # 0 = no character limit
     # Empty list = common text/code files. Set an allowlist to narrow context.
     # Example: [".py", ".cs", ".ts", ".yaml"]
     file_extensions: []
