@@ -373,7 +373,7 @@ class TFSClient:
         return files
 
     def get_pull_request_diff(self, repository: str, pr_id: int,
-                              review_scope: str = "diff_only") -> str:
+                              review_scope: str = "diff_with_context") -> str:
         """
         Gets the diff of a specific Pull Request.
         
@@ -406,7 +406,7 @@ class TFSClient:
         )
         changes = self._get(changes_path)
 
-        review_scope = (review_scope or "diff_only").lower()
+        review_scope = (review_scope or "diff_with_context").lower()
 
         # Build diff from the changes
         diff_parts = []
@@ -832,7 +832,12 @@ class TFSClient:
     def _resolve_work_item_fields(self, fields: Optional[list[str]]) -> list[str]:
         """Returns deduplicated work item fields, preserving required metadata."""
         requested = fields or DEFAULT_WORK_ITEM_CONTEXT_FIELDS
-        required = ["System.Title", "System.WorkItemType", "System.State"]
+        required = [
+            "System.Title",
+            "System.WorkItemType",
+            "System.State",
+            "System.Description",
+        ]
         resolved = []
 
         for field_name in [*required, *requested]:
@@ -1062,7 +1067,7 @@ class TFSClient:
 
     def post_review_comments(self, repository: str, pr_id: int,
                              comments: list[dict],
-                             review_scope: str = "diff_only",
+                             review_scope: str = "diff_with_context",
                              comment_mode: str = "structured") -> list[dict]:
         """
         Posts multiple review comments on a PR.
@@ -1078,7 +1083,7 @@ class TFSClient:
             List of results for each posted comment.
         """
         results = []
-        review_scope = (review_scope or "diff_only").lower()
+        review_scope = (review_scope or "diff_with_context").lower()
         comment_mode = (comment_mode or "structured").lower()
         use_inline_comments = comment_mode == "structured"
 

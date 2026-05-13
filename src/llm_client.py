@@ -208,31 +208,61 @@ def get_pr_comment_prompt(language: str) -> str:
 
 def get_scope_guidance(review_scope: str, language: str, structured: bool = False) -> str:
     """Returns additional instructions based on the review scope."""
-    scope = (review_scope or "diff_only").lower()
+    scope = (review_scope or "diff_with_context").lower()
 
     if scope == "full_code":
         if language == "en":
             return (
                 "Review scope: full_code. The diff contains only added lines (+) for each file. "
                 "Analyze the complete content of the changed files and identify issues in the new code. "
-                "Use any project context and linked work item documentation only for understanding "
-                "repository-wide contracts, product intent, and requirements. "
-                "Do not comment on deleted, absent, or context-only code."
+                "Do not comment on deleted or absent code."
             )
         return (
             "Escopo de review: full_code. O diff contém apenas linhas adicionadas (+) de cada ficheiro. "
             "Analisa o conteúdo completo dos ficheiros alterados e identifica problemas no novo código. "
+            "Não comentes código eliminado ou ausente."
+        )
+
+    if scope == "diff_with_context":
+        if structured:
+            if language == "en":
+                return (
+                    "Review scope: diff_with_context. The diff contains only added lines (+) — "
+                    "context and deletions were removed. Use the project context and linked work item "
+                    "documentation only to understand the rest of the repository, product intent, and "
+                    "requirements. Focus exclusively on issues introduced by the new lines in this PR. "
+                    "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
+                    "The file and line must point to a modified line in the PR diff. "
+                    "Do not emit general problem comments without file/line."
+                )
+            return (
+                "Escopo de review: diff_with_context. O diff contém apenas linhas adicionadas (+) — "
+                "contexto e eliminações foram removidos. Usa o contexto do projeto e a documentação dos "
+                "work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
+                "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
+                "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
+                "O file e line devem apontar para uma linha modificada no diff do PR. "
+                "Não emitas comentários gerais de problema sem file/line."
+            )
+
+        if language == "en":
+            return (
+                "Review scope: diff_with_context. The diff contains only added lines (+). "
+                "Use any project context and linked work item documentation only to understand "
+                "the rest of the repository, product intent, and requirements. "
+                "Focus only on issues introduced by the new lines in this PR."
+            )
+        return (
+            "Escopo de review: diff_with_context. O diff contém apenas linhas adicionadas (+). "
             "Usa o contexto do projeto e a documentação dos work items apenas para compreender "
-            "contratos globais do repositório, intenção de produto e requisitos. "
-            "Não comentes código eliminado, ausente ou presente apenas no contexto."
+            "o restante repositório, intenção de produto e requisitos. "
+            "Foca apenas problemas introduzidos pelas novas linhas deste PR."
         )
 
     if structured:
         if language == "en":
             return (
                 "Review scope: diff_only. The diff contains only added lines (+) — context and deletions were removed. "
-                "Use the project context and linked work item documentation only to understand the rest "
-                "of the repository, product intent, and requirements. "
                 "Focus exclusively on issues introduced by the new lines in this PR. "
                 "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                 "The file and line must point to a modified line in the PR diff. "
@@ -240,8 +270,6 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
             )
         return (
             "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
-            "Usa o contexto do projeto e a documentação dos work items apenas para compreender "
-            "o restante repositório, intenção de produto e requisitos. "
             "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
             "O file e line devem apontar para uma linha modificada no diff do PR. "
@@ -251,14 +279,10 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     if language == "en":
         return (
             "Review scope: diff_only. The diff contains only added lines (+). "
-            "Use any project context and linked work item documentation only to understand "
-            "the rest of the repository, product intent, and requirements. "
             "Focus only on issues introduced by the new lines in this PR."
         )
     return (
         "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+). "
-        "Usa o contexto do projeto e a documentação dos work items apenas para compreender "
-        "o restante repositório, intenção de produto e requisitos. "
         "Foca apenas problemas introduzidos pelas novas linhas deste PR."
     )
 
@@ -326,7 +350,7 @@ class LLMClient:
             return ""
 
     def review(self, diff: str, files_summary: list[dict],
-               context: str = "", review_scope: str = "diff_only",
+               context: str = "", review_scope: str = "diff_with_context",
                project_context: str = "", work_item_context: str = "") -> str:
         """
         Sends the diff to the LLM and returns the review as text.
@@ -391,7 +415,7 @@ class LLMClient:
             )
 
     def review_pr_structured(self, diff: str, files_summary: list[dict],
-                             context: str = "", review_scope: str = "diff_only",
+                             context: str = "", review_scope: str = "diff_with_context",
                              project_context: str = "",
                              work_item_context: str = "") -> list[dict]:
         """

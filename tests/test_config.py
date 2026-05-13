@@ -108,6 +108,7 @@ def test_load_ignores_missing_file(mocker) -> None:
     config = ReviewConfig.load()
 
     assert config.model == config_module.DEFAULT_MODELS[config.llm_provider]
+    assert config.review_scope == "diff_with_context"
 
 
 def test_load_yaml_warns_when_yaml_is_unavailable(mocker, temp_config_file) -> None:

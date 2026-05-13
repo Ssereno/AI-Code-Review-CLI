@@ -435,7 +435,45 @@ def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
     assert details_call.args[0] == "wit/workitems"
     assert details_call.args[1]["ids"] == "101"
     assert details_call.args[1]["$expand"] == "relations"
+    assert "System.Description" in details_call.args[1]["fields"].split(",")
     assert details_call.kwargs["api_version"] == "7.1"
+
+
+def test_work_item_context_always_requests_description(mocker) -> None:
+    """It should include work item descriptions even with custom field settings."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": "101"}]},
+            {
+                "value": [
+                    {
+                        "id": 101,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Use the documented tax rules.</p>",
+                            "Custom.Documentation": "Regional checkout spec",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["Custom.Documentation"],
+    )
+
+    requested_fields = get_mock.call_args_list[1].args[1]["fields"].split(",")
+    assert "System.Description" in requested_fields
+    assert "Custom.Documentation" in requested_fields
+    assert "Use the documented tax rules." in context
+    assert "Regional checkout spec" in context
 
 
 def test_raw_get_and_comment_endpoints(mocker) -> None:

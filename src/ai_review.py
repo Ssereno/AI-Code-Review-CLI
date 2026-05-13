@@ -16,7 +16,7 @@ Options:
     --quick                              # Quick and concise review
     --detailed                           # Detailed review (default)
     --security                           # Security-focused review
-    --review-scope <diff_only|full_code> # Review scope (default: diff_only)
+    --review-scope <scope>                # Review scope (default: diff_with_context)
     --max-diff-files <n>                 # Max files in diff (overrides config)
     --dry-run                            # Review without posting comments
     --auto-post                          # Post comments without confirmation
@@ -83,6 +83,9 @@ from src.git_utils import GitUtils, GitError
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
 from src import __version__ as VERSION
+
+
+REVIEW_SCOPE_CHOICES = ["diff_only", "diff_with_context", "full_code"]
 
 
 def _get_spinner_frames() -> list[str]:
@@ -229,8 +232,10 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     )
     group_review.add_argument(
         "--review-scope", default=None,
-        choices=["diff_only", "full_code"],
-        help="Review scope: diff_only (default) or full_code"
+        choices=REVIEW_SCOPE_CHOICES,
+        help=(
+            "Review scope: diff_with_context (default), diff_only, or full_code"
+        )
     )
     group_review.add_argument(
         "--max-diff-files", default=None, type=int, metavar="N",
@@ -485,8 +490,10 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
 
+    use_contextual_review = (config.review_scope or "").lower() == "diff_with_context"
+
     work_item_context = ""
-    if config.work_item_context_enabled:
+    if use_contextual_review and config.work_item_context_enabled:
         print(formatter.format_progress("Getting documentation from linked work items"))
         try:
             work_item_context = tfs.get_work_item_context(
@@ -509,7 +516,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             ))
 
     project_context = ""
-    if config.project_context_enabled:
+    if use_contextual_review and config.project_context_enabled:
         print(formatter.format_progress("Getting project context from source branch"))
         try:
             project_context = tfs.get_project_context(

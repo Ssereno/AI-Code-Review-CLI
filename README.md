@@ -86,6 +86,7 @@ tfs:
 review:
   language: pt
   verbosity: detailed                  # or: quick, security
+  scope: diff_with_context             # diff_with_context, diff_only, full_code
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
   project_context:

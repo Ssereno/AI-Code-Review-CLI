@@ -235,7 +235,7 @@ class ReviewFormatter:
             if discarded_count > 0:
                 return (
                     f"\n{c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                    f"due to missing file/line in diff_only mode.{c.RESET}\n"
+                    f"due to missing file/line in diff-based review mode.{c.RESET}\n"
                 )
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
@@ -267,7 +267,7 @@ class ReviewFormatter:
         if discarded_count > 0:
             lines.append(
                 f"  {c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                f"due to missing file/line in diff_only mode.{c.RESET}"
+                f"due to missing file/line in diff-based review mode.{c.RESET}"
             )
             lines.append("")
 

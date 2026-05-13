@@ -6,7 +6,7 @@
 review:
   language: en               # Language for comments
   verbosity: detailed        # detailed | quick | security
-  scope: diff_only           # diff_only | full_code
+  scope: diff_with_context   # diff_with_context | diff_only | full_code
   custom_prompt_file: review_prompt.md  # Custom prompt
   max_diff_files: 50         # Max files sent to LLM
   max_diff_lines: 2000       # Max lines per file
@@ -55,7 +55,9 @@ review:
 
 ## Project Context
 
-The `review.project_context` block controls the repository snapshot sent to the LLM alongside the PR diff. This context is read-only: the prompt tells the model to use it for architecture, contracts, dependencies, and call sites, while findings and inline comments must still point to modified PR lines.
+The default review scope, `diff_with_context`, reviews modified PR lines while also sending read-only project and work item context to the LLM. Use `diff_only` to review only the PR changes, or `full_code` to review the full content of changed files.
+
+The `review.project_context` block controls the repository snapshot sent to the LLM alongside the PR diff when `scope: diff_with_context` is selected. This context is read-only: the prompt tells the model to use it for architecture, contracts, dependencies, and call sites, while findings and inline comments must still point to modified PR lines.
 
 ```yaml
 review:
@@ -81,7 +83,7 @@ review:
 
 ## Linked Work Item Documentation
 
-The `review.work_item_context` block fetches work items linked to the PR and sends selected documentation fields to the LLM. Common fields include title, description, acceptance criteria, repro steps, and system info. This context is read-only: findings and inline comments must still point to modified PR lines.
+The `review.work_item_context` block fetches work items linked to the PR and sends selected documentation fields to the LLM when `scope: diff_with_context` is selected. Common fields include title, description, acceptance criteria, repro steps, and system info. This context is read-only: findings and inline comments must still point to modified PR lines.
 
 ```yaml
 review:

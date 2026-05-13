@@ -105,6 +105,14 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.max_diff_files == 3
     assert args.output == "review.md"
 
+    contextual_args = parser.parse_args([
+        "pr-review",
+        "42",
+        "--review-scope",
+        "diff_with_context",
+    ])
+    assert contextual_args.review_scope == "diff_with_context"
+
 
 def test_build_parser_applies_global_options_to_list_prs() -> None:
     """It should accept shared CLI options on the list-prs command too."""
@@ -312,6 +320,56 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     assert result == 1
     progress.stop.assert_called()
     print_mock.assert_any_call("ERR:Error posting comments: boom")
+
+
+def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_config_factory) -> None:
+    """It should keep the old PR-only behavior when diff_only is selected."""
+    config = review_config_factory(review_scope="diff_only")
+    formatter = MagicMock()
+    formatter.format_progress.side_effect = lambda message: message
+    formatter.format_pr_details.return_value = "PR DETAILS"
+    formatter.format_info.side_effect = lambda message: message
+    formatter.format_review.return_value = "REVIEW"
+    formatter.format_structured_comments.return_value = "COMMENTS"
+    formatter.format_warning.side_effect = lambda message: f"WARN:{message}"
+    formatter.format_success.side_effect = lambda message: f"OK:{message}"
+
+    tfs = MagicMock()
+    tfs.get_pull_request_details.return_value = {
+        "source_branch": "feature/test",
+        "target_branch": "main",
+    }
+    diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
+    tfs.get_pull_request_diff.return_value = diff
+
+    llm = MagicMock()
+    llm.review.return_value = "General review"
+    llm.review_pr_structured.return_value = []
+
+    git_utils = MagicMock()
+    git_utils.filter_diff_additions_only.return_value = diff
+    git_utils.limit_diff_files.return_value = (diff, False, 0)
+    git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
+    git_utils.truncate_diff.return_value = (diff, False)
+
+    mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.LLMClient", return_value=llm)
+    mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
+    mocker.patch("src.tfs_client.TFSError", new=Exception)
+    mocker.patch("builtins.print")
+
+    result = ai_review.run_pr_review_workflow(
+        make_args(dry_run=True, repo_name="repo-a"),
+        config,
+        formatter,
+    )
+
+    assert result == 0
+    tfs.get_work_item_context.assert_not_called()
+    tfs.get_project_context.assert_not_called()
+    assert llm.review.call_args.kwargs["project_context"] == ""
+    assert llm.review.call_args.kwargs["work_item_context"] == ""
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:

@@ -92,6 +92,7 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
+    assert "work item documentation" in get_scope_guidance("diff_with_context", "en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
 

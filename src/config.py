@@ -87,7 +87,7 @@ class ReviewConfig:
     # --- Review -------------------------------------------------------
     review_language: str = "pt"             # Review language (pt/en)
     verbosity: str = "detailed"             # "quick" | "detailed" | "security"
-    review_scope: str = "diff_only"         # "diff_only" | "full_code"
+    review_scope: str = "diff_with_context"  # "diff_only" | "diff_with_context" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
@@ -352,10 +352,10 @@ class ReviewConfig:
                 "Use 'quick', 'detailed' or 'security'."
             )
 
-        if self.review_scope not in ("diff_only", "full_code"):
+        if self.review_scope not in ("diff_only", "diff_with_context", "full_code"):
             issues.append(
                 f"Invalid review scope: '{self.review_scope}'. "
-                "Use 'diff_only' or 'full_code'."
+                "Use 'diff_only', 'diff_with_context' or 'full_code'."
             )
 
         if self.max_diff_files <= 0:

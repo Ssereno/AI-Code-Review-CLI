@@ -68,7 +68,10 @@ ai-review pr-review 42 --auto-post
 Escolhe o escopo da revisão:
 
 ```bash
-# Apenas as mudanças no diff (padrão)
+# PR changes with project and work item context (default)
+ai-review pr-review 42 --review-scope diff_with_context
+
+# Apenas as mudanças no diff
 ai-review pr-review 42 --review-scope diff_only
 
 # Código completo dos ficheiros modificados
@@ -250,7 +253,7 @@ ai-review init --help
 | `--quick` | — | Revisão concisa |
 | `--detailed` | — | Revisão detalhada (padrão) |
 | `--security` | — | Revisão focada em segurança |
-| `--review-scope` | `diff_only`, `full_code` | Escopo da revisão |
+| `--review-scope` | `diff_with_context`, `diff_only`, `full_code` | Escopo da revisão |
 | `--max-diff-files` | número | Máximo de ficheiros |
 | `--context`, `-c` | texto | Contexto adicional |
 | `--format` | `terminal`, `markdown`, `json` | Formato de output |
@@ -281,7 +284,7 @@ llm:
 review:
   language: pt
   verbosity: detailed
-  scope: diff_only
+  scope: diff_with_context
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
   max_diff_lines: 2000
