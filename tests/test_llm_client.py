@@ -189,6 +189,8 @@ def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> N
     assert "Custom context loaded from" in user_message
     assert "Repo contract" in user_message
     assert "Requirement docs" in user_message
+    assert client.usage_events[0].operation == "general_review"
+    assert client.usage_events[0].estimated is True
 
 
 def test_review_raises_for_unsupported_provider() -> None:
@@ -256,11 +258,17 @@ def test_call_openai_builds_expected_payload_and_validates_configuration(mocker)
 
 def test_http_openai_compatible_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """It should handle OpenAI-compatible HTTP success and major failure modes."""
-    success = FakeResponse(json_data={"choices": [{"message": {"content": "ok"}}]})
+    success = FakeResponse(json_data={
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    })
     requests_module = install_requests(monkeypatch, success)
     client = LLMClient(make_llm_config())
     assert client._http_openai_compatible("https://api.local", {}, {}) == "ok"
     assert requests_module._calls[0]["url"] == "https://api.local"
+    assert client.usage_events[0].prompt_tokens == 11
+    assert client.usage_events[0].completion_tokens == 7
+    assert client.usage_events[0].total_tokens == 18
 
     for status, fragment in [(401, "invalid or expired"), (429, "Rate limit exceeded"), (500, "API error (500)")]:
         install_requests(monkeypatch, FakeResponse(status_code=status, text="boom"))

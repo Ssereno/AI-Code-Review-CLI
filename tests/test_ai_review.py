@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import ai_review
+from src.usage_tracker import TokenUsage
 
 
 def make_args(**overrides: object) -> argparse.Namespace:
@@ -32,6 +33,7 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "author": None,
         "target_branch": None,
         "status": "active",
+        "usage_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -133,6 +135,25 @@ def test_build_parser_applies_global_options_to_list_prs() -> None:
     assert args.output_format == "markdown"
 
 
+def test_build_parser_parses_usage_options() -> None:
+    """It should parse the usage inspection command."""
+    parser = ai_review.build_parser()
+
+    args = parser.parse_args([
+        "usage",
+        "--usage-file",
+        "usage.jsonl",
+        "--config",
+        "alt-config.yaml",
+        "--no-color",
+    ])
+
+    assert args.command == "usage"
+    assert args.usage_file == "usage.jsonl"
+    assert args.config == "alt-config.yaml"
+    assert args.no_color is True
+
+
 def test_run_review_returns_error_for_invalid_config(mocker, review_config) -> None:
     """It should stop before command dispatch when configuration validation fails."""
     formatter = MagicMock()
@@ -177,6 +198,20 @@ def test_run_review_dispatches_to_list_prs(mocker, review_config) -> None:
     result = ai_review.run_review(make_args(command="list-prs"))
 
     assert result == 5
+    workflow.assert_called_once()
+
+
+def test_run_review_dispatches_usage_without_validating_credentials(mocker, review_config) -> None:
+    """Usage inspection should not require LLM or TFS configuration to be valid."""
+    review_config.validate = MagicMock(side_effect=AssertionError("should not validate"))
+    mocker.patch("src.ai_review.ReviewConfig.load", return_value=review_config)
+    workflow = mocker.patch("src.ai_review.run_usage", return_value=0)
+    mocker.patch("src.ai_review.ReviewFormatter")
+
+    result = ai_review.run_review(make_args(command="usage", usage_file="usage.jsonl"))
+
+    assert result == 0
+    assert review_config.usage_file == "usage.jsonl"
     workflow.assert_called_once()
 
 
@@ -277,6 +312,86 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert llm.review.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
+
+
+def test_store_pr_usage_persists_usage_record(mocker, tmp_path, review_config) -> None:
+    """It should write token usage for a reviewed PR."""
+    review_config.usage_file = str(tmp_path / "usage.jsonl")
+    review_config.usage_pricing = {
+        "openai": {
+            "gpt-4o-mini": {
+                "input_per_1m": 0.10,
+                "output_per_1m": 0.20,
+                "currency": "USD",
+            }
+        }
+    }
+
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: f"INFO:{message}"
+    print_mock = mocker.patch("builtins.print")
+
+    ai_review._store_pr_usage(
+        review_config,
+        formatter,
+        repo_name="repo-a",
+        pr_id=123,
+        dry_run=True,
+        comments_generated=2,
+        usage_events=[
+            TokenUsage(
+                provider="openai",
+                model="gpt-4o-mini",
+                operation="general_review",
+                prompt_tokens=100,
+                completion_tokens=50,
+            )
+        ],
+    )
+
+    stored = (tmp_path / "usage.jsonl").read_text(encoding="utf-8")
+    assert '"pull_request_id": 123' in stored
+    print_mock.assert_called_once()
+
+
+def test_run_usage_lists_and_shows_selected_pr(mocker, tmp_path, review_config) -> None:
+    """It should read usage records, list PRs, and show selected totals."""
+    usage_file = tmp_path / "usage.jsonl"
+    usage_file.write_text(
+        "\n".join([
+            '{"repository":"repo-a","pull_request_id":42,"timestamp":"2026-05-11T10:00:00+00:00","provider":"openai","model":"gpt-4o-mini","comments_generated":2,"tokens":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"calls":2,"estimated":false},"cost":{"amount":0.01,"currency":"USD","estimated":false}}',
+            '{"repository":"repo-b","pull_request_id":7,"timestamp":"2026-05-11T11:00:00+00:00","provider":"bedrock","model":"m","comments_generated":1,"tokens":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30,"calls":1,"estimated":true},"cost":null}',
+        ]),
+        encoding="utf-8",
+    )
+    review_config.usage_file = str(usage_file)
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: f"INFO:{message}"
+    mocker.patch("builtins.input", return_value="1")
+    print_mock = mocker.patch("builtins.print")
+
+    result = ai_review.run_usage(make_args(command="usage"), review_config, formatter)
+
+    assert result == 0
+    rendered = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
+    assert "Reviewed Pull Requests" in rendered
+    assert "Usage for PR #42" in rendered
+    assert "Total:  150" in rendered
+    assert "0.010000 USD" in rendered
+
+
+def test_run_usage_handles_empty_file(mocker, tmp_path, review_config) -> None:
+    """It should return cleanly when no usage records exist."""
+    review_config.usage_file = str(tmp_path / "missing.jsonl")
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: f"INFO:{message}"
+    print_mock = mocker.patch("builtins.print")
+
+    result = ai_review.run_usage(make_args(command="usage"), review_config, formatter)
+
+    assert result == 0
+    print_mock.assert_called_once()
+    assert "No PR usage records" in print_mock.call_args.args[0]
 
 
 def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_config) -> None:

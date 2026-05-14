@@ -17,6 +17,7 @@ import json
 import os
 
 from .config import ReviewConfig
+from .usage_tracker import TokenUsage, estimate_text_tokens
 
 
 class LLMError(Exception):
@@ -354,6 +355,135 @@ class LLMClient:
 
     def __init__(self, config: ReviewConfig):
         self.config = config
+        self.usage_events: list[TokenUsage] = []
+        self._current_operation = ""
+
+    def _call_provider(self, system_prompt: str, user_message: str) -> str:
+        """Dispatches the request to the configured provider."""
+        provider = self.config.llm_provider.lower()
+
+        if provider == "openai":
+            return self._call_openai(system_prompt, user_message)
+        elif provider == "azure_openai":
+            return self._call_openai(system_prompt, user_message, azure=True)
+        elif provider == "gemini":
+            return self._call_gemini(system_prompt, user_message)
+        elif provider == "claude":
+            return self._call_claude(system_prompt, user_message)
+        elif provider == "ollama":
+            return self._call_ollama(system_prompt, user_message)
+        elif provider == "copilot":
+            return self._call_copilot(system_prompt, user_message)
+        elif provider == "bedrock":
+            return self._call_bedrock(system_prompt, user_message)
+        else:
+            raise LLMError(
+                f"Unsupported provider: '{provider}'.\n"
+                "Available providers: openai, azure_openai, gemini, claude, ollama, copilot, bedrock"
+            )
+
+    def _run_tracked_call(
+        self,
+        operation: str,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        """Runs one provider call and records usage when metadata is missing."""
+        usage_count = len(self.usage_events)
+        previous_operation = self._current_operation
+        self._current_operation = operation
+        try:
+            result = self._call_provider(system_prompt, user_message)
+            if len(self.usage_events) == usage_count:
+                self._record_estimated_usage(system_prompt, user_message, result)
+            return result
+        finally:
+            self._current_operation = previous_operation
+
+    def _record_usage(
+        self,
+        usage_data: dict | None,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Normalizes provider token usage metadata into usage_events."""
+        if not isinstance(usage_data, dict):
+            return
+
+        prompt_tokens = self._first_int(
+            usage_data,
+            "prompt_tokens",
+            "input_tokens",
+            "inputTokens",
+            "promptTokenCount",
+            "prompt_eval_count",
+        )
+        completion_tokens = self._first_int(
+            usage_data,
+            "completion_tokens",
+            "output_tokens",
+            "outputTokens",
+            "candidatesTokenCount",
+            "completionTokenCount",
+            "eval_count",
+        )
+        total_tokens = self._first_int(
+            usage_data,
+            "total_tokens",
+            "totalTokens",
+            "totalTokenCount",
+        )
+
+        if not any((prompt_tokens, completion_tokens, total_tokens)):
+            return
+
+        self.usage_events.append(
+            TokenUsage(
+                provider=provider or self.config.llm_provider,
+                model=model or self.config.model,
+                operation=self._current_operation or "llm_call",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                estimated=False,
+            )
+        )
+
+    def _record_estimated_usage(
+        self,
+        system_prompt: str,
+        user_message: str,
+        response_text: str,
+    ) -> None:
+        """Records approximate usage when the API omits token metadata."""
+        prompt_tokens = estimate_text_tokens(system_prompt, user_message)
+        completion_tokens = estimate_text_tokens(response_text)
+        if not any((prompt_tokens, completion_tokens)):
+            return
+
+        self.usage_events.append(
+            TokenUsage(
+                provider=self.config.llm_provider,
+                model=self.config.model,
+                operation=self._current_operation or "llm_call",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                estimated=True,
+            )
+        )
+
+    @staticmethod
+    def _first_int(data: dict, *keys: str) -> int:
+        for key in keys:
+            value = data.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
 
     def _effective_prompt_token_limit(self) -> int:
         """Returns the configured/provider prompt budget, or 0 when unlimited."""
@@ -507,28 +637,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
         )
-
-        provider = self.config.llm_provider.lower()
-
-        if provider == "openai":
-            return self._call_openai(system_prompt, user_message)
-        elif provider == "azure_openai":
-            return self._call_openai(system_prompt, user_message, azure=True)
-        elif provider == "gemini":
-            return self._call_gemini(system_prompt, user_message)
-        elif provider == "claude":
-            return self._call_claude(system_prompt, user_message)
-        elif provider == "ollama":
-            return self._call_ollama(system_prompt, user_message)
-        elif provider == "copilot":
-            return self._call_copilot(system_prompt, user_message)
-        elif provider == "bedrock":
-            return self._call_bedrock(system_prompt, user_message)
-        else:
-            raise LLMError(
-                f"Unsupported provider: '{provider}'.\n"
-                "Available providers: openai, azure_openai, gemini, claude, ollama, copilot, bedrock"
-            )
+        return self._run_tracked_call("general_review", system_prompt, user_message)
 
     def review_pr_structured(self, diff: str, files_summary: list[dict],
                              context: str = "", review_scope: str = "diff_with_context",
@@ -575,24 +684,11 @@ class LLMClient:
             work_item_context=work_item_context,
         )
 
-        provider = self.config.llm_provider.lower()
-
-        if provider == "openai":
-            raw = self._call_openai(system_prompt, user_message)
-        elif provider == "azure_openai":
-            raw = self._call_openai(system_prompt, user_message, azure=True)
-        elif provider == "gemini":
-            raw = self._call_gemini(system_prompt, user_message)
-        elif provider == "claude":
-            raw = self._call_claude(system_prompt, user_message)
-        elif provider == "ollama":
-            raw = self._call_ollama(system_prompt, user_message)
-        elif provider == "copilot":
-            raw = self._call_copilot(system_prompt, user_message)
-        elif provider == "bedrock":
-            raw = self._call_bedrock(system_prompt, user_message)
-        else:
-            raise LLMError(f"Unsupported provider: '{provider}'")
+        raw = self._run_tracked_call(
+            "structured_comments",
+            system_prompt,
+            user_message,
+        )
 
         return self._parse_structured_comments(raw)
 
@@ -773,6 +869,11 @@ class LLMClient:
                 content = candidates[0].get("content", {})
                 parts = content.get("parts", [])
                 if parts:
+                    self._record_usage(
+                        data.get("usageMetadata"),
+                        provider="gemini",
+                        model=model,
+                    )
                     return parts[0].get("text", "")
 
             raise LLMError(f"Unexpected Gemini response: {json.dumps(data)[:500]}")
@@ -858,6 +959,11 @@ class LLMClient:
                     if block.get("type") == "text"
                 ]
                 if text_parts:
+                    self._record_usage(
+                        data.get("usage"),
+                        provider="claude",
+                        model=model,
+                    )
                     return "\n".join(text_parts)
 
             raise LLMError(f"Unexpected Claude response: {json.dumps(data)[:500]}")
@@ -923,6 +1029,11 @@ class LLMClient:
             data = resp.json()
 
             if "choices" in data and data["choices"]:
+                self._record_usage(
+                    data.get("usage"),
+                    provider="ollama",
+                    model=model,
+                )
                 return data["choices"][0]["message"]["content"]
             else:
                 raise LLMError(f"Unexpected Ollama response: {json.dumps(data)[:500]}")
@@ -963,6 +1074,7 @@ class LLMClient:
             resp = requests.post(url, json=payload, timeout=300)
             resp.raise_for_status()
             data = resp.json()
+            self._record_usage(data, provider="ollama", model=model)
             return data.get("message", {}).get("content", str(data))
         except Exception as exc:
             raise LLMError(f"Error in Ollama native call: {exc}")
@@ -1067,6 +1179,11 @@ class LLMClient:
             data = resp.json()
 
             if "choices" in data and data["choices"]:
+                self._record_usage(
+                    data.get("usage"),
+                    provider="copilot",
+                    model=model,
+                )
                 return data["choices"][0]["message"]["content"]
             else:
                 raise LLMError(
@@ -1198,6 +1315,11 @@ class LLMClient:
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
             raise LLMError(f"Unexpected Bedrock response: {json.dumps(data)[:500]}")
+        self._record_usage(
+            data.get("usage"),
+            provider="bedrock",
+            model=self.config.model,
+        )
         return text
 
     def _call_bedrock_sigv4(
@@ -1341,6 +1463,11 @@ class LLMClient:
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
             raise LLMError(f"Unexpected Bedrock response: {json.dumps(data)[:500]}")
+        self._record_usage(
+            data.get("usage"),
+            provider="bedrock",
+            model=self.config.model,
+        )
         return text
 
     def _call_bedrock_boto3(self, region: str, system_prompt: str, user_message: str) -> str:
@@ -1410,6 +1537,11 @@ class LLMClient:
                     f"Unexpected Bedrock response: {json.dumps(response)[:500]}"
                 )
 
+            self._record_usage(
+                response.get("usage"),
+                provider="bedrock",
+                model=self.config.model,
+            )
             return text
 
         except (BotoCoreError, ClientError) as exc:
@@ -1441,6 +1573,7 @@ class LLMClient:
             data = resp.json()
 
             if "choices" in data and data["choices"]:
+                self._record_usage(data.get("usage"), model=payload.get("model", ""))
                 return data["choices"][0]["message"]["content"]
             else:
                 raise LLMError(f"Unexpected API response: {json.dumps(data)[:500]}")

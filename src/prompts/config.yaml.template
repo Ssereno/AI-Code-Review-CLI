@@ -176,3 +176,20 @@ output:
 
   # Terminal colors
   color: true
+
+# ---------------------------------------------------------------------------
+# Usage Tracking
+# ---------------------------------------------------------------------------
+usage:
+  # Store token usage per reviewed PR in JSON Lines format
+  enabled: true
+  file: .ai-review-usage.jsonl
+
+  # Optional cost estimation. Prices are per 1M tokens in your billing currency.
+  # Keep these values in sync with your provider contract/pricing page.
+  # pricing:
+  #   openai:
+  #     gpt-4o-mini:
+  #       input_per_1m: 0.15
+  #       output_per_1m: 0.60
+  #       currency: USD
