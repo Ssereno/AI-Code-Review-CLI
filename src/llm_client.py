@@ -25,6 +25,12 @@ class LLMError(Exception):
     pass
 
 
+ESTIMATED_CHARS_PER_TOKEN = 3
+DEFAULT_PROMPT_TOKEN_LIMITS = {
+    "bedrock": 180000,
+}
+
+
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
@@ -152,12 +158,13 @@ PR_COMMENT_PROMPT = {
         "e retorna os teus comentários em formato JSON estruturado.\n\n"
         "Para CADA problema encontrado, retorna um objeto JSON com:\n"
         '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
-        '- "line": número da linha no diff (inteiro, ou 0 se geral)\n'
+        '- "line": número da linha no ficheiro novo/right-side para a linha adicionada ou modificada do PR (inteiro, ou 0 se não houver localização inline)\n'
         '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
         '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -181,12 +188,13 @@ PR_COMMENT_PROMPT = {
         "and return your comments in structured JSON format.\n\n"
         "For EACH issue found, return a JSON object with:\n"
         '- "file": file path (e.g., "src/auth.py")\n'
-        '- "line": line number in diff (integer, or 0 if general)\n'
+        '- "line": line number in the new/right-side file for the added or modified PR line (integer, or 0 if no inline location)\n'
         '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
+        "Only return problem comments when file and line point to an added or modified PR line. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
@@ -209,7 +217,7 @@ def get_pr_comment_prompt(language: str) -> str:
 
 def get_scope_guidance(review_scope: str, language: str, structured: bool = False) -> str:
     """Returns additional instructions based on the review scope."""
-    scope = (review_scope or "diff_only").lower()
+    scope = (review_scope or "diff_with_context").lower()
 
     if scope == "full_code":
         if language == "en":
@@ -224,18 +232,64 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
             "Não comentes código eliminado ou ausente."
         )
 
+    if scope == "diff_with_context":
+        if structured:
+            if language == "en":
+                return (
+                    "Review scope: diff_with_context. Changed files and selected on-demand repository files "
+                    "are provided as read-only context, and the diff includes added lines (+), deleted lines "
+                    "(-), and surrounding unchanged context. Use repository context, diff context lines, and "
+                    "linked work item documentation only to understand the rest of the repository, product intent, and "
+                    "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
+                    "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
+                    "The file and line must point to an added or modified line in the PR diff, not a context-only "
+                    "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
+                    "already exists, do not report it as missing. "
+                    "Do not emit general problem comments without file/line."
+                )
+            return (
+                "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
+                "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas "
+                "removidas (-) e contexto inalterado à volta das alterações. Usa o contexto do repositório, as "
+                "linhas de contexto do diff e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
+                "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
+                "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
+                "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
+                "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
+                "propriedade, contrato ou comportamento já existe, não o reportes como ausente. "
+                "Não emitas comentários gerais de problema sem file/line."
+            )
+
+        if language == "en":
+            return (
+                "Review scope: diff_with_context. Changed files and selected on-demand repository files are "
+                "provided as read-only context, and the diff includes added lines (+), deleted lines (-), and "
+                "surrounding unchanged context. Use repository context, diff context lines, and linked work item documentation only to understand "
+                "the rest of the repository, product intent, and requirements. "
+                "Focus only on issues introduced by added lines (+) in this PR."
+            )
+        return (
+            "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
+            "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
+            "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a documentação "
+            "dos work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
+            "Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
+        )
+
     if structured:
         if language == "en":
             return (
                 "Review scope: diff_only. The diff contains only added lines (+) — context and deletions were removed. "
                 "Focus exclusively on issues introduced by the new lines in this PR. "
                 "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
+                "The file and line must point to a modified line in the PR diff. "
                 "Do not emit general problem comments without file/line."
             )
         return (
             "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
             "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
+            "O file e line devem apontar para uma linha modificada no diff do PR. "
             "Não emitas comentários gerais de problema sem file/line."
         )
 
@@ -250,7 +304,9 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     )
 
 
-def build_user_message(diff: str, files_summary: list[dict], context: str = "") -> str:
+def build_user_message(diff: str, files_summary: list[dict],
+                       context: str = "", project_context: str = "",
+                       work_item_context: str = "") -> str:
     """
     Builds the user message with the diff and context.
     """
@@ -267,8 +323,83 @@ def build_user_message(diff: str, files_summary: list[dict], context: str = "") 
     if context:
         parts.append(f"### Additional context:\n{context}\n")
 
+    if work_item_context:
+        parts.append(
+            "### Linked work item documentation (read-only, not review target):\n"
+            f"{work_item_context}\n"
+        )
+
+    if project_context:
+        parts.append(
+            "### Repository context (read-only, not review target):\n"
+            f"{project_context}\n"
+        )
+
+    parts.append(
+        "### Review target:\n"
+        "Review only the PR changes below. Use all context above only to understand "
+        "the repository and requirements. Problem comments must point to added or "
+        "modified lines in this diff.\n"
+    )
     parts.append("### Diff for review:")
     parts.append(f"```diff\n{diff}\n```")
+
+    return "\n".join(parts)
+
+
+def build_context_request_message(diff: str, files_summary: list[dict],
+                                  project_manifest: str,
+                                  context: str = "",
+                                  changed_files_context: str = "",
+                                  work_item_context: str = "",
+                                  fetched_context: str = "",
+                                  max_files: int = 20) -> str:
+    """Builds the prompt used to ask the model for extra context files."""
+    parts = []
+
+    if files_summary:
+        parts.append("### Changed Files:")
+        for f in files_summary:
+            parts.append(
+                f"  - `{f['file']}` (+{f['additions']}/-{f['deletions']})"
+            )
+        parts.append("")
+
+    if context:
+        parts.append(f"### Additional context:\n{context}\n")
+
+    if work_item_context:
+        parts.append(
+            "### Linked work item documentation:\n"
+            f"{work_item_context}\n"
+        )
+
+    if changed_files_context:
+        parts.append(
+            "### Changed file context:\n"
+            f"{changed_files_context}\n"
+        )
+
+    if fetched_context:
+        parts.append(
+            "### Already fetched repository context:\n"
+            f"{fetched_context}\n"
+        )
+
+    parts.append(
+        "### Repository manifest:\n"
+        f"{project_manifest}\n"
+    )
+    parts.append(
+        "### PR diff:\n"
+        f"```diff\n{diff}\n```\n"
+    )
+    parts.append(
+        "Return JSON only in this exact shape:\n"
+        f'{{"files":["path/to/file"],"reason":"short reason"}}\n'
+        f"Request at most {max_files} files. Only request files from the manifest. "
+        "If no more context is needed, return {\"files\":[],\"reason\":\"enough context\"}."
+    )
 
     return "\n".join(parts)
 
@@ -411,6 +542,191 @@ class LLMClient:
                 continue
         return 0
 
+    def _effective_prompt_token_limit(self) -> int:
+        """Returns the configured/provider prompt budget, or 0 when unlimited."""
+        configured = int(getattr(self.config, "max_prompt_tokens", 0) or 0)
+        if configured > 0:
+            return configured
+        return DEFAULT_PROMPT_TOKEN_LIMITS.get(self.config.llm_provider.lower(), 0)
+
+    def _estimate_prompt_tokens(self, *parts: str) -> int:
+        """Conservative token estimate used only to avoid provider hard limits."""
+        total_chars = sum(len(part or "") for part in parts)
+        return (total_chars + ESTIMATED_CHARS_PER_TOKEN - 1) // ESTIMATED_CHARS_PER_TOKEN
+
+    def _trim_project_context_for_prompt_budget(
+        self,
+        *,
+        system_prompt: str,
+        diff: str,
+        files_summary: list[dict],
+        context: str,
+        project_context: str,
+        work_item_context: str,
+    ) -> str:
+        """Trims repository context when the full prompt would exceed the budget."""
+        limit = self._effective_prompt_token_limit()
+        if limit <= 0 or not project_context:
+            return project_context
+
+        full_message = build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+        if self._estimate_prompt_tokens(system_prompt, full_message) <= limit:
+            return project_context
+
+        base_message = build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context="",
+            work_item_context=work_item_context,
+        )
+        base_tokens = self._estimate_prompt_tokens(system_prompt, base_message)
+        available_tokens = limit - base_tokens
+        if available_tokens <= 0:
+            return (
+                "[Repository context omitted because the PR diff, work item "
+                "documentation, and prompt instructions already reached the "
+                f"configured prompt budget of {limit} estimated tokens.]"
+            )
+
+        notice = (
+            "\n\n[Repository context truncated to fit the configured prompt "
+            f"budget of {limit} estimated tokens.]"
+        )
+        char_budget = max(
+            0,
+            (available_tokens * ESTIMATED_CHARS_PER_TOKEN) - len(notice),
+        )
+        if char_budget <= 0:
+            return notice.strip()
+
+        return project_context[:char_budget].rstrip() + notice
+
+    def _build_user_message_with_prompt_budget(
+        self,
+        *,
+        system_prompt: str,
+        diff: str,
+        files_summary: list[dict],
+        context: str,
+        project_context: str,
+        work_item_context: str,
+    ) -> str:
+        """Builds the user prompt, trimming only repo context if necessary."""
+        project_context = self._trim_project_context_for_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+        return build_user_message(
+            diff,
+            files_summary,
+            context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
+
+    def request_context_files(self, diff: str, files_summary: list[dict],
+                              project_manifest: str,
+                              context: str = "",
+                              changed_files_context: str = "",
+                              work_item_context: str = "",
+                              fetched_context: str = "",
+                              max_files: int = 20) -> list[str]:
+        """Asks the model which repository files it needs for extra context."""
+        if not project_manifest.strip() or max_files <= 0:
+            return []
+
+        system_prompt = (
+            "You are selecting additional repository files for a code review. "
+            "Use the PR diff, changed file context, work item documentation, and "
+            "repository manifest to decide whether extra files are needed. "
+            "Return JSON only. Do not review the code yet."
+        )
+        user_message = build_context_request_message(
+            diff=diff,
+            files_summary=files_summary,
+            project_manifest=project_manifest,
+            context=context,
+            changed_files_context=changed_files_context,
+            work_item_context=work_item_context,
+            fetched_context=fetched_context,
+            max_files=max_files,
+        )
+        raw = self._run_tracked_call(
+            "context_request",
+            system_prompt,
+            user_message,
+        )
+        return self._parse_context_file_request(raw)[:max_files]
+
+    def _parse_context_file_request(self, raw_response: str) -> list[str]:
+        """Parses requested file paths from a model JSON response."""
+        text = (raw_response or "").strip()
+        if not text:
+            return []
+
+        if text.startswith("```"):
+            lines = []
+            in_block = False
+            for line in text.splitlines():
+                if line.strip().startswith("```"):
+                    in_block = not in_block
+                    continue
+                if in_block or not line.strip().startswith("```"):
+                    lines.append(line)
+            text = "\n".join(lines).strip()
+
+        start_object = text.find("{")
+        end_object = text.rfind("}")
+        start_array = text.find("[")
+        end_array = text.rfind("]")
+
+        json_text = text
+        if start_object != -1 and end_object != -1:
+            json_text = text[start_object:end_object + 1]
+        elif start_array != -1 and end_array != -1:
+            json_text = text[start_array:end_array + 1]
+
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            return []
+
+        if isinstance(payload, dict):
+            raw_files = payload.get("files", payload.get("paths", []))
+        elif isinstance(payload, list):
+            raw_files = payload
+        else:
+            return []
+
+        files: list[str] = []
+        seen: set[str] = set()
+        for item in raw_files or []:
+            if not isinstance(item, str):
+                continue
+            path = item.replace("\\", "/").strip()
+            if path.startswith(("a/", "b/")):
+                path = path[2:]
+            path = path.lstrip("/")
+            if not path:
+                continue
+            key = path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+        return files
+
     def _load_custom_prompt_text(self) -> str:
         """Loads extra instructions from a configurable Markdown file."""
         path = (self.config.custom_prompt_file or "").strip()
@@ -428,7 +744,8 @@ class LLMClient:
             return ""
 
     def review(self, diff: str, files_summary: list[dict],
-               context: str = "", review_scope: str = "diff_only") -> str:
+               context: str = "", review_scope: str = "diff_with_context",
+               project_context: str = "", work_item_context: str = "") -> str:
         """
         Sends the diff to the LLM and returns the review as text.
         """
@@ -461,11 +778,20 @@ class LLMClient:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
             merged_context = context
 
-        user_message = build_user_message(diff, files_summary, merged_context)
+        user_message = self._build_user_message_with_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=merged_context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
         return self._run_tracked_call("general_review", system_prompt, user_message)
 
     def review_pr_structured(self, diff: str, files_summary: list[dict],
-                             context: str = "", review_scope: str = "diff_only") -> list[dict]:
+                             context: str = "", review_scope: str = "diff_with_context",
+                             project_context: str = "",
+                             work_item_context: str = "") -> list[dict]:
         """
         Sends the diff to the LLM and returns structured PR comments.
         
@@ -498,7 +824,14 @@ class LLMClient:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
             merged_context = context
 
-        user_message = build_user_message(diff, files_summary, merged_context)
+        user_message = self._build_user_message_with_prompt_budget(
+            system_prompt=system_prompt,
+            diff=diff,
+            files_summary=files_summary,
+            context=merged_context,
+            project_context=project_context,
+            work_item_context=work_item_context,
+        )
 
         raw = self._run_tracked_call(
             "structured_comments",

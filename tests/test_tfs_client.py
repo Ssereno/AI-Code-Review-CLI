@@ -349,6 +349,243 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "No textual differences detected" in no_text[-1]
 
 
+def test_get_project_context_fetches_source_branch_files(mocker) -> None:
+    """It should build repository context from the PR source branch."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/node_modules/pkg/index.js", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+                {"path": "/src", "isFolder": True},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["# docs", "print('x')"],
+    )
+
+    context = client.get_project_context(
+        "repo-a",
+        "refs/heads/feature/context",
+        max_files=10,
+        max_chars=1000,
+    )
+
+    assert "### Full repository context" in context
+    assert "Source branch: feature/context" in context
+    assert "/README.md" in context
+    assert "/src/app.py" in context
+    assert "node_modules" not in context
+    assert "logo.png" not in context
+    path, params = get_mock.call_args.args[:2]
+    assert path == "git/repositories/repo-a/items"
+    assert params["recursionLevel"] == "Full"
+    assert params["versionDescriptor.version"] == "feature/context"
+    assert get_file.call_count == 2
+    assert get_file.call_args_list[0].kwargs["version"] == "feature/context"
+
+
+def test_get_project_context_zero_limits_include_all_eligible_files(mocker) -> None:
+    """It should treat zero project context limits as unlimited."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/src/domain.py", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["# docs", "print('x')", "class Domain: pass"],
+    )
+
+    context = client.get_project_context(
+        "repo-a",
+        "feature/full-context",
+        max_files=0,
+        max_chars=0,
+    )
+
+    assert "/README.md" in context
+    assert "/src/app.py" in context
+    assert "/src/domain.py" in context
+    assert "Repository context truncated" not in context
+    assert get_file.call_count == 3
+
+
+def test_get_project_manifest_lists_eligible_files(mocker) -> None:
+    """It should render a compact manifest without fetching file contents."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/dist/app.js", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch("src.tfs_client.TFSClient._get_file_content")
+
+    manifest = client.get_project_manifest(
+        "repo-a",
+        "refs/heads/feature/context",
+        max_chars=1000,
+    )
+
+    assert "Repository file manifest" in manifest
+    assert "- /README.md" in manifest
+    assert "- /src/app.py" in manifest
+    assert "dist" not in manifest
+    assert "logo.png" not in manifest
+    get_mock.assert_called_once()
+    get_file.assert_not_called()
+
+
+def test_get_changed_and_requested_file_contexts_validate_paths(mocker) -> None:
+    """It should fetch only eligible selected files for bounded context."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/src/helper.py", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["print('app')", "helper = True"],
+    )
+
+    changed_context = client.get_changed_files_context(
+        "repo-a",
+        "feature/context",
+        [
+            {"path": "/src/app.py", "change_type": "edit"},
+            {"path": "/deleted.py", "change_type": "delete"},
+        ],
+        max_chars=1000,
+        file_max_chars=1000,
+    )
+    requested_context = client.get_project_files_context(
+        "repo-a",
+        "feature/context",
+        ["src/helper.py", "assets/logo.png", "../secret.txt"],
+        max_files=3,
+        max_chars=1000,
+        file_max_chars=1000,
+    )
+
+    assert "Changed file context" in changed_context
+    assert "/src/app.py" in changed_context
+    assert "deleted.py" not in changed_context
+    assert "Requested repository context" in requested_context
+    assert "/src/helper.py" in requested_context
+    assert "#### /assets/logo.png" not in requested_context
+    assert "secret" in requested_context
+    assert get_file.call_count == 2
+
+
+def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
+    """It should build read-only context from PR-linked work item fields."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": "101"}, {"id": "not-a-number"}]},
+            {
+                "value": [
+                    {
+                        "id": 101,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Validate checkout totals</p>",
+                            "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>Total includes tax</li></ul>",
+                        },
+                        "relations": [
+                            {
+                                "rel": "Hyperlink",
+                                "url": "https://example.invalid/spec",
+                                "attributes": {"comment": "Spec"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context("repo-a", 42, max_items=5, max_chars=5000)
+
+    assert "Linked work item documentation" in context
+    assert "Work Item 101: Checkout validation" in context
+    assert "Validate checkout totals" in context
+    assert "Total includes tax" in context
+    assert "Spec: https://example.invalid/spec" in context
+    work_item_call = get_mock.call_args_list[0]
+    assert work_item_call.args[0] == "git/repositories/repo-a/pullRequests/42/workitems"
+    assert work_item_call.kwargs["api_version"] == "7.1"
+    details_call = get_mock.call_args_list[1]
+    assert details_call.args[0] == "wit/workitems"
+    assert details_call.args[1]["ids"] == "101"
+    assert details_call.args[1]["$expand"] == "relations"
+    assert "System.Description" in details_call.args[1]["fields"].split(",")
+    assert details_call.kwargs["api_version"] == "7.1"
+
+
+def test_work_item_context_always_requests_description(mocker) -> None:
+    """It should include work item descriptions even with custom field settings."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": "101"}]},
+            {
+                "value": [
+                    {
+                        "id": 101,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Use the documented tax rules.</p>",
+                            "Custom.Documentation": "Regional checkout spec",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["Custom.Documentation"],
+    )
+
+    requested_fields = get_mock.call_args_list[1].args[1]["fields"].split(",")
+    assert "System.Description" in requested_fields
+    assert "Custom.Documentation" in requested_fields
+    assert "Use the documented tax rules." in context
+    assert "Regional checkout spec" in context
+
+
 def test_raw_get_and_comment_endpoints(mocker) -> None:
     """It should expose raw file content and build comment payloads correctly."""
     client = TFSClient(make_tfs_config())
@@ -405,6 +642,79 @@ def test_post_review_comments_formats_and_routes_comments(mocker) -> None:
     assert results[2]["success"] is False
 
 
+def test_plan_review_comments_skips_duplicates_and_reopens_fixed_tool_comments(mocker) -> None:
+    """It should skip active duplicates and reopen fixed tool comments that reappear."""
+    client = TFSClient(make_tfs_config())
+    comment = {
+        "file": "src/app.py",
+        "line": 7,
+        "type": "bug",
+        "severity": "high",
+        "comment": "Avoid duplicate charge calculation",
+        "suggestion": "Reuse the existing total",
+    }
+    tagged_body = client._format_review_comment(comment)
+    base_thread = {
+        "id": 10,
+        "threadContext": {
+            "filePath": "/src/app.py",
+            "rightFileStart": {"line": 7},
+        },
+        "comments": [{"content": tagged_body}],
+    }
+
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={"value": [{**base_thread, "status": 1}]},
+    )
+    active_plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert active_plan["new_comments"] == []
+    assert len(active_plan["skipped_duplicates"]) == 1
+    assert active_plan["resolved_reappeared"] == []
+
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={"value": [{**base_thread, "status": 2}]},
+    )
+    fixed_plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert fixed_plan["new_comments"] == []
+    assert fixed_plan["skipped_duplicates"] == []
+    assert fixed_plan["resolved_reappeared"][0]["thread_id"] == 10
+    assert fixed_plan["resolved_reappeared"][0]["status"] == "fixed"
+
+
+def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
+    """It should activate the old thread and add a tagged re-check reply."""
+    client = TFSClient(make_tfs_config())
+    update = mocker.patch("src.tfs_client.TFSClient.update_thread_status", return_value={"id": 10})
+    reply = mocker.patch("src.tfs_client.TFSClient.reply_to_thread", return_value={"id": 11})
+
+    results = client.reopen_resolved_tool_comments(
+        "repo-a",
+        1,
+        [
+            {
+                "thread_id": 10,
+                "comment": {
+                    "file": "src/app.py",
+                    "line": 7,
+                    "type": "bug",
+                    "severity": "high",
+                    "comment": "Avoid duplicate charge calculation",
+                },
+            }
+        ],
+    )
+
+    assert results == [{"success": True, "thread_id": 10, "file": "src/app.py", "line": 7}]
+    update.assert_called_once_with("repo-a", 1, 10, "active")
+    reply_body = reply.call_args.args[3]
+    assert "ai-code-review-cli" in reply_body
+    assert "AI Code Review re-check" in reply_body
+
+
 def test_repository_helpers_and_status_formatting(mocker) -> None:
     """It should format review comments and resolve repositories by name."""
     client = TFSClient(make_tfs_config())
@@ -419,6 +729,8 @@ def test_repository_helpers_and_status_formatting(mocker) -> None:
     )
     assert "Security" in comment
     assert "Use a vault" in comment
+    assert "ai-code-review-cli" in comment
+    assert "ai-code-review-fingerprint" in comment
     assert client._status_to_int("wontfix") == 3
     assert client._status_to_int("unknown") == 1
 

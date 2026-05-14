@@ -10,6 +10,7 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Dry-run Mode** — Validate reviews before posting
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
+- **Project-aware PR Context** — Sends repository and linked work item context while restricting findings to modified PR lines
 - **Customizable Prompts** — Markdown-based review guidelines
 - **Usage Tracking** — Store per-PR token usage and optional cost estimates
 - **Interactive CLI** — Menu-driven selection and confirmation
@@ -89,9 +90,29 @@ tfs:
 review:
   language: pt
   verbosity: detailed                  # or: quick, security
+  scope: diff_with_context             # diff_with_context, diff_only, full_code
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
+  project_context:
+    enabled: true
+    mode: on_demand                      # on_demand, full
+    manifest_max_chars: 60000
+    retrieval_max_rounds: 2
+    retrieval_max_files: 20
+    retrieval_max_chars: 120000
+    retrieval_file_max_chars: 30000
+  work_item_context:
+    enabled: true
+    max_items: 20
 ```
+
+By default, repository context is loaded on demand: the prompt includes the PR
+diff, full changed-file contents, linked work item documentation, and a
+repository manifest, then the model requests any extra files it needs. Set
+`review.project_context.mode: full` to send the full eligible repository
+snapshot instead. Bedrock uses a default estimated prompt budget of 180000
+tokens; override it with `llm.max_prompt_tokens` if your model supports more or
+less.
 
 ## Development & Testing
 

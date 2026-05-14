@@ -15,7 +15,11 @@ Works with both on-premises TFS and Azure DevOps Services.
 
 import base64
 import difflib
+import fnmatch
+import hashlib
+import html
 import os
+import re
 from typing import Optional
 
 from .config import ReviewConfig
@@ -24,6 +28,94 @@ from .config import ReviewConfig
 class TFSError(Exception):
     """Exception for TFS/Azure DevOps communication errors."""
     pass
+
+
+DEFAULT_PROJECT_CONTEXT_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cfg",
+    ".cmd",
+    ".conf",
+    ".cpp",
+    ".cs",
+    ".csproj",
+    ".css",
+    ".fs",
+    ".fsproj",
+    ".go",
+    ".gradle",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".less",
+    ".md",
+    ".php",
+    ".props",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".rst",
+    ".sass",
+    ".scala",
+    ".scss",
+    ".sh",
+    ".sln",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".targets",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".vb",
+    ".vue",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+
+DEFAULT_PROJECT_CONTEXT_FILENAMES = {
+    "dockerfile",
+    "makefile",
+    "rakefile",
+    "gemfile",
+    "procfile",
+    "requirements",
+}
+
+WORK_ITEM_CONTEXT_FIELD_LABELS = {
+    "System.Title": "Title",
+    "System.WorkItemType": "Type",
+    "System.State": "State",
+    "System.Description": "Description",
+    "Microsoft.VSTS.Common.AcceptanceCriteria": "Acceptance Criteria",
+    "Microsoft.VSTS.TCM.ReproSteps": "Repro Steps",
+    "Microsoft.VSTS.TCM.SystemInfo": "System Info",
+}
+
+DEFAULT_WORK_ITEM_CONTEXT_FIELDS = list(WORK_ITEM_CONTEXT_FIELD_LABELS)
+
+TOOL_COMMENT_MARKER = "<!-- ai-code-review-cli -->"
+TOOL_COMMENT_KIND_PREFIX = "<!-- ai-code-review-kind:"
+TOOL_COMMENT_FINGERPRINT_PREFIX = "<!-- ai-code-review-fingerprint:"
+
+THREAD_STATUS_NAMES = {
+    1: "active",
+    2: "fixed",
+    3: "wontfix",
+    4: "closed",
+    5: "bydesign",
+    6: "pending",
+}
 
 
 class TFSClient:
@@ -295,7 +387,7 @@ class TFSClient:
         return files
 
     def get_pull_request_diff(self, repository: str, pr_id: int,
-                              review_scope: str = "diff_only") -> str:
+                              review_scope: str = "diff_with_context") -> str:
         """
         Gets the diff of a specific Pull Request.
         
@@ -328,7 +420,7 @@ class TFSClient:
         )
         changes = self._get(changes_path)
 
-        review_scope = (review_scope or "diff_only").lower()
+        review_scope = (review_scope or "diff_with_context").lower()
 
         # Build diff from the changes
         diff_parts = []
@@ -476,8 +568,698 @@ class TFSClient:
         return self._get_raw(path, params)
 
     # ==================================================================
+    # Repository Context
+    # ==================================================================
+    def get_project_context(self, repository: str, branch: str,
+                            max_files: int = 0,
+                            max_chars: int = 0,
+                            file_extensions: Optional[list[str]] = None,
+                            exclude_patterns: Optional[list[str]] = None) -> str:
+        """
+        Builds a repository snapshot to use as read-only LLM context.
+
+        The returned text is intentionally separate from the review diff. The
+        LLM can use it to understand contracts and call sites, but findings
+        must still be anchored to lines in the PR diff.
+        """
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name:
+            return ""
+
+        files = self._list_repository_files(repository, branch_name)
+        extensions = self._normalize_extensions(file_extensions)
+        eligible_paths = [
+            item.get("path", "")
+            for item in files
+            if self._is_project_context_file(
+                item=item,
+                file_extensions=extensions,
+                exclude_patterns=exclude_patterns,
+            )
+        ]
+
+        if not eligible_paths:
+            return ""
+
+        eligible_paths = sorted(set(eligible_paths))
+        file_limit = max_files if max_files and max_files > 0 else None
+        char_limit = max_chars if max_chars and max_chars > 0 else None
+        selected_paths = (
+            eligible_paths[:file_limit]
+            if file_limit is not None
+            else eligible_paths
+        )
+        omitted_files = max(0, len(eligible_paths) - len(selected_paths))
+
+        parts = [
+            "### Full repository context",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            "Use this repository snapshot only to understand existing architecture, "
+            "contracts, dependencies, and call sites. The review target remains "
+            "the PR diff only. Do not report issues from this context unless the "
+            "issue is caused by an added or modified line in the PR diff.",
+            "",
+        ]
+
+        used_chars = 0
+        included_files = 0
+        truncated = False
+
+        for path in selected_paths:
+            remaining = char_limit - used_chars if char_limit is not None else None
+            if remaining is not None and remaining <= 0:
+                truncated = True
+                break
+
+            try:
+                content = self._get_file_content(
+                    repository,
+                    path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                continue
+
+            if remaining is not None and len(content) > remaining:
+                content = content[:remaining]
+                truncated = True
+
+            parts.extend([
+                f"#### {path}",
+                "````text",
+                content,
+                "````",
+                "",
+            ])
+            used_chars += len(content)
+            included_files += 1
+
+            if truncated:
+                break
+
+        if included_files == 0:
+            return ""
+
+        if truncated or omitted_files:
+            configured_chars = (
+                "unlimited" if char_limit is None else str(char_limit)
+            )
+            parts.append(
+                "[Repository context truncated: "
+                f"included {included_files} file(s), omitted {omitted_files} file(s), "
+                f"used {used_chars} of {configured_chars} configured characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def get_project_manifest(self, repository: str, branch: str,
+                             max_chars: int = 60000,
+                             file_extensions: Optional[list[str]] = None,
+                             exclude_patterns: Optional[list[str]] = None) -> str:
+        """Builds a compact manifest of eligible repository files."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name:
+            return ""
+
+        eligible_paths = self._get_project_context_paths(
+            repository,
+            branch_name,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+        if not eligible_paths:
+            return ""
+
+        parts = [
+            "### Repository file manifest",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            "The following files are available for on-demand context. Request only "
+            "files that are necessary to understand the PR changes.",
+            "",
+        ]
+
+        used_chars = 0
+        included = 0
+        truncated = False
+        for path in eligible_paths:
+            line = f"- {path}"
+            line_chars = len(line) + 1
+            if used_chars + line_chars > max_chars:
+                truncated = True
+                break
+            parts.append(line)
+            used_chars += line_chars
+            included += 1
+
+        omitted = max(0, len(eligible_paths) - included)
+        if truncated or omitted:
+            parts.append(
+                f"[Repository manifest truncated: included {included} file(s), "
+                f"omitted {omitted} file(s).]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def get_changed_files_context(self, repository: str, branch: str,
+                                  changed_files: list[dict],
+                                  max_chars: int = 120000,
+                                  file_max_chars: int = 30000,
+                                  file_extensions: Optional[list[str]] = None,
+                                  exclude_patterns: Optional[list[str]] = None) -> str:
+        """Fetches complete contents for eligible files changed by the PR."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not changed_files:
+            return ""
+
+        paths = [
+            str(item.get("path", ""))
+            for item in changed_files
+            if str(item.get("change_type", "")).lower() != "delete"
+        ]
+        return self._build_repository_files_context(
+            repository=repository,
+            branch_name=branch_name,
+            requested_paths=paths,
+            title="Changed file context",
+            intro=(
+                "These are the full contents of files changed by the PR. Use them "
+                "for context, but keep findings anchored to changed PR lines."
+            ),
+            max_files=len(paths) if paths else 1,
+            max_chars=max_chars,
+            file_max_chars=file_max_chars,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+
+    def get_project_files_context(self, repository: str, branch: str,
+                                  requested_paths: list[str],
+                                  max_files: int = 20,
+                                  max_chars: int = 120000,
+                                  file_max_chars: int = 30000,
+                                  file_extensions: Optional[list[str]] = None,
+                                  exclude_patterns: Optional[list[str]] = None) -> str:
+        """Fetches selected eligible repository files for on-demand context."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not requested_paths:
+            return ""
+
+        return self._build_repository_files_context(
+            repository=repository,
+            branch_name=branch_name,
+            requested_paths=requested_paths,
+            title="Requested repository context",
+            intro=(
+                "These files were requested by the model to understand the PR. "
+                "They are read-only context, not review targets."
+            ),
+            max_files=max_files,
+            max_chars=max_chars,
+            file_max_chars=file_max_chars,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+
+    def _get_project_context_paths(self, repository: str, branch_name: str,
+                                   file_extensions: Optional[list[str]] = None,
+                                   exclude_patterns: Optional[list[str]] = None) -> list[str]:
+        """Returns sorted eligible file paths for repository context."""
+        files = self._list_repository_files(repository, branch_name)
+        extensions = self._normalize_extensions(file_extensions)
+        eligible_paths = [
+            item.get("path", "")
+            for item in files
+            if self._is_project_context_file(
+                item=item,
+                file_extensions=extensions,
+                exclude_patterns=exclude_patterns,
+            )
+        ]
+        return sorted(set(path for path in eligible_paths if path))
+
+    def _build_repository_files_context(
+        self,
+        *,
+        repository: str,
+        branch_name: str,
+        requested_paths: list[str],
+        title: str,
+        intro: str,
+        max_files: int,
+        max_chars: int,
+        file_max_chars: int,
+        file_extensions: Optional[list[str]],
+        exclude_patterns: Optional[list[str]],
+    ) -> str:
+        """Renders selected repository files after eligibility validation."""
+        eligible_paths = self._get_project_context_paths(
+            repository,
+            branch_name,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+        eligible_by_normalized = {
+            self._normalize_context_path(path): path
+            for path in eligible_paths
+        }
+
+        selected_paths: list[str] = []
+        skipped_paths: list[str] = []
+        seen: set[str] = set()
+        for requested_path in requested_paths:
+            normalized = self._normalize_context_path(requested_path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            path = eligible_by_normalized.get(normalized)
+            if not path:
+                skipped_paths.append(str(requested_path))
+                continue
+            selected_paths.append(path)
+            if len(selected_paths) >= max_files:
+                break
+
+        if not selected_paths and skipped_paths:
+            return "\n".join([
+                f"### {title}",
+                intro,
+                "",
+                "[No requested files were eligible for context.]",
+            ])
+        if not selected_paths:
+            return ""
+
+        parts = [
+            f"### {title}",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            intro,
+            "",
+        ]
+
+        used_chars = 0
+        included_files = 0
+        truncated = False
+
+        for path in selected_paths:
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+
+            try:
+                content = self._get_file_content(
+                    repository,
+                    path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                skipped_paths.append(path)
+                continue
+
+            file_truncated = False
+            if len(content) > file_max_chars:
+                content = content[:file_max_chars]
+                file_truncated = True
+            if len(content) > remaining:
+                content = content[:remaining]
+                file_truncated = True
+                truncated = True
+
+            parts.extend([
+                f"#### {path}",
+                "````text",
+                content,
+                "````",
+            ])
+            if file_truncated:
+                parts.append("[File context truncated.]")
+            parts.append("")
+            used_chars += len(content)
+            included_files += 1
+
+            if truncated:
+                break
+
+        if included_files == 0:
+            return ""
+
+        if skipped_paths:
+            parts.append(
+                "[Skipped context files: "
+                + ", ".join(str(path) for path in skipped_paths[:10])
+                + (", ..." if len(skipped_paths) > 10 else "")
+                + "]"
+            )
+        omitted = max(0, len(selected_paths) - included_files)
+        if truncated or omitted:
+            parts.append(
+                f"[{title} truncated: included {included_files} file(s), "
+                f"omitted {omitted} file(s), used {used_chars} of {max_chars} characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def _normalize_context_path(self, path: object) -> str:
+        """Normalizes requested repository context paths for safe matching."""
+        value = str(path or "").replace("\\", "/").strip()
+        if value.startswith(("a/", "b/")):
+            value = value[2:]
+        return value.lstrip("/").lower()
+
+    def _list_repository_files(self, repository: str, branch: str) -> list[dict]:
+        """Lists files in a repository branch recursively."""
+        path = f"git/repositories/{repository}/items"
+        params = {
+            "scopePath": "/",
+            "recursionLevel": "Full",
+            "includeContentMetadata": True,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+        }
+        data = self._get(path, params)
+        return data.get("value", [])
+
+    def _is_project_context_file(self, item: dict, file_extensions: list[str],
+                                 exclude_patterns: Optional[list[str]]) -> bool:
+        """Returns whether a repository item should be included as context."""
+        if item.get("isFolder") or item.get("gitObjectType") == "tree":
+            return False
+
+        path = item.get("path", "")
+        if not path or self._is_context_path_excluded(path, exclude_patterns):
+            return False
+
+        filename = os.path.basename(path).lower()
+        extension = os.path.splitext(filename)[1].lower()
+
+        if file_extensions:
+            return extension in file_extensions
+
+        return (
+            extension in DEFAULT_PROJECT_CONTEXT_EXTENSIONS
+            or filename in DEFAULT_PROJECT_CONTEXT_FILENAMES
+        )
+
+    def _is_context_path_excluded(self, path: str,
+                                  exclude_patterns: Optional[list[str]]) -> bool:
+        """Checks path against configured directory, file and glob exclusions."""
+        patterns = (
+            exclude_patterns
+            if exclude_patterns is not None
+            else self.config.project_context_exclude_patterns
+        )
+        normalized = path.replace("\\", "/").lstrip("/").lower()
+        path_parts = normalized.split("/")
+
+        for pattern in patterns or []:
+            candidate = str(pattern).replace("\\", "/").strip().lower()
+            if not candidate:
+                continue
+
+            glob_candidate = candidate.lstrip("/")
+            if fnmatch.fnmatch(normalized, glob_candidate):
+                return True
+            if any(fnmatch.fnmatch(part, glob_candidate) for part in path_parts):
+                return True
+
+            plain = glob_candidate.strip("/")
+            if plain in path_parts:
+                return True
+            if normalized == plain or normalized.startswith(f"{plain}/"):
+                return True
+
+        return False
+
+    def _normalize_extensions(self, extensions: Optional[list[str]]) -> list[str]:
+        """Normalizes extension allowlists to dot-prefixed lowercase strings."""
+        normalized = []
+        for ext in extensions or []:
+            value = str(ext).strip().lower()
+            if not value:
+                continue
+            if not value.startswith("."):
+                value = f".{value}"
+            normalized.append(value)
+        return normalized
+
+    # ==================================================================
+    # Work Item Context
+    # ==================================================================
+    def get_work_item_context(self, repository: str, pr_id: int,
+                              max_items: int = 20,
+                              max_chars: int = 100000,
+                              fields: Optional[list[str]] = None) -> str:
+        """
+        Builds read-only context from documentation fields on PR-linked work items.
+        """
+        refs = self._list_pull_request_work_items(repository, pr_id)
+        ids = [
+            int(ref["id"])
+            for ref in refs
+            if str(ref.get("id", "")).isdigit()
+        ]
+        if not ids:
+            return ""
+
+        selected_ids = ids[:max_items]
+        omitted_items = max(0, len(ids) - len(selected_ids))
+        requested_fields = self._resolve_work_item_fields(fields)
+        work_items = self._get_work_items(selected_ids, requested_fields)
+
+        if not work_items:
+            return ""
+
+        parts = [
+            "### Linked work item documentation",
+            "Use this work item context only to understand the product intent, "
+            "requirements, acceptance criteria, and test notes behind the PR. "
+            "Do not report issues from this context unless the issue is on a "
+            "modified line in the PR diff.",
+            "",
+        ]
+
+        used_chars = 0
+        included_items = 0
+        truncated = False
+
+        for work_item in work_items:
+            rendered = self._format_work_item_context(work_item, requested_fields)
+            if not rendered:
+                continue
+
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+
+            if len(rendered) > remaining:
+                rendered = rendered[:remaining]
+                truncated = True
+
+            parts.append(rendered.rstrip())
+            parts.append("")
+            used_chars += len(rendered)
+            included_items += 1
+
+            if truncated:
+                break
+
+        if included_items == 0:
+            return ""
+
+        if truncated or omitted_items:
+            parts.append(
+                "[Work item context truncated: "
+                f"included {included_items} item(s), omitted {omitted_items} item(s), "
+                f"used {used_chars} of {max_chars} configured characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def _list_pull_request_work_items(self, repository: str, pr_id: int) -> list[dict]:
+        """Lists work item references associated with a pull request."""
+        path = f"git/repositories/{repository}/pullRequests/{pr_id}/workitems"
+        data = self._get(path, api_version="7.1")
+        return data.get("value", [])
+
+    def _get_work_items(self, ids: list[int], fields: list[str]) -> list[dict]:
+        """Fetches work item details, falling back if optional fields are unavailable."""
+        params = {
+            "ids": ",".join(str(item_id) for item_id in ids),
+            "fields": ",".join(fields),
+            "$expand": "relations",
+            "errorPolicy": "Omit",
+        }
+        try:
+            data = self._get("wit/workitems", params, api_version="7.1")
+        except TFSError:
+            required_fields = [
+                "System.Title",
+                "System.WorkItemType",
+                "System.State",
+                "System.Description",
+            ]
+            params["fields"] = ",".join(required_fields)
+            data = self._get("wit/workitems", params, api_version="7.1")
+
+        return data.get("value", [])
+
+    def _resolve_work_item_fields(self, fields: Optional[list[str]]) -> list[str]:
+        """Returns deduplicated work item fields, preserving required metadata."""
+        requested = fields or DEFAULT_WORK_ITEM_CONTEXT_FIELDS
+        required = [
+            "System.Title",
+            "System.WorkItemType",
+            "System.State",
+            "System.Description",
+        ]
+        resolved = []
+
+        for field_name in [*required, *requested]:
+            value = str(field_name).strip()
+            if value and value not in resolved:
+                resolved.append(value)
+
+        return resolved
+
+    def _format_work_item_context(self, work_item: dict, fields: list[str]) -> str:
+        """Formats one work item as Markdown-ish read-only context."""
+        values = work_item.get("fields", {})
+        work_item_id = work_item.get("id", "")
+        title = self._field_text(values.get("System.Title", "")).strip()
+        header = f"#### Work Item {work_item_id}"
+        if title:
+            header += f": {title}"
+
+        lines = [header]
+
+        item_type = self._field_text(values.get("System.WorkItemType", "")).strip()
+        state = self._field_text(values.get("System.State", "")).strip()
+        if item_type:
+            lines.append(f"- Type: {item_type}")
+        if state:
+            lines.append(f"- State: {state}")
+
+        for field_name in fields:
+            if field_name in ("System.Title", "System.WorkItemType", "System.State"):
+                continue
+
+            text = self._field_text(values.get(field_name, "")).strip()
+            if not text:
+                continue
+
+            label = WORK_ITEM_CONTEXT_FIELD_LABELS.get(field_name, field_name)
+            lines.extend(["", f"##### {label}", text])
+
+        doc_links = self._extract_work_item_document_links(work_item)
+        if doc_links:
+            lines.extend(["", "##### Work Item Links"])
+            for link in doc_links:
+                lines.append(f"- {link}")
+
+        return "\n".join(lines)
+
+    def _extract_work_item_document_links(self, work_item: dict) -> list[str]:
+        """Extracts hyperlink/attachment references from work item relations."""
+        links = []
+        for relation in work_item.get("relations", []) or []:
+            rel = str(relation.get("rel", ""))
+            if rel not in ("Hyperlink", "AttachedFile"):
+                continue
+
+            attributes = relation.get("attributes", {}) or {}
+            label = (
+                attributes.get("name")
+                or attributes.get("comment")
+                or attributes.get("resourceCreatedDate")
+                or rel
+            )
+            url = relation.get("url", "")
+            if url:
+                links.append(f"{label}: {url}")
+
+        return links
+
+    def _field_text(self, value: object) -> str:
+        """Converts Azure DevOps HTML-rich text fields to readable plain text."""
+        if value is None:
+            return ""
+
+        text = str(value)
+        text = re.sub(
+            r"(?is)<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            lambda match: f"{match.group(2)} ({match.group(1)})",
+            text,
+        )
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", text)
+        text = re.sub(r"(?i)<li[^>]*>", "- ", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    # ==================================================================
     # Pull Requests - Comments
     # ==================================================================
+    def list_pull_request_comment_threads(self, repository: str, pr_id: int) -> list[dict]:
+        """Lists all comment threads on a pull request."""
+        path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
+        data = self._get(path)
+        return data.get("value", [])
+
+    def plan_review_comments(self, repository: str, pr_id: int,
+                             comments: list[dict]) -> dict:
+        """
+        Compares new review comments with existing PR comments.
+
+        Returns:
+            Dict with new comments to post, duplicate comments to skip, and
+            previously fixed/closed tool comments that should be reopened.
+        """
+        threads = self.list_pull_request_comment_threads(repository, pr_id)
+        new_comments = []
+        skipped_duplicates = []
+        resolved_reappeared = []
+
+        for comment in comments:
+            match = self._find_matching_existing_comment(comment, threads)
+            if not match:
+                new_comments.append(comment)
+                continue
+
+            status_name = match["status_name"]
+            if match["is_tool_comment"] and self._is_resolved_or_closed_status(status_name):
+                resolved_reappeared.append({
+                    "comment": comment,
+                    "thread_id": match["thread_id"],
+                    "status": status_name,
+                    "fingerprint": self._comment_fingerprint(comment),
+                })
+            else:
+                skipped_duplicates.append({
+                    "comment": comment,
+                    "thread_id": match["thread_id"],
+                    "status": status_name,
+                    "is_tool_comment": match["is_tool_comment"],
+                })
+
+        return {
+            "new_comments": new_comments,
+            "skipped_duplicates": skipped_duplicates,
+            "resolved_reappeared": resolved_reappeared,
+            "existing_threads": threads,
+        }
+
     def post_general_comment(self, repository: str, pr_id: int,
                              comment: str, status: str = "active") -> dict:
         """
@@ -615,9 +1397,48 @@ class TFSClient:
         data = {"status": self._status_to_int(status)}
         return self._patch(path, data)
 
+    def reopen_resolved_tool_comments(self, repository: str, pr_id: int,
+                                      comments_to_reopen: list[dict]) -> list[dict]:
+        """Reopens fixed/closed tool comments when the issue still appears."""
+        results = []
+
+        for item in comments_to_reopen:
+            thread_id = item.get("thread_id")
+            comment = item.get("comment", {})
+            fingerprint = item.get("fingerprint") or self._comment_fingerprint(comment)
+            body = "\n".join([
+                "**AI Code Review re-check**",
+                "",
+                "This issue still appears in the latest review, so this previously "
+                "resolved or closed thread is being reopened.",
+                "",
+                self._format_review_comment_body(comment),
+            ])
+            reply = self.tag_tool_comment(body, fingerprint, kind="recheck")
+
+            try:
+                self.update_thread_status(repository, pr_id, thread_id, "active")
+                self.reply_to_thread(repository, pr_id, thread_id, reply)
+                results.append({
+                    "success": True,
+                    "thread_id": thread_id,
+                    "file": comment.get("file", ""),
+                    "line": comment.get("line", 0),
+                })
+            except TFSError as exc:
+                results.append({
+                    "success": False,
+                    "thread_id": thread_id,
+                    "file": comment.get("file", ""),
+                    "line": comment.get("line", 0),
+                    "error": str(exc),
+                })
+
+        return results
+
     def post_review_comments(self, repository: str, pr_id: int,
                              comments: list[dict],
-                             review_scope: str = "diff_only",
+                             review_scope: str = "diff_with_context",
                              comment_mode: str = "structured") -> list[dict]:
         """
         Posts multiple review comments on a PR.
@@ -633,7 +1454,7 @@ class TFSClient:
             List of results for each posted comment.
         """
         results = []
-        review_scope = (review_scope or "diff_only").lower()
+        review_scope = (review_scope or "diff_with_context").lower()
         comment_mode = (comment_mode or "structured").lower()
         use_inline_comments = comment_mode == "structured"
 
@@ -674,7 +1495,16 @@ class TFSClient:
         return results
 
     def _format_review_comment(self, comment: dict) -> str:
-        """Formats a structured comment for Azure DevOps Markdown."""
+        """Formats and tags a structured comment for Azure DevOps Markdown."""
+        body = self._format_review_comment_body(comment)
+        return self.tag_tool_comment(
+            body,
+            self._comment_fingerprint(comment),
+            kind="review-comment",
+        )
+
+    def _format_review_comment_body(self, comment: dict) -> str:
+        """Formats the visible body of a structured review comment."""
         type_labels = {
             "bug": "Bug",
             "security": "Security",
@@ -703,6 +1533,150 @@ class TFSClient:
             parts.append(f"**Reference:** {reference}")
 
         return "\n".join(parts)
+
+    def tag_tool_comment(self, text: str, fingerprint: str,
+                         kind: str = "comment") -> str:
+        """Adds stable metadata tags to comments created by this tool."""
+        metadata = [
+            TOOL_COMMENT_MARKER,
+            f"{TOOL_COMMENT_KIND_PREFIX}{kind} -->",
+            f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint} -->",
+        ]
+        body = text.strip()
+        if "AI Code Review" not in body:
+            body = (
+                f"{body}\n\n"
+                "---\n"
+                "_Automated comment generated by AI Code Review CLI._"
+            )
+        return "\n".join([*metadata, body])
+
+    def text_fingerprint(self, text: str) -> str:
+        """Builds a stable fingerprint for arbitrary text."""
+        normalized = self._normalize_for_match(text)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+    def has_tool_comment_fingerprint(self, threads: list[dict],
+                                     fingerprint: str) -> bool:
+        """Returns whether any existing tool comment has a fingerprint."""
+        needle = f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint}"
+        for thread in threads or []:
+            for comment in thread.get("comments", []) or []:
+                if needle in str(comment.get("content", "")):
+                    return True
+        return False
+
+    def _comment_fingerprint(self, comment: dict) -> str:
+        """Builds a stable fingerprint for a structured review comment."""
+        values = [
+            self._normalize_path(comment.get("file", "")),
+            str(comment.get("line", 0)),
+            str(comment.get("type", "")),
+            str(comment.get("severity", "")),
+            str(comment.get("comment", "")),
+            str(comment.get("suggestion", "")),
+            str(comment.get("reference", "")),
+        ]
+        return self.text_fingerprint("|".join(values))
+
+    def _find_matching_existing_comment(self, comment: dict,
+                                        threads: list[dict]) -> Optional[dict]:
+        """Finds an existing PR comment matching the generated comment."""
+        fingerprint = self._comment_fingerprint(comment)
+        fingerprint_needle = f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint}"
+
+        for thread in threads or []:
+            for existing_comment in thread.get("comments", []) or []:
+                body = str(existing_comment.get("content", ""))
+                if fingerprint_needle in body:
+                    return self._build_existing_comment_match(thread, body)
+
+        current_text = self._normalize_for_match(comment.get("comment", ""))
+        if not current_text:
+            return None
+
+        for thread in threads or []:
+            if not self._thread_matches_comment_location(thread, comment):
+                continue
+
+            for existing_comment in thread.get("comments", []) or []:
+                body = self._normalize_for_match(
+                    self._strip_tool_metadata(existing_comment.get("content", ""))
+                )
+                if current_text in body:
+                    return self._build_existing_comment_match(
+                        thread,
+                        str(existing_comment.get("content", "")),
+                    )
+
+        return None
+
+    def _build_existing_comment_match(self, thread: dict, body: str) -> dict:
+        """Builds duplicate match metadata from an Azure DevOps thread."""
+        return {
+            "thread_id": thread.get("id"),
+            "status_name": self._thread_status_name(thread.get("status")),
+            "is_tool_comment": TOOL_COMMENT_MARKER in body,
+        }
+
+    def _thread_matches_comment_location(self, thread: dict, comment: dict) -> bool:
+        """Checks whether a thread points to the same file/line as a comment."""
+        comment_file = self._normalize_path(comment.get("file", ""))
+        comment_line = self._to_int(comment.get("line", 0))
+        thread_file, thread_line = self._thread_file_line(thread)
+
+        if comment_file and thread_file and comment_file != thread_file:
+            return False
+        if comment_line > 0 and thread_line > 0 and comment_line != thread_line:
+            return False
+        return True
+
+    def _thread_file_line(self, thread: dict) -> tuple[str, int]:
+        """Returns the normalized file and line for a PR thread."""
+        context = thread.get("threadContext", {}) or {}
+        file_path = self._normalize_path(context.get("filePath", ""))
+        line = 0
+        for key in ("rightFileStart", "leftFileStart"):
+            value = context.get(key) or {}
+            line = self._to_int(value.get("line", 0))
+            if line > 0:
+                break
+        return file_path, line
+
+    def _thread_status_name(self, status: object) -> str:
+        """Normalizes Azure DevOps thread statuses to lower-case names."""
+        if isinstance(status, int):
+            return THREAD_STATUS_NAMES.get(status, "unknown")
+        if str(status).isdigit():
+            return THREAD_STATUS_NAMES.get(int(str(status)), "unknown")
+        return str(status or "unknown").replace(" ", "").lower()
+
+    def _is_resolved_or_closed_status(self, status_name: str) -> bool:
+        """Returns whether a thread status means resolved/closed."""
+        return status_name in ("fixed", "closed", "resolved")
+
+    def _strip_tool_metadata(self, text: object) -> str:
+        """Removes hidden tool metadata tags before text comparisons."""
+        value = str(text or "")
+        value = re.sub(r"<!--\s*ai-code-review-[^>]*-->\s*", "", value)
+        return value
+
+    def _normalize_for_match(self, value: object) -> str:
+        """Normalizes text for duplicate matching."""
+        text = self._field_text(value)
+        text = self._strip_tool_metadata(text)
+        return re.sub(r"\s+", " ", text).strip().lower()
+
+    def _normalize_path(self, path: object) -> str:
+        """Normalizes repository paths for duplicate matching."""
+        return str(path or "").replace("\\", "/").lstrip("/").lower()
+
+    def _to_int(self, value: object) -> int:
+        """Converts values to int with a safe fallback."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     def _status_to_int(self, status: str) -> int:
         """Converts status string to API integer."""

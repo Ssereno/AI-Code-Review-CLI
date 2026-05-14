@@ -108,6 +108,7 @@ def test_load_ignores_missing_file(mocker) -> None:
     config = ReviewConfig.load()
 
     assert config.model == config_module.DEFAULT_MODELS[config.llm_provider]
+    assert config.review_scope == "diff_with_context"
 
 
 def test_load_yaml_warns_when_yaml_is_unavailable(mocker, temp_config_file) -> None:
@@ -145,6 +146,7 @@ llm:
   api_base_url: https://proxy.local
   model: gpt-4o-mini
   max_tokens: 1024
+  max_prompt_tokens: 123456
   temperature: 0.7
 openai:
   api_key: openai-key
@@ -180,6 +182,29 @@ review:
   file_extensions_filter:
     - .py
     - .md
+  project_context:
+    enabled: false
+    mode: full
+    max_files: 123
+    max_chars: 7890
+    manifest_max_chars: 4567
+    retrieval_max_rounds: 3
+    retrieval_max_files: 8
+    retrieval_max_chars: 9999
+    retrieval_file_max_chars: 1111
+    file_extensions:
+      - .py
+      - .yaml
+    exclude_patterns:
+      - node_modules
+      - "*.lock"
+  work_item_context:
+    enabled: false
+    max_items: 7
+    max_chars: 12345
+    fields:
+      - System.Description
+      - Custom.Documentation
 pr:
   auto_post_comments: true
   dry_run: true
@@ -206,6 +231,7 @@ usage:
     assert config.api_base_url == "https://proxy.local"
     assert config.model == "gpt-4o-mini"
     assert config.max_tokens == 1024
+    assert config.max_prompt_tokens == 123456
     assert config.temperature == 0.7
     assert config.openai_api_key == "openai-key"
     assert config.gemini_api_key == "gemini-key"
@@ -231,6 +257,21 @@ usage:
     assert config.max_diff_lines == 456
     assert config.custom_prompt_file == "prompt.md"
     assert config.file_extensions_filter == [".py", ".md"]
+    assert config.project_context_enabled is False
+    assert config.project_context_mode == "full"
+    assert config.project_context_max_files == 123
+    assert config.project_context_max_chars == 7890
+    assert config.project_context_manifest_max_chars == 4567
+    assert config.project_context_retrieval_max_rounds == 3
+    assert config.project_context_retrieval_max_files == 8
+    assert config.project_context_retrieval_max_chars == 9999
+    assert config.project_context_retrieval_file_max_chars == 1111
+    assert config.project_context_file_extensions == [".py", ".yaml"]
+    assert config.project_context_exclude_patterns == ["node_modules", "*.lock"]
+    assert config.work_item_context_enabled is False
+    assert config.work_item_context_max_items == 7
+    assert config.work_item_context_max_chars == 12345
+    assert config.work_item_context_fields == ["System.Description", "Custom.Documentation"]
     assert config.auto_post_comments is True
     assert config.dry_run is True
     assert config.pr_comment_mode == "general"
@@ -278,16 +319,38 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     config = review_config_factory(
         verbosity="verbose",
         review_scope="everything",
+        max_prompt_tokens=-1,
         max_diff_files=0,
         max_diff_lines=0,
+        project_context_mode="everything",
+        project_context_max_files=-1,
+        project_context_max_chars=-1,
+        project_context_manifest_max_chars=0,
+        project_context_retrieval_max_rounds=0,
+        project_context_retrieval_max_files=0,
+        project_context_retrieval_max_chars=0,
+        project_context_retrieval_file_max_chars=0,
+        work_item_context_max_items=0,
+        work_item_context_max_chars=0,
     )
 
     issues = config.validate()
 
     assert any("Invalid verbosity" in issue for issue in issues)
     assert any("Invalid review scope" in issue for issue in issues)
+    assert any("Invalid llm.max_prompt_tokens" in issue for issue in issues)
     assert any("Invalid max_diff_files" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
+    assert any("Invalid project_context.mode" in issue for issue in issues)
+    assert any("Invalid project_context.max_files" in issue for issue in issues)
+    assert any("Invalid project_context.max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.manifest_max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_rounds" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_files" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_file_max_chars" in issue for issue in issues)
+    assert any("Invalid work_item_context.max_items" in issue for issue in issues)
+    assert any("Invalid work_item_context.max_chars" in issue for issue in issues)
 
 
 def test_validate_accepts_valid_bedrock_credentials(review_config_factory) -> None:

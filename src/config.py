@@ -61,6 +61,7 @@ class ReviewConfig:
     api_base_url: str = ""                  # Base URL for APIs (override)
     model: str = ""                         # Model to use (empty = provider default)
     max_tokens: int = 4096
+    max_prompt_tokens: int = 0              # 0 = provider default/no prompt limit
     temperature: float = 0.3
 
     # --- Provider-specific keys (alternatives) -------------------------
@@ -87,11 +88,57 @@ class ReviewConfig:
     # --- Review -------------------------------------------------------
     review_language: str = "pt"             # Review language (pt/en)
     verbosity: str = "detailed"             # "quick" | "detailed" | "security"
-    review_scope: str = "diff_only"         # "diff_only" | "full_code"
+    review_scope: str = "diff_with_context"  # "diff_only" | "diff_with_context" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)
+    project_context_enabled: bool = True     # Include repository files as read-only context
+    project_context_mode: str = "on_demand"  # "on_demand" | "full"
+    project_context_max_files: int = 0       # 0 = include all eligible project files
+    project_context_max_chars: int = 0       # 0 = no repository-context character limit
+    project_context_manifest_max_chars: int = 60000
+    project_context_retrieval_max_rounds: int = 2
+    project_context_retrieval_max_files: int = 20
+    project_context_retrieval_max_chars: int = 120000
+    project_context_retrieval_file_max_chars: int = 30000
+    project_context_file_extensions: list = field(default_factory=list)
+    project_context_exclude_patterns: list = field(default_factory=lambda: [
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        "coverage",
+        "bin",
+        "obj",
+        ".env",
+        ".env.*",
+        "*.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+    ])
+    work_item_context_enabled: bool = True   # Include linked work item docs as context
+    work_item_context_max_items: int = 20
+    work_item_context_max_chars: int = 100000
+    work_item_context_fields: list = field(default_factory=lambda: [
+        "System.Title",
+        "System.WorkItemType",
+        "System.State",
+        "System.Description",
+        "Microsoft.VSTS.Common.AcceptanceCriteria",
+        "Microsoft.VSTS.TCM.ReproSteps",
+        "Microsoft.VSTS.TCM.SystemInfo",
+    ])
 
     # --- PR Review ----------------------------------------------------
     auto_post_comments: bool = False        # Post comments automatically
@@ -191,6 +238,7 @@ class ReviewConfig:
             "api_base_url": ("llm", "api_base_url"),
             "model": ("llm", "model"),
             "max_tokens": ("llm", "max_tokens"),
+            "max_prompt_tokens": ("llm", "max_prompt_tokens"),
             "temperature": ("llm", "temperature"),
             # Provider-specific
             "openai_api_key": ("openai", "api_key"),
@@ -219,6 +267,21 @@ class ReviewConfig:
             "max_diff_lines": ("review", "max_diff_lines"),
             "custom_prompt_file": ("review", "custom_prompt_file"),
             "file_extensions_filter": ("review", "file_extensions_filter"),
+            "project_context_enabled": ("review", "project_context", "enabled"),
+            "project_context_mode": ("review", "project_context", "mode"),
+            "project_context_max_files": ("review", "project_context", "max_files"),
+            "project_context_max_chars": ("review", "project_context", "max_chars"),
+            "project_context_manifest_max_chars": ("review", "project_context", "manifest_max_chars"),
+            "project_context_retrieval_max_rounds": ("review", "project_context", "retrieval_max_rounds"),
+            "project_context_retrieval_max_files": ("review", "project_context", "retrieval_max_files"),
+            "project_context_retrieval_max_chars": ("review", "project_context", "retrieval_max_chars"),
+            "project_context_retrieval_file_max_chars": ("review", "project_context", "retrieval_file_max_chars"),
+            "project_context_file_extensions": ("review", "project_context", "file_extensions"),
+            "project_context_exclude_patterns": ("review", "project_context", "exclude_patterns"),
+            "work_item_context_enabled": ("review", "work_item_context", "enabled"),
+            "work_item_context_max_items": ("review", "work_item_context", "max_items"),
+            "work_item_context_max_chars": ("review", "work_item_context", "max_chars"),
+            "work_item_context_fields": ("review", "work_item_context", "fields"),
             # PR
             "auto_post_comments": ("pr", "auto_post_comments"),
             "dry_run": ("pr", "dry_run"),
@@ -312,10 +375,10 @@ class ReviewConfig:
                 "Use 'quick', 'detailed' or 'security'."
             )
 
-        if self.review_scope not in ("diff_only", "full_code"):
+        if self.review_scope not in ("diff_only", "diff_with_context", "full_code"):
             issues.append(
                 f"Invalid review scope: '{self.review_scope}'. "
-                "Use 'diff_only' or 'full_code'."
+                "Use 'diff_only', 'diff_with_context' or 'full_code'."
             )
 
         if self.max_diff_files <= 0:
@@ -327,6 +390,72 @@ class ReviewConfig:
         if self.max_diff_lines <= 0:
             issues.append(
                 f"Invalid max_diff_lines: '{self.max_diff_lines}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.max_prompt_tokens < 0:
+            issues.append(
+                f"Invalid llm.max_prompt_tokens: '{self.max_prompt_tokens}'. "
+                "Use 0 for provider default/no limit or an integer greater than 0."
+            )
+
+        if self.project_context_mode not in ("on_demand", "full"):
+            issues.append(
+                f"Invalid project_context.mode: '{self.project_context_mode}'. "
+                "Use 'on_demand' or 'full'."
+            )
+
+        if self.project_context_max_files < 0:
+            issues.append(
+                f"Invalid project_context.max_files: '{self.project_context_max_files}'. "
+                "Use 0 for no limit or an integer greater than 0."
+            )
+
+        if self.project_context_max_chars < 0:
+            issues.append(
+                f"Invalid project_context.max_chars: '{self.project_context_max_chars}'. "
+                "Use 0 for no limit or an integer greater than 0."
+            )
+
+        if self.project_context_manifest_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.manifest_max_chars: '{self.project_context_manifest_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_rounds <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_rounds: '{self.project_context_retrieval_max_rounds}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_files <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_files: '{self.project_context_retrieval_max_files}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_chars: '{self.project_context_retrieval_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_file_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_file_max_chars: '{self.project_context_retrieval_file_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.work_item_context_max_items <= 0:
+            issues.append(
+                f"Invalid work_item_context.max_items: '{self.work_item_context_max_items}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.work_item_context_max_chars <= 0:
+            issues.append(
+                f"Invalid work_item_context.max_chars: '{self.work_item_context_max_chars}'. "
                 "Use an integer greater than 0."
             )
 

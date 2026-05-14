@@ -89,9 +89,15 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
+    contextual_guidance = get_scope_guidance("diff_with_context", "en", structured=True)
+
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
+    assert "selected on-demand repository files" in contextual_guidance
+    assert "surrounding unchanged context" in contextual_guidance
+    assert "context-only or deleted line" in contextual_guidance
+    assert "context and deletions were removed" not in contextual_guidance
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
 
@@ -102,12 +108,75 @@ def test_build_user_message_includes_files_and_context() -> None:
         diff="+print('x')",
         files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
         context="Please focus on safety.",
+        project_context="Existing helper: src/helpers.py",
+        work_item_context="Acceptance Criteria: totals include tax",
     )
 
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
+    assert "Repository context (read-only, not review target)" in message
+    assert "Existing helper" in message
+    assert "Linked work item documentation" in message
+    assert "totals include tax" in message
+    assert "Review target" in message
+    assert "Review only the PR changes below" in message
     assert "```diff" in message
+
+
+def test_prompt_budget_trims_repository_context() -> None:
+    """It should trim only repository context when a prompt budget is configured."""
+    client = LLMClient(make_llm_config(max_prompt_tokens=160))
+    message = client._build_user_message_with_prompt_budget(
+        system_prompt="system",
+        diff="+print('x')",
+        files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
+        context="manual context",
+        project_context="repo-context-line\n" * 500,
+        work_item_context="acceptance criteria",
+    )
+
+    assert "acceptance criteria" in message
+    assert "+print('x')" in message
+    assert "Repository context truncated" in message
+    assert len(message) < len("repo-context-line\n" * 500)
+
+
+def test_bedrock_has_default_prompt_budget() -> None:
+    """It should reserve a default prompt budget for Bedrock hard limits."""
+    client = LLMClient(make_llm_config(llm_provider="bedrock"))
+
+    assert client._effective_prompt_token_limit() == 180000
+
+
+def test_request_context_files_parses_json_and_tracks_usage(mocker) -> None:
+    """It should ask the provider for extra context files using JSON."""
+    client = LLMClient(make_llm_config())
+    openai = mocker.patch(
+        "src.llm_client.LLMClient._call_openai",
+        return_value='{"files":["src/helper.py","/src/helper.py","b/src/model.py"],"reason":"need contracts"}',
+    )
+
+    files = client.request_context_files(
+        diff="+call_helper()",
+        files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
+        project_manifest="- /src/helper.py\n- /src/model.py",
+        changed_files_context="src/app.py content",
+        work_item_context="Requirement",
+        max_files=5,
+    )
+
+    assert files == ["src/helper.py", "src/model.py"]
+    assert openai.called
+    assert client.usage_events[0].operation == "context_request"
+
+
+def test_parse_context_file_request_handles_bad_payloads() -> None:
+    """It should return no files for malformed context requests."""
+    client = LLMClient(make_llm_config())
+
+    assert client._parse_context_file_request("not json") == []
+    assert client._parse_context_file_request('["a.py", 123, "a.py"]') == ["a.py"]
 
 
 def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
@@ -136,12 +205,20 @@ def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> N
     client = LLMClient(config)
     openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
 
-    result = client.review("+code", [{"file": "a.py", "additions": 1, "deletions": 0}], context="Focus on bugs")
+    result = client.review(
+        "+code",
+        [{"file": "a.py", "additions": 1, "deletions": 0}],
+        context="Focus on bugs",
+        project_context="Repo contract",
+        work_item_context="Requirement docs",
+    )
 
     assert result == "review text"
     system_prompt, user_message = openai.call_args.args[:2]
     assert "Custom user instructions" in system_prompt
     assert "Custom context loaded from" in user_message
+    assert "Repo contract" in user_message
+    assert "Requirement docs" in user_message
     assert client.usage_events[0].operation == "general_review"
     assert client.usage_events[0].estimated is True
 

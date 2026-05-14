@@ -16,7 +16,7 @@ Options:
     --quick                              # Quick and concise review
     --detailed                           # Detailed review (default)
     --security                           # Security-focused review
-    --review-scope <diff_only|full_code> # Review scope (default: diff_only)
+    --review-scope <scope>                # Review scope (default: diff_with_context)
     --max-diff-files <n>                 # Max files in diff (overrides config)
     --dry-run                            # Review without posting comments
     --auto-post                          # Post comments without confirmation
@@ -40,8 +40,10 @@ Version: see pyproject.toml
 """
 
 import argparse
+import datetime
 import importlib.resources
 import os
+import re
 import sys
 import time
 import threading
@@ -90,6 +92,9 @@ from src.usage_tracker import (
     summarize_usage_by_pr,
 )
 from src import __version__ as VERSION
+
+
+REVIEW_SCOPE_CHOICES = ["diff_only", "diff_with_context", "full_code"]
 
 
 def _get_spinner_frames() -> list[str]:
@@ -256,8 +261,10 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     )
     group_review.add_argument(
         "--review-scope", default=None,
-        choices=["diff_only", "full_code"],
-        help="Review scope: diff_only (default) or full_code"
+        choices=REVIEW_SCOPE_CHOICES,
+        help=(
+            "Review scope: diff_with_context (default), diff_only, or full_code"
+        )
     )
     group_review.add_argument(
         "--max-diff-files", default=None, type=int, metavar="N",
@@ -316,6 +323,245 @@ def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
         md_formatter.format_footer(truncated=was_truncated),
     ])
     save_output(md_output, output_file)
+
+
+def _review_scope_context_note(review_scope: str) -> str:
+    """Returns user-facing context wording for the selected review scope."""
+    scope = (review_scope or "diff_with_context").lower()
+    if scope == "diff_with_context":
+        return (
+            "Context will be used for understanding only; review comments remain "
+            "limited to modified PR lines."
+        )
+    if scope == "full_code":
+        return "Review is running in full_code mode for changed file contents."
+    return "Review is running in diff_only mode."
+
+
+def _build_general_summary_comment(config: ReviewConfig,
+                                   run_timestamp: str | None = None) -> str:
+    """Builds the compact top-level PR comment for a review run."""
+    timestamp = run_timestamp or datetime.datetime.now(
+        datetime.timezone.utc
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    return "\n".join([
+        "## 🤖 AI Code Review",
+        "",
+        f"**Provider:** {config.llm_provider}",
+        f"**Model:** {config.model}",
+        f"**Mode:** {config.verbosity}",
+        f"**Scope:** {config.review_scope}",
+        f"**Ran at:** {timestamp}",
+    ])
+
+
+def _normalize_review_path(path: object) -> str:
+    """Normalizes a diff or LLM file path for comparisons."""
+    value = str(path or "").replace("\\", "/").strip()
+    if value.startswith(("a/", "b/")):
+        value = value[2:]
+    return value.lstrip("/").lower()
+
+
+def _changed_lines_by_file(diff: str) -> dict[str, set[int]]:
+    """Extracts added/right-side line numbers from a unified diff."""
+    changed_lines: dict[str, set[int]] = {}
+    current_file = ""
+    current_line: int | None = None
+    hunk_re = re.compile(r"@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("+++ "):
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            if file_path != "/dev/null":
+                current_file = _normalize_review_path(file_path)
+                changed_lines.setdefault(current_file, set())
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            match = hunk_re.match(raw_line)
+            if match:
+                current_line = int(match.group(1))
+            elif raw_line.startswith("@@ Change type:"):
+                current_line = 1
+            else:
+                current_line = None
+            continue
+
+        if not current_file or current_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            changed_lines.setdefault(current_file, set()).add(current_line)
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    return {path: lines for path, lines in changed_lines.items() if lines}
+
+
+def _filter_comments_to_changed_lines(comments: list[dict],
+                                      diff: str) -> tuple[list[dict], list[dict]]:
+    """Keeps problem comments only when they point to added PR diff lines."""
+    changed_lines = _changed_lines_by_file(diff)
+    kept: list[dict] = []
+    discarded: list[dict] = []
+
+    for comment in comments:
+        comment_type = str(comment.get("type", "")).lower()
+        if comment_type == "praise":
+            kept.append(comment)
+            continue
+
+        file_path = _normalize_review_path(comment.get("file", ""))
+        try:
+            line = int(comment.get("line", 0))
+        except (TypeError, ValueError):
+            line = 0
+
+        if file_path and line > 0 and line in changed_lines.get(file_path, set()):
+            kept.append(comment)
+        else:
+            discarded.append(comment)
+
+    return kept, discarded
+
+
+def _join_context_sections(*sections: str) -> str:
+    """Joins non-empty context sections."""
+    return "\n\n".join(
+        section.strip()
+        for section in sections
+        if isinstance(section, str) and section.strip()
+    )
+
+
+def _build_on_demand_project_context(
+    *,
+    llm: LLMClient,
+    tfs,
+    config: ReviewConfig,
+    formatter: ReviewFormatter,
+    repo_name: str,
+    source_branch: str,
+    changed_files: list[dict],
+    diff: str,
+    files_summary: list[dict],
+    user_context: str,
+    work_item_context: str,
+) -> str:
+    """Builds repository context by letting the model request files from a manifest."""
+    changed_files_context = ""
+    project_manifest = ""
+
+    try:
+        changed_files_context = tfs.get_changed_files_context(
+            repo_name,
+            source_branch,
+            changed_files,
+            max_chars=config.project_context_retrieval_max_chars,
+            file_max_chars=config.project_context_retrieval_file_max_chars,
+            file_extensions=config.project_context_file_extensions,
+            exclude_patterns=config.project_context_exclude_patterns,
+        )
+    except Exception as exc:
+        print(formatter.format_warning(
+            f"Could not load changed file context; continuing with diff only: {exc}"
+        ))
+
+    if changed_files_context:
+        print(formatter.format_info(
+            f"Changed file context loaded ({len(changed_files_context):,} characters). "
+            f"{_review_scope_context_note(config.review_scope)}"
+        ))
+
+    try:
+        project_manifest = tfs.get_project_manifest(
+            repo_name,
+            source_branch,
+            max_chars=config.project_context_manifest_max_chars,
+            file_extensions=config.project_context_file_extensions,
+            exclude_patterns=config.project_context_exclude_patterns,
+        )
+    except Exception as exc:
+        print(formatter.format_warning(
+            f"Could not load repository manifest; continuing without on-demand context: {exc}"
+        ))
+
+    if not project_manifest:
+        return changed_files_context
+
+    print(formatter.format_info(
+        f"Repository manifest loaded ({len(project_manifest):,} characters). "
+        "The model can request additional files from it."
+    ))
+
+    fetched_context = ""
+    requested_keys: set[str] = set()
+    for round_index in range(config.project_context_retrieval_max_rounds):
+        remaining_files = config.project_context_retrieval_max_files - len(requested_keys)
+        remaining_chars = config.project_context_retrieval_max_chars - len(fetched_context)
+        if remaining_files <= 0 or remaining_chars <= 0:
+            break
+
+        requested_paths = llm.request_context_files(
+            diff=diff,
+            files_summary=files_summary,
+            project_manifest=project_manifest,
+            context=user_context,
+            changed_files_context=changed_files_context,
+            work_item_context=work_item_context,
+            fetched_context=fetched_context,
+            max_files=remaining_files,
+        )
+        if not isinstance(requested_paths, list):
+            requested_paths = []
+
+        new_paths = []
+        for path in requested_paths:
+            key = _normalize_review_path(path)
+            if not key or key in requested_keys:
+                continue
+            requested_keys.add(key)
+            new_paths.append(path)
+
+        if not new_paths:
+            break
+
+        print(formatter.format_info(
+            f"Context request round {round_index + 1}: fetching {len(new_paths)} file(s)."
+        ))
+
+        try:
+            round_context = tfs.get_project_files_context(
+                repo_name,
+                source_branch,
+                new_paths,
+                max_files=remaining_files,
+                max_chars=remaining_chars,
+                file_max_chars=config.project_context_retrieval_file_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except Exception as exc:
+            print(formatter.format_warning(
+                f"Could not fetch requested repository context; continuing: {exc}"
+            ))
+            continue
+
+        if round_context:
+            fetched_context = _join_context_sections(fetched_context, round_context)
+
+    if fetched_context:
+        print(formatter.format_info(
+            f"On-demand repository context loaded ({len(fetched_context):,} characters)."
+        ))
+
+    return _join_context_sections(changed_files_context, fetched_context)
 
 
 def _get_llm_usage_events(llm: LLMClient) -> list:
@@ -677,13 +923,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             print(formatter.format_warning(str(exc)))
             return 0
 
-    # Keep only added lines (+): ignore context and removed lines
-    diff = git_utils.filter_diff_additions_only(diff)
-    if not diff.strip():
-        print(formatter.format_warning(
-            "After filtering additions only, the diff is empty. No new code to review."
-        ))
-        return 0
+    review_scope = (config.review_scope or "diff_with_context").lower()
+
+    if review_scope == "diff_only":
+        # Keep the legacy PR-only mode compact by removing context and deletions.
+        diff = git_utils.filter_diff_additions_only(diff)
+        if not diff.strip():
+            print(formatter.format_warning(
+                "After filtering additions only, the diff is empty. No new code to review."
+            ))
+            return 0
 
     # Limit number of diff files if needed
     diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
@@ -708,20 +957,100 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
 
+    use_contextual_review = review_scope == "diff_with_context"
+
+    work_item_context = ""
+    if use_contextual_review and config.work_item_context_enabled:
+        print(formatter.format_progress("Getting documentation from linked work items"))
+        try:
+            work_item_context = tfs.get_work_item_context(
+                repo_name,
+                pr_id,
+                max_items=config.work_item_context_max_items,
+                max_chars=config.work_item_context_max_chars,
+                fields=config.work_item_context_fields,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                "Could not load linked work item documentation; "
+                f"continuing without it: {exc}"
+            ))
+
+        if work_item_context:
+            print(formatter.format_info(
+                f"Linked work item documentation loaded ({len(work_item_context):,} characters). "
+                f"{_review_scope_context_note(config.review_scope)}"
+            ))
+
+    project_context = ""
+    project_context_mode = (config.project_context_mode or "on_demand").lower()
+    if (
+        use_contextual_review
+        and config.project_context_enabled
+        and project_context_mode == "full"
+    ):
+        print(formatter.format_progress("Getting full repository context from source branch"))
+        try:
+            project_context = tfs.get_project_context(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                max_files=config.project_context_max_files,
+                max_chars=config.project_context_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not load full repository context; continuing with PR diff only: {exc}"
+            ))
+
+        if project_context:
+            print(formatter.format_info(
+                f"Full repository context loaded ({len(project_context):,} characters). "
+                f"{_review_scope_context_note(config.review_scope)}"
+            ))
+
+    try:
+        llm = LLMClient(config)
+        if (
+            use_contextual_review
+            and config.project_context_enabled
+            and project_context_mode == "on_demand"
+        ):
+            print(formatter.format_progress(
+                "Preparing on-demand repository context"
+            ))
+            project_context = _build_on_demand_project_context(
+                llm=llm,
+                tfs=tfs,
+                config=config,
+                formatter=formatter,
+                repo_name=repo_name,
+                source_branch=pr_details.get("source_branch", ""),
+                changed_files=pr_details.get("changed_files", []),
+                diff=diff_truncated,
+                files_summary=files_summary,
+                user_context=getattr(args, "context", ""),
+                work_item_context=work_item_context,
+            )
+    except LLMError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
     # --- Perform structured review ---
     progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")
     progress.start()
     start_time = time.time()
 
     try:
-        llm = LLMClient(config)
-
         # Get general review as text
         review_text = llm.review(
             diff=diff_truncated,
             files_summary=files_summary,
             context=getattr(args, "context", ""),
             review_scope=config.review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
         )
 
         # Get structured comments to post
@@ -730,22 +1059,47 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             files_summary=files_summary,
             context=getattr(args, "context", ""),
             review_scope=config.review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
         )
     except LLMError as exc:
         progress.stop()
         print(formatter.format_error(str(exc)))
         return 1
 
-    without_inline = [
-        c for c in structured_comments
-        if not (bool(c.get("file")) and int(c.get("line", 0)) > 0)
-        and str(c.get("type", "")).lower() not in ("praise", "")
-    ]
-    if without_inline:
+    structured_comments, discarded_comments = _filter_comments_to_changed_lines(
+        structured_comments,
+        diff_truncated,
+    )
+    if discarded_comments:
         print(formatter.format_info(
-            f"{len(without_inline)} comment(s) without file/line will be posted as a general PR comment."
+            f"Discarded {len(discarded_comments)} comment(s) outside changed PR lines."
         ))
-    discarded_comments = []  # nothing is discarded
+
+    existing_threads = []
+    skipped_duplicates = []
+    resolved_reappeared = []
+    try:
+        comment_plan = tfs.plan_review_comments(repo_name, pr_id, structured_comments)
+        structured_comments = comment_plan.get("new_comments", structured_comments)
+        skipped_duplicates = comment_plan.get("skipped_duplicates", [])
+        resolved_reappeared = comment_plan.get("resolved_reappeared", [])
+        existing_threads = comment_plan.get("existing_threads", [])
+    except TFSError as exc:
+        print(formatter.format_warning(
+            f"Could not inspect existing PR comments; duplicate detection skipped: {exc}"
+        ))
+
+    if skipped_duplicates:
+        print(formatter.format_info(
+            f"Skipped {len(skipped_duplicates)} duplicate comment(s) already present on the PR."
+        ))
+
+    if resolved_reappeared:
+        print(formatter.format_warning(
+            f"{len(resolved_reappeared)} previously resolved/closed tool comment(s) "
+            "still appear in the latest review."
+        ))
 
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
@@ -781,12 +1135,39 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     # --- Post comments to PR ---
     if dry_run:
+        if resolved_reappeared:
+            print(formatter.format_info(
+                f"DRY-RUN: {len(resolved_reappeared)} resolved/closed tool comment(s) "
+                "would be reopened."
+            ))
         print(f"\n{c.YELLOW}{c.BOLD}🔍 DRY-RUN mode: "
               f"No comments were posted to the PR.{c.RESET}")
         print(f"{c.DIM}   Remove --dry-run to post the comments.{c.RESET}\n")
         return 0
 
+    if resolved_reappeared:
+        print(formatter.format_progress(
+            f"Reopening {len(resolved_reappeared)} resolved/closed tool comment(s)"
+        ))
+        reopen_results = tfs.reopen_resolved_tool_comments(
+            repo_name,
+            pr_id,
+            resolved_reappeared,
+        )
+        reopened_count = sum(1 for result in reopen_results if result.get("success"))
+        failed_reopen_count = len(reopen_results) - reopened_count
+        if reopened_count:
+            print(formatter.format_success(
+                f"Reopened {reopened_count} resolved/closed tool comment(s)."
+            ))
+        if failed_reopen_count:
+            print(formatter.format_warning(
+                f"Could not reopen {failed_reopen_count} resolved/closed tool comment(s)."
+            ))
+
     if not structured_comments:
+        if resolved_reappeared:
+            return 0
         print(formatter.format_info("No comments to post."))
         return 0
 
@@ -820,14 +1201,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     # --- Post general summary as comment ---
     try:
-        summary_comment = (
-            f"## 🤖 AI Code Review\n\n"
-            f"**Provider:** {config.llm_provider} | "
-            f"**Model:** {config.model} | "
-            f"**Mode:** {config.verbosity}\n\n"
-            f"{review_text}\n\n"
-            f"---\n"
-            f"*Automatic review generated by AI Code Review v{VERSION}*"
+        summary_body = _build_general_summary_comment(config)
+        summary_fingerprint = tfs.text_fingerprint(summary_body)
+        if tfs.has_tool_comment_fingerprint(existing_threads, summary_fingerprint):
+            print(formatter.format_info("General summary already exists on PR; skipping duplicate."))
+            return 0
+
+        summary_comment = tfs.tag_tool_comment(
+            summary_body,
+            summary_fingerprint,
+            kind="summary",
         )
         tfs.post_general_comment(repo_name, pr_id, summary_comment)
         print(formatter.format_success("General summary posted to PR."))

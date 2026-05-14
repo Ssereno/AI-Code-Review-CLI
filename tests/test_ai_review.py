@@ -107,6 +107,14 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.max_diff_files == 3
     assert args.output == "review.md"
 
+    contextual_args = parser.parse_args([
+        "pr-review",
+        "42",
+        "--review-scope",
+        "diff_with_context",
+    ])
+    assert contextual_args.review_scope == "diff_with_context"
+
 
 def test_build_parser_applies_global_options_to_list_prs() -> None:
     """It should accept shared CLI options on the list-prs command too."""
@@ -222,18 +230,39 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     tfs.get_pull_request_details.return_value = {
         "source_branch": "feature/test",
         "target_branch": "main",
+        "changed_files": [{"path": "/a.py", "change_type": "edit"}],
     }
-    diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " class Example:\n"
+        "-    value = 1\n"
+        "+    value = 2\n"
+        "     other = value\n"
+    )
     tfs.get_pull_request_diff.return_value = diff
+    tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
+    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    tfs.get_project_manifest.return_value = "PROJECT MANIFEST"
+    tfs.get_project_files_context.return_value = "REQUESTED PROJECT CONTEXT"
 
     llm = MagicMock()
     llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+    llm.request_context_files.side_effect = [["src/helper.py"], []]
+    structured_comments = [
+        {"file": "a.py", "line": 2, "type": "bug", "severity": "high", "comment": "msg"}
     ]
+    llm.review_pr_structured.return_value = structured_comments
+    tfs.plan_review_comments.return_value = {
+        "new_comments": structured_comments,
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
 
     git_utils = MagicMock()
-    git_utils.filter_diff_additions_only.return_value = diff
     git_utils.limit_diff_files.return_value = (diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
     git_utils.truncate_diff.return_value = (diff, False)
@@ -265,6 +294,36 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert result == 0
     save_output.assert_called_once()
     tfs.post_review_comments.assert_not_called()
+    tfs.get_work_item_context.assert_called_once_with(
+        "repo-a",
+        123,
+        max_items=review_config.work_item_context_max_items,
+        max_chars=review_config.work_item_context_max_chars,
+        fields=review_config.work_item_context_fields,
+    )
+    tfs.get_project_context.assert_not_called()
+    tfs.get_changed_files_context.assert_called_once_with(
+        "repo-a",
+        "feature/test",
+        [{"path": "/a.py", "change_type": "edit"}],
+        max_chars=review_config.project_context_retrieval_max_chars,
+        file_max_chars=review_config.project_context_retrieval_file_max_chars,
+        file_extensions=review_config.project_context_file_extensions,
+        exclude_patterns=review_config.project_context_exclude_patterns,
+    )
+    tfs.get_project_manifest.assert_called_once()
+    tfs.get_project_files_context.assert_called_once()
+    assert llm.request_context_files.call_count == 2
+    assert llm.review.call_args.kwargs["project_context"] == (
+        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
+    )
+    assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == (
+        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
+    )
+    assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    assert llm.review.call_args.kwargs["diff"] == diff
+    git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
 
 
@@ -367,16 +426,28 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     tfs.get_pull_request_details.return_value = {
         "source_branch": "feature/test",
         "target_branch": "main",
+        "changed_files": [{"path": "/a.py", "change_type": "edit"}],
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
     tfs.get_pull_request_diff.return_value = diff
+    tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
+    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    tfs.get_project_manifest.return_value = ""
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
     llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
+    llm.request_context_files.return_value = []
+    structured_comments = [
         {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
     ]
+    llm.review_pr_structured.return_value = structured_comments
+    tfs.plan_review_comments.return_value = {
+        "new_comments": structured_comments,
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
@@ -403,6 +474,120 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     assert result == 1
     progress.stop.assert_called()
     print_mock.assert_any_call("ERR:Error posting comments: boom")
+
+
+def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_config_factory) -> None:
+    """It should keep the old PR-only behavior when diff_only is selected."""
+    config = review_config_factory(review_scope="diff_only")
+    formatter = MagicMock()
+    formatter.format_progress.side_effect = lambda message: message
+    formatter.format_pr_details.return_value = "PR DETAILS"
+    formatter.format_info.side_effect = lambda message: message
+    formatter.format_review.return_value = "REVIEW"
+    formatter.format_structured_comments.return_value = "COMMENTS"
+    formatter.format_warning.side_effect = lambda message: f"WARN:{message}"
+    formatter.format_success.side_effect = lambda message: f"OK:{message}"
+
+    tfs = MagicMock()
+    tfs.get_pull_request_details.return_value = {
+        "source_branch": "feature/test",
+        "target_branch": "main",
+    }
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " class Example:\n"
+        "-    value = 1\n"
+        "+    value = 2\n"
+        "     other = value\n"
+    )
+    filtered_diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -1,3 +1,4 @@\n+    value = 2"
+    tfs.get_pull_request_diff.return_value = diff
+
+    llm = MagicMock()
+    llm.review.return_value = "General review"
+    llm.review_pr_structured.return_value = []
+    tfs.plan_review_comments.return_value = {
+        "new_comments": [],
+        "skipped_duplicates": [],
+        "resolved_reappeared": [],
+        "existing_threads": [],
+    }
+
+    git_utils = MagicMock()
+    git_utils.filter_diff_additions_only.return_value = filtered_diff
+    git_utils.limit_diff_files.return_value = (filtered_diff, False, 0)
+    git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
+    git_utils.truncate_diff.return_value = (filtered_diff, False)
+
+    mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.LLMClient", return_value=llm)
+    mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
+    mocker.patch("src.tfs_client.TFSError", new=Exception)
+    mocker.patch("builtins.print")
+
+    result = ai_review.run_pr_review_workflow(
+        make_args(dry_run=True, repo_name="repo-a"),
+        config,
+        formatter,
+    )
+
+    assert result == 0
+    tfs.get_work_item_context.assert_not_called()
+    tfs.get_project_context.assert_not_called()
+    assert llm.review.call_args.kwargs["project_context"] == ""
+    assert llm.review.call_args.kwargs["work_item_context"] == ""
+    git_utils.filter_diff_additions_only.assert_called_once_with(diff)
+    assert llm.review.call_args.kwargs["diff"] == filtered_diff
+
+
+def test_review_scope_context_note_matches_scope() -> None:
+    """It should describe context behavior according to the active scope."""
+    contextual = ai_review._review_scope_context_note("diff_with_context")
+    full_code = ai_review._review_scope_context_note("full_code")
+    diff_only = ai_review._review_scope_context_note("diff_only")
+
+    assert "modified PR lines" in contextual
+    assert "full_code mode" in full_code
+    assert "diff_only mode" in diff_only
+
+
+def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff: str) -> None:
+    """It should keep problem comments anchored to added lines only."""
+    comments = [
+        {"file": "src/app.py", "line": 2, "type": "bug", "comment": "changed"},
+        {"file": "src/app.py", "line": 1, "type": "bug", "comment": "context"},
+        {"file": "", "line": 0, "type": "suggestion", "comment": "general"},
+        {"file": "", "line": 0, "type": "praise", "comment": "looks good"},
+    ]
+
+    kept, discarded = ai_review._filter_comments_to_changed_lines(comments, sample_diff)
+
+    assert kept == [comments[0], comments[3]]
+    assert discarded == [comments[1], comments[2]]
+
+
+def test_build_general_summary_comment_is_compact(review_config) -> None:
+    """It should keep the top-level PR comment to metadata only."""
+    rendered = ai_review._build_general_summary_comment(
+        review_config,
+        run_timestamp="2026-05-13T15:20:00Z",
+    )
+
+    assert rendered == "\n".join([
+        "## 🤖 AI Code Review",
+        "",
+        f"**Provider:** {review_config.llm_provider}",
+        f"**Model:** {review_config.model}",
+        f"**Mode:** {review_config.verbosity}",
+        f"**Scope:** {review_config.review_scope}",
+        "**Ran at:** 2026-05-13T15:20:00Z",
+    ])
+    assert "General review" not in rendered
+    assert "Automatic review generated" not in rendered
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:

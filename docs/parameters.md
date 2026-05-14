@@ -3,14 +3,34 @@
 ## General Parameters
 
 ```yaml
+llm:
+  max_prompt_tokens: 0      # 0 = provider default/no limit; Bedrock defaults to 180000
+
 review:
   language: en               # Language for comments
   verbosity: detailed        # detailed | quick | security
-  scope: diff_only           # diff_only | full_code
+  scope: diff_with_context   # diff_with_context | diff_only | full_code
   custom_prompt_file: review_prompt.md  # Custom prompt
   max_diff_files: 50         # Max files sent to LLM
   max_diff_lines: 2000       # Max lines per file
   file_extensions_filter: [".cs", ".ts", ".py"]  # Allowlist (empty = all)
+  project_context:
+    enabled: true            # Include repository context from the PR source branch
+    mode: on_demand          # on_demand | full
+    manifest_max_chars: 60000
+    retrieval_max_rounds: 2
+    retrieval_max_files: 20
+    retrieval_max_chars: 120000
+    retrieval_file_max_chars: 30000
+    max_files: 0             # full mode only; 0 = all eligible files
+    max_chars: 0             # full mode only; 0 = no character limit
+    file_extensions: []      # Empty = common text/code files
+    exclude_patterns: ["node_modules", "dist", ".env", "*.lock"]
+  work_item_context:
+    enabled: true            # Include documentation from linked work items
+    max_items: 20            # Max linked work items included as context
+    max_chars: 100000        # Max work-item context characters
+    fields: ["System.Description", "Microsoft.VSTS.Common.AcceptanceCriteria"]
 ```
 
 ## Comment Parameters
@@ -69,6 +89,62 @@ review:
 ```
 
 > **Note:** If no eligible files remain after filtering, the review ends with a warning without calling the LLM.
+
+## On-Demand Repository Context
+
+The default review scope, `diff_with_context`, reviews modified PR lines while also sending the unified diff context, full changed-file contents, linked work item documentation, and a read-only repository manifest to the LLM. The model can request extra files from that manifest before the final review, so it can inspect related contracts, call sites, and dependencies without sending the whole repository up front.
+
+Context and deleted lines are used for understanding only; findings and inline comments must still point to added or modified PR lines. Comments outside changed PR lines are discarded before posting. Use `diff_only` to review only the PR changes without surrounding context, or `full_code` to review the full content of changed files.
+
+The `review.project_context` block controls how repository context is loaded when `scope: diff_with_context` is selected. `mode: on_demand` is the default and sends changed files plus a file manifest first, then fetches only the model-requested support files. `mode: full` preserves the previous behavior of sending the full eligible repository snapshot, capped by `max_files`, `max_chars`, and `llm.max_prompt_tokens`.
+
+```yaml
+review:
+  project_context:
+    enabled: true
+    mode: on_demand         # on_demand | full
+    manifest_max_chars: 60000
+    retrieval_max_rounds: 2
+    retrieval_max_files: 20
+    retrieval_max_chars: 120000
+    retrieval_file_max_chars: 30000
+    max_files: 0            # full mode only; 0 = all eligible files
+    max_chars: 0            # full mode only; 0 = no character limit
+    file_extensions: []      # Empty = common text/code files
+    exclude_patterns:
+      - node_modules
+      - dist
+      - .env
+      - "*.lock"
+```
+
+Use `file_extensions` to narrow both the manifest and the requestable repository files for very large repositories:
+
+```yaml
+review:
+  project_context:
+    file_extensions: [".cs", ".ts", ".py", ".yaml"]
+```
+
+## Linked Work Item Documentation
+
+The `review.work_item_context` block fetches work items linked to the PR and sends selected documentation fields to the LLM when `scope: diff_with_context` is selected. Common fields include title, description, acceptance criteria, repro steps, and system info. This context is read-only: findings and inline comments must still point to modified PR lines.
+
+```yaml
+review:
+  work_item_context:
+    enabled: true
+    max_items: 20
+    max_chars: 100000
+    fields:
+      - System.Title
+      - System.WorkItemType
+      - System.State
+      - System.Description
+      - Microsoft.VSTS.Common.AcceptanceCriteria
+      - Microsoft.VSTS.TCM.ReproSteps
+      - Microsoft.VSTS.TCM.SystemInfo
+```
 
 ## Custom Prompt (Markdown)
 
