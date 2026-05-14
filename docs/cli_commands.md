@@ -322,6 +322,9 @@ review:
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
   max_diff_lines: 2000
+  project_context:
+    enabled: true
+    mode: on_demand
 
 pr:
   auto_post_comments: false

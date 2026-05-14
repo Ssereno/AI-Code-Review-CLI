@@ -95,15 +95,22 @@ review:
   max_diff_files: 50
   project_context:
     enabled: true
-    max_files: 0                         # 0 = all eligible files
-    max_chars: 0                         # 0 = no character limit
+    mode: on_demand                      # on_demand, full
+    manifest_max_chars: 60000
+    retrieval_max_rounds: 2
+    retrieval_max_files: 20
+    retrieval_max_chars: 120000
+    retrieval_file_max_chars: 30000
   work_item_context:
     enabled: true
     max_items: 20
 ```
 
-For providers with hard prompt limits, repository context is trimmed before the
-LLM call when needed. Bedrock uses a default estimated prompt budget of 180000
+By default, repository context is loaded on demand: the prompt includes the PR
+diff, full changed-file contents, linked work item documentation, and a
+repository manifest, then the model requests any extra files it needs. Set
+`review.project_context.mode: full` to send the full eligible repository
+snapshot instead. Bedrock uses a default estimated prompt budget of 180000
 tokens; override it with `llm.max_prompt_tokens` if your model supports more or
 less.
 

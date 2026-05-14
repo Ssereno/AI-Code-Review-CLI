@@ -94,7 +94,7 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
-    assert "full eligible repository" in contextual_guidance
+    assert "selected on-demand repository files" in contextual_guidance
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
@@ -115,7 +115,7 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
-    assert "Full repository context (read-only, not review target)" in message
+    assert "Repository context (read-only, not review target)" in message
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
     assert "totals include tax" in message
@@ -147,6 +147,36 @@ def test_bedrock_has_default_prompt_budget() -> None:
     client = LLMClient(make_llm_config(llm_provider="bedrock"))
 
     assert client._effective_prompt_token_limit() == 180000
+
+
+def test_request_context_files_parses_json_and_tracks_usage(mocker) -> None:
+    """It should ask the provider for extra context files using JSON."""
+    client = LLMClient(make_llm_config())
+    openai = mocker.patch(
+        "src.llm_client.LLMClient._call_openai",
+        return_value='{"files":["src/helper.py","/src/helper.py","b/src/model.py"],"reason":"need contracts"}',
+    )
+
+    files = client.request_context_files(
+        diff="+call_helper()",
+        files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
+        project_manifest="- /src/helper.py\n- /src/model.py",
+        changed_files_context="src/app.py content",
+        work_item_context="Requirement",
+        max_files=5,
+    )
+
+    assert files == ["src/helper.py", "src/model.py"]
+    assert openai.called
+    assert client.usage_events[0].operation == "context_request"
+
+
+def test_parse_context_file_request_handles_bad_payloads() -> None:
+    """It should return no files for malformed context requests."""
+    client = LLMClient(make_llm_config())
+
+    assert client._parse_context_file_request("not json") == []
+    assert client._parse_context_file_request('["a.py", 123, "a.py"]') == ["a.py"]
 
 
 def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:

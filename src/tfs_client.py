@@ -675,6 +675,265 @@ class TFSClient:
 
         return "\n".join(parts).strip()
 
+    def get_project_manifest(self, repository: str, branch: str,
+                             max_chars: int = 60000,
+                             file_extensions: Optional[list[str]] = None,
+                             exclude_patterns: Optional[list[str]] = None) -> str:
+        """Builds a compact manifest of eligible repository files."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name:
+            return ""
+
+        eligible_paths = self._get_project_context_paths(
+            repository,
+            branch_name,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+        if not eligible_paths:
+            return ""
+
+        parts = [
+            "### Repository file manifest",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            "The following files are available for on-demand context. Request only "
+            "files that are necessary to understand the PR changes.",
+            "",
+        ]
+
+        used_chars = 0
+        included = 0
+        truncated = False
+        for path in eligible_paths:
+            line = f"- {path}"
+            line_chars = len(line) + 1
+            if used_chars + line_chars > max_chars:
+                truncated = True
+                break
+            parts.append(line)
+            used_chars += line_chars
+            included += 1
+
+        omitted = max(0, len(eligible_paths) - included)
+        if truncated or omitted:
+            parts.append(
+                f"[Repository manifest truncated: included {included} file(s), "
+                f"omitted {omitted} file(s).]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def get_changed_files_context(self, repository: str, branch: str,
+                                  changed_files: list[dict],
+                                  max_chars: int = 120000,
+                                  file_max_chars: int = 30000,
+                                  file_extensions: Optional[list[str]] = None,
+                                  exclude_patterns: Optional[list[str]] = None) -> str:
+        """Fetches complete contents for eligible files changed by the PR."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not changed_files:
+            return ""
+
+        paths = [
+            str(item.get("path", ""))
+            for item in changed_files
+            if str(item.get("change_type", "")).lower() != "delete"
+        ]
+        return self._build_repository_files_context(
+            repository=repository,
+            branch_name=branch_name,
+            requested_paths=paths,
+            title="Changed file context",
+            intro=(
+                "These are the full contents of files changed by the PR. Use them "
+                "for context, but keep findings anchored to changed PR lines."
+            ),
+            max_files=len(paths) if paths else 1,
+            max_chars=max_chars,
+            file_max_chars=file_max_chars,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+
+    def get_project_files_context(self, repository: str, branch: str,
+                                  requested_paths: list[str],
+                                  max_files: int = 20,
+                                  max_chars: int = 120000,
+                                  file_max_chars: int = 30000,
+                                  file_extensions: Optional[list[str]] = None,
+                                  exclude_patterns: Optional[list[str]] = None) -> str:
+        """Fetches selected eligible repository files for on-demand context."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not requested_paths:
+            return ""
+
+        return self._build_repository_files_context(
+            repository=repository,
+            branch_name=branch_name,
+            requested_paths=requested_paths,
+            title="Requested repository context",
+            intro=(
+                "These files were requested by the model to understand the PR. "
+                "They are read-only context, not review targets."
+            ),
+            max_files=max_files,
+            max_chars=max_chars,
+            file_max_chars=file_max_chars,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+
+    def _get_project_context_paths(self, repository: str, branch_name: str,
+                                   file_extensions: Optional[list[str]] = None,
+                                   exclude_patterns: Optional[list[str]] = None) -> list[str]:
+        """Returns sorted eligible file paths for repository context."""
+        files = self._list_repository_files(repository, branch_name)
+        extensions = self._normalize_extensions(file_extensions)
+        eligible_paths = [
+            item.get("path", "")
+            for item in files
+            if self._is_project_context_file(
+                item=item,
+                file_extensions=extensions,
+                exclude_patterns=exclude_patterns,
+            )
+        ]
+        return sorted(set(path for path in eligible_paths if path))
+
+    def _build_repository_files_context(
+        self,
+        *,
+        repository: str,
+        branch_name: str,
+        requested_paths: list[str],
+        title: str,
+        intro: str,
+        max_files: int,
+        max_chars: int,
+        file_max_chars: int,
+        file_extensions: Optional[list[str]],
+        exclude_patterns: Optional[list[str]],
+    ) -> str:
+        """Renders selected repository files after eligibility validation."""
+        eligible_paths = self._get_project_context_paths(
+            repository,
+            branch_name,
+            file_extensions=file_extensions,
+            exclude_patterns=exclude_patterns,
+        )
+        eligible_by_normalized = {
+            self._normalize_context_path(path): path
+            for path in eligible_paths
+        }
+
+        selected_paths: list[str] = []
+        skipped_paths: list[str] = []
+        seen: set[str] = set()
+        for requested_path in requested_paths:
+            normalized = self._normalize_context_path(requested_path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            path = eligible_by_normalized.get(normalized)
+            if not path:
+                skipped_paths.append(str(requested_path))
+                continue
+            selected_paths.append(path)
+            if len(selected_paths) >= max_files:
+                break
+
+        if not selected_paths and skipped_paths:
+            return "\n".join([
+                f"### {title}",
+                intro,
+                "",
+                "[No requested files were eligible for context.]",
+            ])
+        if not selected_paths:
+            return ""
+
+        parts = [
+            f"### {title}",
+            f"Repository: {repository}",
+            f"Source branch: {branch_name}",
+            "",
+            intro,
+            "",
+        ]
+
+        used_chars = 0
+        included_files = 0
+        truncated = False
+
+        for path in selected_paths:
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+
+            try:
+                content = self._get_file_content(
+                    repository,
+                    path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                skipped_paths.append(path)
+                continue
+
+            file_truncated = False
+            if len(content) > file_max_chars:
+                content = content[:file_max_chars]
+                file_truncated = True
+            if len(content) > remaining:
+                content = content[:remaining]
+                file_truncated = True
+                truncated = True
+
+            parts.extend([
+                f"#### {path}",
+                "````text",
+                content,
+                "````",
+            ])
+            if file_truncated:
+                parts.append("[File context truncated.]")
+            parts.append("")
+            used_chars += len(content)
+            included_files += 1
+
+            if truncated:
+                break
+
+        if included_files == 0:
+            return ""
+
+        if skipped_paths:
+            parts.append(
+                "[Skipped context files: "
+                + ", ".join(str(path) for path in skipped_paths[:10])
+                + (", ..." if len(skipped_paths) > 10 else "")
+                + "]"
+            )
+        omitted = max(0, len(selected_paths) - included_files)
+        if truncated or omitted:
+            parts.append(
+                f"[{title} truncated: included {included_files} file(s), "
+                f"omitted {omitted} file(s), used {used_chars} of {max_chars} characters.]"
+            )
+
+        return "\n".join(parts).strip()
+
+    def _normalize_context_path(self, path: object) -> str:
+        """Normalizes requested repository context paths for safe matching."""
+        value = str(path or "").replace("\\", "/").strip()
+        if value.startswith(("a/", "b/")):
+            value = value[2:]
+        return value.lstrip("/").lower()
+
     def _list_repository_files(self, repository: str, branch: str) -> list[dict]:
         """Lists files in a repository branch recursively."""
         path = f"git/repositories/{repository}/items"

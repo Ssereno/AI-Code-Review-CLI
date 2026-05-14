@@ -422,6 +422,84 @@ def test_get_project_context_zero_limits_include_all_eligible_files(mocker) -> N
     assert get_file.call_count == 3
 
 
+def test_get_project_manifest_lists_eligible_files(mocker) -> None:
+    """It should render a compact manifest without fetching file contents."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/README.md", "gitObjectType": "blob"},
+                {"path": "/dist/app.js", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch("src.tfs_client.TFSClient._get_file_content")
+
+    manifest = client.get_project_manifest(
+        "repo-a",
+        "refs/heads/feature/context",
+        max_chars=1000,
+    )
+
+    assert "Repository file manifest" in manifest
+    assert "- /README.md" in manifest
+    assert "- /src/app.py" in manifest
+    assert "dist" not in manifest
+    assert "logo.png" not in manifest
+    get_mock.assert_called_once()
+    get_file.assert_not_called()
+
+
+def test_get_changed_and_requested_file_contexts_validate_paths(mocker) -> None:
+    """It should fetch only eligible selected files for bounded context."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {"path": "/src/app.py", "gitObjectType": "blob"},
+                {"path": "/src/helper.py", "gitObjectType": "blob"},
+                {"path": "/assets/logo.png", "gitObjectType": "blob"},
+            ]
+        },
+    )
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["print('app')", "helper = True"],
+    )
+
+    changed_context = client.get_changed_files_context(
+        "repo-a",
+        "feature/context",
+        [
+            {"path": "/src/app.py", "change_type": "edit"},
+            {"path": "/deleted.py", "change_type": "delete"},
+        ],
+        max_chars=1000,
+        file_max_chars=1000,
+    )
+    requested_context = client.get_project_files_context(
+        "repo-a",
+        "feature/context",
+        ["src/helper.py", "assets/logo.png", "../secret.txt"],
+        max_files=3,
+        max_chars=1000,
+        file_max_chars=1000,
+    )
+
+    assert "Changed file context" in changed_context
+    assert "/src/app.py" in changed_context
+    assert "deleted.py" not in changed_context
+    assert "Requested repository context" in requested_context
+    assert "/src/helper.py" in requested_context
+    assert "#### /assets/logo.png" not in requested_context
+    assert "secret" in requested_context
+    assert get_file.call_count == 2
+
+
 def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
     """It should build read-only context from PR-linked work item fields."""
     client = TFSClient(make_tfs_config())

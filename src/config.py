@@ -94,8 +94,14 @@ class ReviewConfig:
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)
     project_context_enabled: bool = True     # Include repository files as read-only context
+    project_context_mode: str = "on_demand"  # "on_demand" | "full"
     project_context_max_files: int = 0       # 0 = include all eligible project files
     project_context_max_chars: int = 0       # 0 = no repository-context character limit
+    project_context_manifest_max_chars: int = 60000
+    project_context_retrieval_max_rounds: int = 2
+    project_context_retrieval_max_files: int = 20
+    project_context_retrieval_max_chars: int = 120000
+    project_context_retrieval_file_max_chars: int = 30000
     project_context_file_extensions: list = field(default_factory=list)
     project_context_exclude_patterns: list = field(default_factory=lambda: [
         ".git",
@@ -262,8 +268,14 @@ class ReviewConfig:
             "custom_prompt_file": ("review", "custom_prompt_file"),
             "file_extensions_filter": ("review", "file_extensions_filter"),
             "project_context_enabled": ("review", "project_context", "enabled"),
+            "project_context_mode": ("review", "project_context", "mode"),
             "project_context_max_files": ("review", "project_context", "max_files"),
             "project_context_max_chars": ("review", "project_context", "max_chars"),
+            "project_context_manifest_max_chars": ("review", "project_context", "manifest_max_chars"),
+            "project_context_retrieval_max_rounds": ("review", "project_context", "retrieval_max_rounds"),
+            "project_context_retrieval_max_files": ("review", "project_context", "retrieval_max_files"),
+            "project_context_retrieval_max_chars": ("review", "project_context", "retrieval_max_chars"),
+            "project_context_retrieval_file_max_chars": ("review", "project_context", "retrieval_file_max_chars"),
             "project_context_file_extensions": ("review", "project_context", "file_extensions"),
             "project_context_exclude_patterns": ("review", "project_context", "exclude_patterns"),
             "work_item_context_enabled": ("review", "work_item_context", "enabled"),
@@ -387,6 +399,12 @@ class ReviewConfig:
                 "Use 0 for provider default/no limit or an integer greater than 0."
             )
 
+        if self.project_context_mode not in ("on_demand", "full"):
+            issues.append(
+                f"Invalid project_context.mode: '{self.project_context_mode}'. "
+                "Use 'on_demand' or 'full'."
+            )
+
         if self.project_context_max_files < 0:
             issues.append(
                 f"Invalid project_context.max_files: '{self.project_context_max_files}'. "
@@ -397,6 +415,36 @@ class ReviewConfig:
             issues.append(
                 f"Invalid project_context.max_chars: '{self.project_context_max_chars}'. "
                 "Use 0 for no limit or an integer greater than 0."
+            )
+
+        if self.project_context_manifest_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.manifest_max_chars: '{self.project_context_manifest_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_rounds <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_rounds: '{self.project_context_retrieval_max_rounds}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_files <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_files: '{self.project_context_retrieval_max_files}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_max_chars: '{self.project_context_retrieval_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.project_context_retrieval_file_max_chars <= 0:
+            issues.append(
+                f"Invalid project_context.retrieval_file_max_chars: '{self.project_context_retrieval_file_max_chars}'. "
+                "Use an integer greater than 0."
             )
 
         if self.work_item_context_max_items <= 0:

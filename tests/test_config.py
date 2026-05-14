@@ -184,8 +184,14 @@ review:
     - .md
   project_context:
     enabled: false
+    mode: full
     max_files: 123
     max_chars: 7890
+    manifest_max_chars: 4567
+    retrieval_max_rounds: 3
+    retrieval_max_files: 8
+    retrieval_max_chars: 9999
+    retrieval_file_max_chars: 1111
     file_extensions:
       - .py
       - .yaml
@@ -252,8 +258,14 @@ usage:
     assert config.custom_prompt_file == "prompt.md"
     assert config.file_extensions_filter == [".py", ".md"]
     assert config.project_context_enabled is False
+    assert config.project_context_mode == "full"
     assert config.project_context_max_files == 123
     assert config.project_context_max_chars == 7890
+    assert config.project_context_manifest_max_chars == 4567
+    assert config.project_context_retrieval_max_rounds == 3
+    assert config.project_context_retrieval_max_files == 8
+    assert config.project_context_retrieval_max_chars == 9999
+    assert config.project_context_retrieval_file_max_chars == 1111
     assert config.project_context_file_extensions == [".py", ".yaml"]
     assert config.project_context_exclude_patterns == ["node_modules", "*.lock"]
     assert config.work_item_context_enabled is False
@@ -310,8 +322,14 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
         max_prompt_tokens=-1,
         max_diff_files=0,
         max_diff_lines=0,
+        project_context_mode="everything",
         project_context_max_files=-1,
         project_context_max_chars=-1,
+        project_context_manifest_max_chars=0,
+        project_context_retrieval_max_rounds=0,
+        project_context_retrieval_max_files=0,
+        project_context_retrieval_max_chars=0,
+        project_context_retrieval_file_max_chars=0,
         work_item_context_max_items=0,
         work_item_context_max_chars=0,
     )
@@ -323,8 +341,14 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     assert any("Invalid llm.max_prompt_tokens" in issue for issue in issues)
     assert any("Invalid max_diff_files" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
+    assert any("Invalid project_context.mode" in issue for issue in issues)
     assert any("Invalid project_context.max_files" in issue for issue in issues)
     assert any("Invalid project_context.max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.manifest_max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_rounds" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_files" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_max_chars" in issue for issue in issues)
+    assert any("Invalid project_context.retrieval_file_max_chars" in issue for issue in issues)
     assert any("Invalid work_item_context.max_items" in issue for issue in issues)
     assert any("Invalid work_item_context.max_chars" in issue for issue in issues)
 

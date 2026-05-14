@@ -230,6 +230,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     tfs.get_pull_request_details.return_value = {
         "source_branch": "feature/test",
         "target_branch": "main",
+        "changed_files": [{"path": "/a.py", "change_type": "edit"}],
     }
     diff = (
         "diff --git a/a.py b/a.py\n"
@@ -243,10 +244,13 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     )
     tfs.get_pull_request_diff.return_value = diff
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
-    tfs.get_project_context.return_value = "PROJECT CONTEXT"
+    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    tfs.get_project_manifest.return_value = "PROJECT MANIFEST"
+    tfs.get_project_files_context.return_value = "REQUESTED PROJECT CONTEXT"
 
     llm = MagicMock()
     llm.review.return_value = "General review"
+    llm.request_context_files.side_effect = [["src/helper.py"], []]
     structured_comments = [
         {"file": "a.py", "line": 2, "type": "bug", "severity": "high", "comment": "msg"}
     ]
@@ -297,17 +301,26 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         max_chars=review_config.work_item_context_max_chars,
         fields=review_config.work_item_context_fields,
     )
-    tfs.get_project_context.assert_called_once_with(
+    tfs.get_project_context.assert_not_called()
+    tfs.get_changed_files_context.assert_called_once_with(
         "repo-a",
         "feature/test",
-        max_files=review_config.project_context_max_files,
-        max_chars=review_config.project_context_max_chars,
+        [{"path": "/a.py", "change_type": "edit"}],
+        max_chars=review_config.project_context_retrieval_max_chars,
+        file_max_chars=review_config.project_context_retrieval_file_max_chars,
         file_extensions=review_config.project_context_file_extensions,
         exclude_patterns=review_config.project_context_exclude_patterns,
     )
-    assert llm.review.call_args.kwargs["project_context"] == "PROJECT CONTEXT"
+    tfs.get_project_manifest.assert_called_once()
+    tfs.get_project_files_context.assert_called_once()
+    assert llm.request_context_files.call_count == 2
+    assert llm.review.call_args.kwargs["project_context"] == (
+        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
+    )
     assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
-    assert llm.review_pr_structured.call_args.kwargs["project_context"] == "PROJECT CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == (
+        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
+    )
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
     assert llm.review.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
@@ -413,15 +426,18 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     tfs.get_pull_request_details.return_value = {
         "source_branch": "feature/test",
         "target_branch": "main",
+        "changed_files": [{"path": "/a.py", "change_type": "edit"}],
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
     tfs.get_pull_request_diff.return_value = diff
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
-    tfs.get_project_context.return_value = "PROJECT CONTEXT"
+    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    tfs.get_project_manifest.return_value = ""
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
     llm.review.return_value = "General review"
+    llm.request_context_files.return_value = []
     structured_comments = [
         {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
     ]

@@ -431,6 +431,139 @@ def _filter_comments_to_changed_lines(comments: list[dict],
     return kept, discarded
 
 
+def _join_context_sections(*sections: str) -> str:
+    """Joins non-empty context sections."""
+    return "\n\n".join(
+        section.strip()
+        for section in sections
+        if isinstance(section, str) and section.strip()
+    )
+
+
+def _build_on_demand_project_context(
+    *,
+    llm: LLMClient,
+    tfs,
+    config: ReviewConfig,
+    formatter: ReviewFormatter,
+    repo_name: str,
+    source_branch: str,
+    changed_files: list[dict],
+    diff: str,
+    files_summary: list[dict],
+    user_context: str,
+    work_item_context: str,
+) -> str:
+    """Builds repository context by letting the model request files from a manifest."""
+    changed_files_context = ""
+    project_manifest = ""
+
+    try:
+        changed_files_context = tfs.get_changed_files_context(
+            repo_name,
+            source_branch,
+            changed_files,
+            max_chars=config.project_context_retrieval_max_chars,
+            file_max_chars=config.project_context_retrieval_file_max_chars,
+            file_extensions=config.project_context_file_extensions,
+            exclude_patterns=config.project_context_exclude_patterns,
+        )
+    except Exception as exc:
+        print(formatter.format_warning(
+            f"Could not load changed file context; continuing with diff only: {exc}"
+        ))
+
+    if changed_files_context:
+        print(formatter.format_info(
+            f"Changed file context loaded ({len(changed_files_context):,} characters). "
+            f"{_review_scope_context_note(config.review_scope)}"
+        ))
+
+    try:
+        project_manifest = tfs.get_project_manifest(
+            repo_name,
+            source_branch,
+            max_chars=config.project_context_manifest_max_chars,
+            file_extensions=config.project_context_file_extensions,
+            exclude_patterns=config.project_context_exclude_patterns,
+        )
+    except Exception as exc:
+        print(formatter.format_warning(
+            f"Could not load repository manifest; continuing without on-demand context: {exc}"
+        ))
+
+    if not project_manifest:
+        return changed_files_context
+
+    print(formatter.format_info(
+        f"Repository manifest loaded ({len(project_manifest):,} characters). "
+        "The model can request additional files from it."
+    ))
+
+    fetched_context = ""
+    requested_keys: set[str] = set()
+    for round_index in range(config.project_context_retrieval_max_rounds):
+        remaining_files = config.project_context_retrieval_max_files - len(requested_keys)
+        remaining_chars = config.project_context_retrieval_max_chars - len(fetched_context)
+        if remaining_files <= 0 or remaining_chars <= 0:
+            break
+
+        requested_paths = llm.request_context_files(
+            diff=diff,
+            files_summary=files_summary,
+            project_manifest=project_manifest,
+            context=user_context,
+            changed_files_context=changed_files_context,
+            work_item_context=work_item_context,
+            fetched_context=fetched_context,
+            max_files=remaining_files,
+        )
+        if not isinstance(requested_paths, list):
+            requested_paths = []
+
+        new_paths = []
+        for path in requested_paths:
+            key = _normalize_review_path(path)
+            if not key or key in requested_keys:
+                continue
+            requested_keys.add(key)
+            new_paths.append(path)
+
+        if not new_paths:
+            break
+
+        print(formatter.format_info(
+            f"Context request round {round_index + 1}: fetching {len(new_paths)} file(s)."
+        ))
+
+        try:
+            round_context = tfs.get_project_files_context(
+                repo_name,
+                source_branch,
+                new_paths,
+                max_files=remaining_files,
+                max_chars=remaining_chars,
+                file_max_chars=config.project_context_retrieval_file_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except Exception as exc:
+            print(formatter.format_warning(
+                f"Could not fetch requested repository context; continuing: {exc}"
+            ))
+            continue
+
+        if round_context:
+            fetched_context = _join_context_sections(fetched_context, round_context)
+
+    if fetched_context:
+        print(formatter.format_info(
+            f"On-demand repository context loaded ({len(fetched_context):,} characters)."
+        ))
+
+    return _join_context_sections(changed_files_context, fetched_context)
+
+
 def _get_llm_usage_events(llm: LLMClient) -> list:
     """Returns usage events from an LLM client, ignoring test doubles."""
     events = getattr(llm, "usage_events", [])
@@ -850,7 +983,12 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             ))
 
     project_context = ""
-    if use_contextual_review and config.project_context_enabled:
+    project_context_mode = (config.project_context_mode or "on_demand").lower()
+    if (
+        use_contextual_review
+        and config.project_context_enabled
+        and project_context_mode == "full"
+    ):
         print(formatter.format_progress("Getting full repository context from source branch"))
         try:
             project_context = tfs.get_project_context(
@@ -872,14 +1010,39 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
 
+    try:
+        llm = LLMClient(config)
+        if (
+            use_contextual_review
+            and config.project_context_enabled
+            and project_context_mode == "on_demand"
+        ):
+            print(formatter.format_progress(
+                "Preparing on-demand repository context"
+            ))
+            project_context = _build_on_demand_project_context(
+                llm=llm,
+                tfs=tfs,
+                config=config,
+                formatter=formatter,
+                repo_name=repo_name,
+                source_branch=pr_details.get("source_branch", ""),
+                changed_files=pr_details.get("changed_files", []),
+                diff=diff_truncated,
+                files_summary=files_summary,
+                user_context=getattr(args, "context", ""),
+                work_item_context=work_item_context,
+            )
+    except LLMError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
     # --- Perform structured review ---
     progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")
     progress.start()
     start_time = time.time()
 
     try:
-        llm = LLMClient(config)
-
         # Get general review as text
         review_text = llm.review(
             diff=diff_truncated,

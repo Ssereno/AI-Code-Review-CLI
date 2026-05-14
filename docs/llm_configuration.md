@@ -45,7 +45,7 @@ openai:
 
 `max_prompt_tokens` controls the estimated prompt budget before repository
 context is trimmed. Use `0` for the provider default. Bedrock defaults to
-`180000` so full repository context stays below its hard prompt limit.
+`180000` so repository-context prompts stay below its hard prompt limit.
 
 ### Azure OpenAI
 

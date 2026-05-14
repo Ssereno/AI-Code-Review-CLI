@@ -236,10 +236,10 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
         if structured:
             if language == "en":
                 return (
-                    "Review scope: diff_with_context. The full eligible repository is provided as read-only "
-                    "context, and the diff includes added lines (+), deleted lines (-), and surrounding "
-                    "unchanged context. Use repository context, diff context lines, and linked work item "
-                    "documentation only to understand the rest of the repository, product intent, and "
+                    "Review scope: diff_with_context. Changed files and selected on-demand repository files "
+                    "are provided as read-only context, and the diff includes added lines (+), deleted lines "
+                    "(-), and surrounding unchanged context. Use repository context, diff context lines, and "
+                    "linked work item documentation only to understand the rest of the repository, product intent, and "
                     "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
@@ -248,10 +248,10 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                     "Do not emit general problem comments without file/line."
                 )
             return (
-                "Escopo de review: diff_with_context. O repositório elegível completo é fornecido como contexto "
-                "read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
-                "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a "
-                "documentação dos work items apenas para compreender o restante repositório, intenção de produto "
+                "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
+                "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas "
+                "removidas (-) e contexto inalterado à volta das alterações. Usa o contexto do repositório, as "
+                "linhas de contexto do diff e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
                 "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
@@ -262,15 +262,15 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
 
         if language == "en":
             return (
-                "Review scope: diff_with_context. The full eligible repository is provided as read-only context, "
-                "and the diff includes added lines (+), deleted lines (-), and surrounding unchanged context. "
-                "Use repository context, diff context lines, and linked work item documentation only to understand "
+                "Review scope: diff_with_context. Changed files and selected on-demand repository files are "
+                "provided as read-only context, and the diff includes added lines (+), deleted lines (-), and "
+                "surrounding unchanged context. Use repository context, diff context lines, and linked work item documentation only to understand "
                 "the rest of the repository, product intent, and requirements. "
                 "Focus only on issues introduced by added lines (+) in this PR."
             )
         return (
-            "Escopo de review: diff_with_context. O repositório elegível completo é fornecido como contexto "
-            "read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
+            "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
+            "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
             "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a documentação "
             "dos work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
             "Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
@@ -331,7 +331,7 @@ def build_user_message(diff: str, files_summary: list[dict],
 
     if project_context:
         parts.append(
-            "### Full repository context (read-only, not review target):\n"
+            "### Repository context (read-only, not review target):\n"
             f"{project_context}\n"
         )
 
@@ -343,6 +343,63 @@ def build_user_message(diff: str, files_summary: list[dict],
     )
     parts.append("### Diff for review:")
     parts.append(f"```diff\n{diff}\n```")
+
+    return "\n".join(parts)
+
+
+def build_context_request_message(diff: str, files_summary: list[dict],
+                                  project_manifest: str,
+                                  context: str = "",
+                                  changed_files_context: str = "",
+                                  work_item_context: str = "",
+                                  fetched_context: str = "",
+                                  max_files: int = 20) -> str:
+    """Builds the prompt used to ask the model for extra context files."""
+    parts = []
+
+    if files_summary:
+        parts.append("### Changed Files:")
+        for f in files_summary:
+            parts.append(
+                f"  - `{f['file']}` (+{f['additions']}/-{f['deletions']})"
+            )
+        parts.append("")
+
+    if context:
+        parts.append(f"### Additional context:\n{context}\n")
+
+    if work_item_context:
+        parts.append(
+            "### Linked work item documentation:\n"
+            f"{work_item_context}\n"
+        )
+
+    if changed_files_context:
+        parts.append(
+            "### Changed file context:\n"
+            f"{changed_files_context}\n"
+        )
+
+    if fetched_context:
+        parts.append(
+            "### Already fetched repository context:\n"
+            f"{fetched_context}\n"
+        )
+
+    parts.append(
+        "### Repository manifest:\n"
+        f"{project_manifest}\n"
+    )
+    parts.append(
+        "### PR diff:\n"
+        f"```diff\n{diff}\n```\n"
+    )
+    parts.append(
+        "Return JSON only in this exact shape:\n"
+        f'{{"files":["path/to/file"],"reason":"short reason"}}\n'
+        f"Request at most {max_files} files. Only request files from the manifest. "
+        "If no more context is needed, return {\"files\":[],\"reason\":\"enough context\"}."
+    )
 
     return "\n".join(parts)
 
@@ -577,6 +634,98 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
         )
+
+    def request_context_files(self, diff: str, files_summary: list[dict],
+                              project_manifest: str,
+                              context: str = "",
+                              changed_files_context: str = "",
+                              work_item_context: str = "",
+                              fetched_context: str = "",
+                              max_files: int = 20) -> list[str]:
+        """Asks the model which repository files it needs for extra context."""
+        if not project_manifest.strip() or max_files <= 0:
+            return []
+
+        system_prompt = (
+            "You are selecting additional repository files for a code review. "
+            "Use the PR diff, changed file context, work item documentation, and "
+            "repository manifest to decide whether extra files are needed. "
+            "Return JSON only. Do not review the code yet."
+        )
+        user_message = build_context_request_message(
+            diff=diff,
+            files_summary=files_summary,
+            project_manifest=project_manifest,
+            context=context,
+            changed_files_context=changed_files_context,
+            work_item_context=work_item_context,
+            fetched_context=fetched_context,
+            max_files=max_files,
+        )
+        raw = self._run_tracked_call(
+            "context_request",
+            system_prompt,
+            user_message,
+        )
+        return self._parse_context_file_request(raw)[:max_files]
+
+    def _parse_context_file_request(self, raw_response: str) -> list[str]:
+        """Parses requested file paths from a model JSON response."""
+        text = (raw_response or "").strip()
+        if not text:
+            return []
+
+        if text.startswith("```"):
+            lines = []
+            in_block = False
+            for line in text.splitlines():
+                if line.strip().startswith("```"):
+                    in_block = not in_block
+                    continue
+                if in_block or not line.strip().startswith("```"):
+                    lines.append(line)
+            text = "\n".join(lines).strip()
+
+        start_object = text.find("{")
+        end_object = text.rfind("}")
+        start_array = text.find("[")
+        end_array = text.rfind("]")
+
+        json_text = text
+        if start_object != -1 and end_object != -1:
+            json_text = text[start_object:end_object + 1]
+        elif start_array != -1 and end_array != -1:
+            json_text = text[start_array:end_array + 1]
+
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            return []
+
+        if isinstance(payload, dict):
+            raw_files = payload.get("files", payload.get("paths", []))
+        elif isinstance(payload, list):
+            raw_files = payload
+        else:
+            return []
+
+        files: list[str] = []
+        seen: set[str] = set()
+        for item in raw_files or []:
+            if not isinstance(item, str):
+                continue
+            path = item.replace("\\", "/").strip()
+            if path.startswith(("a/", "b/")):
+                path = path[2:]
+            path = path.lstrip("/")
+            if not path:
+                continue
+            key = path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+        return files
 
     def _load_custom_prompt_text(self) -> str:
         """Loads extra instructions from a configurable Markdown file."""
