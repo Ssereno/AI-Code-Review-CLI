@@ -249,7 +249,6 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     tfs.get_project_files_context.return_value = "REQUESTED PROJECT CONTEXT"
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.request_context_files.side_effect = [["src/helper.py"], []]
     structured_comments = [
         {
@@ -328,15 +327,20 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         ["a.py"],
     )
     assert llm.request_context_files.call_count == 2
-    assert llm.review.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
-    assert llm.review.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
-    assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    llm.review.assert_not_called()
     assert llm.review_pr_structured.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
-    assert llm.review.call_args.kwargs["diff"] == diff
+    assert llm.review_pr_structured.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
+    review_text = formatter.format_review.call_args.args[0]
+    assert "Structured Review" in review_text
+    assert "msg" in review_text
+    assert "General review" not in review_text
+    saved_markdown = save_output.call_args.args[0]
+    assert "Structured Review" in saved_markdown
+    assert "msg" in saved_markdown
 
 
 def test_store_pr_usage_persists_usage_record(mocker, tmp_path, review_config) -> None:
@@ -448,7 +452,6 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.request_context_files.return_value = []
     structured_comments = [
         {
@@ -528,7 +531,6 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     tfs.get_pull_request_diff.return_value = diff
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.review_pr_structured.return_value = []
     tfs.plan_review_comments.return_value = {
         "new_comments": [],
@@ -559,10 +561,11 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     assert result == 0
     tfs.get_work_item_context.assert_not_called()
     tfs.get_project_context.assert_not_called()
-    assert llm.review.call_args.kwargs["project_context"] == ""
-    assert llm.review.call_args.kwargs["work_item_context"] == ""
+    llm.review.assert_not_called()
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == ""
+    assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == ""
     git_utils.filter_diff_additions_only.assert_called_once_with(diff)
-    assert llm.review.call_args.kwargs["diff"] == filtered_diff
+    assert llm.review_pr_structured.call_args.kwargs["diff"] == filtered_diff
 
 
 def test_review_scope_context_note_matches_scope() -> None:

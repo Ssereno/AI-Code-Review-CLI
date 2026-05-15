@@ -356,6 +356,79 @@ def _build_general_summary_comment(config: ReviewConfig,
     ])
 
 
+def _format_structured_review_text(
+    comments: list[dict],
+    *,
+    discarded_count: int = 0,
+    duplicate_count: int = 0,
+    resolved_reappeared_count: int = 0,
+) -> str:
+    """Builds the terminal/saved review from final structured comments only."""
+    lines: list[str] = ["## Structured Review"]
+
+    if comments:
+        plural = "s" if len(comments) != 1 else ""
+        lines.append(
+            f"{len(comments)} actionable comment{plural} passed the structured "
+            "grounding checks."
+        )
+        lines.append("")
+
+        for index, comment in enumerate(comments, 1):
+            file_path = str(comment.get("file", "") or "general")
+            line = comment.get("line", 0)
+            location = f"{file_path}:{line}" if line else file_path
+            comment_type = str(comment.get("type", "suggestion")).title()
+            severity = str(comment.get("severity", "info")).upper()
+
+            lines.append(f"### {index}. {location} - {comment_type} ({severity})")
+            body = str(comment.get("comment", "")).strip()
+            if body:
+                lines.append(body)
+
+            problematic_code = str(comment.get("problematic_code", "")).strip()
+            if problematic_code:
+                lines.append("")
+                lines.append(f"**Problematic code:** `{problematic_code}`")
+
+            suggestion = str(comment.get("suggestion", "")).strip()
+            if suggestion:
+                lines.append("")
+                lines.append(f"**Suggestion:** {suggestion}")
+
+            reference = str(comment.get("reference", "")).strip()
+            if reference:
+                lines.append("")
+                lines.append(f"**Reference:** {reference}")
+
+            lines.append("")
+    else:
+        lines.append(
+            "No actionable comments passed the structured grounding checks."
+        )
+        lines.append("")
+
+    if discarded_count or duplicate_count or resolved_reappeared_count:
+        lines.append("## Comment Checks")
+        if discarded_count:
+            lines.append(
+                f"- {discarded_count} generated comment(s) were discarded by "
+                "grounding or changed-line validation."
+            )
+        if duplicate_count:
+            lines.append(
+                f"- {duplicate_count} generated comment(s) were skipped because "
+                "matching tool comments already exist on the PR."
+            )
+        if resolved_reappeared_count:
+            lines.append(
+                f"- {resolved_reappeared_count} resolved/closed tool comment(s) "
+                "still appear in the latest structured review."
+            )
+
+    return "\n".join(lines).strip()
+
+
 def _normalize_review_path(path: object) -> str:
     """Normalizes a diff or LLM file path for comparisons."""
     value = str(path or "").replace("\\", "/").strip()
@@ -1243,18 +1316,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     start_time = time.time()
 
     try:
-        # Get general review as text
-        review_text = llm.review(
-            diff=diff_truncated,
-            files_summary=files_summary,
-            context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
-            project_context=project_context,
-            work_item_context=work_item_context,
-            source_files_context=source_files_context,
-        )
-
-        # Get structured comments to post
         structured_comments = llm.review_pr_structured(
             diff=diff_truncated,
             files_summary=files_summary,
@@ -1341,6 +1402,18 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             "still appear in the latest review."
         ))
 
+    total_discarded_comments = (
+        len(discarded_comments)
+        + len(discarded_ungrounded)
+        + len(extra_discarded_comments)
+    )
+    review_text = _format_structured_review_text(
+        structured_comments,
+        discarded_count=total_discarded_comments,
+        duplicate_count=len(skipped_duplicates),
+        resolved_reappeared_count=len(resolved_reappeared),
+    )
+
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
 
@@ -1360,7 +1433,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # --- Show structured comments preview ---
     print(formatter.format_structured_comments(
         structured_comments,
-        discarded_count=len(discarded_comments),
+        discarded_count=total_discarded_comments + len(skipped_duplicates),
     ))
 
     output_file = config.output_file or getattr(args, "output", "")
