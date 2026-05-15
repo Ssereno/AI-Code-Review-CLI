@@ -785,6 +785,35 @@ class TFSClient:
             exclude_patterns=exclude_patterns,
         )
 
+    def get_source_file_contents(self, repository: str, branch: str,
+                                 requested_paths: list[str]) -> dict[str, str]:
+        """Fetches latest source-branch file contents keyed by normalized path."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not requested_paths:
+            return {}
+
+        contents: dict[str, str] = {}
+        seen: set[str] = set()
+        for requested_path in requested_paths:
+            normalized = self._normalize_context_path(requested_path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            file_path = str(requested_path or "").replace("\\", "/").strip()
+            if file_path and not file_path.startswith("/"):
+                file_path = f"/{file_path}"
+            try:
+                content = self._get_file_content(
+                    repository,
+                    file_path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                continue
+            contents[normalized] = content
+        return contents
+
     def _get_project_context_paths(self, repository: str, branch_name: str,
                                    file_extensions: Optional[list[str]] = None,
                                    exclude_patterns: Optional[list[str]] = None) -> list[str]:

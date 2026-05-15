@@ -163,8 +163,11 @@ PR_COMMENT_PROMPT = {
         '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
-        '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n'
+        '- "evidence": citação EXATA do código da SOURCE BRANCH CODE TO VALIDATE que justifica o problema.\n\n'
         "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
+        "A evidência tem de existir nas âncoras permitidas da source branch. "
+        "Não comentes código que exista apenas no target branch, em linhas removidas, documentação, contexto ou ficheiros auxiliares. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -177,7 +180,8 @@ PR_COMMENT_PROMPT = {
         '    "severity": "high",\n'
         '    "comment": "Password armazenada em texto simples sem hashing",\n'
         '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
-        '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)"\n'
+        '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)",\n'
+        '    "evidence": "password = request.form[\\"password\\"]"\n'
         '  }\n'
         ']\n\n'
         "Se o código estiver bom, retorna um array com um único comentário de tipo "
@@ -193,8 +197,11 @@ PR_COMMENT_PROMPT = {
         '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
-        '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
+        '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n'
+        '- "evidence": exact quote from SOURCE BRANCH CODE TO VALIDATE that proves the issue.\n\n'
         "Only return problem comments when file and line point to an added or modified PR line. "
+        "The evidence must exist in the allowed source-branch anchors. "
+        "Do not comment on code that exists only in the target branch, deleted lines, documentation, context, or helper files. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
@@ -202,6 +209,58 @@ PR_COMMENT_PROMPT = {
         'array with a single "praise" type comment. Respond ONLY with valid JSON.'
     ),
 }
+
+
+def build_source_branch_review_anchors(diff: str, max_chars: int = 60000) -> str:
+    """Builds the explicit source-branch lines that problem comments may target."""
+    anchors: list[str] = []
+    current_file = ""
+    current_line: int | None = None
+    truncated = False
+    used_chars = 0
+
+    for raw_line in (diff or "").splitlines():
+        if raw_line.startswith("+++ "):
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            if file_path != "/dev/null":
+                current_file = file_path[2:] if file_path.startswith("b/") else file_path
+            else:
+                current_file = ""
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            marker = raw_line.split("+", 1)[1].split(" ", 1)[0] if "+" in raw_line else ""
+            start = marker.split(",", 1)[0]
+            try:
+                current_line = int(start)
+            except ValueError:
+                current_line = 1 if raw_line.startswith("@@ Change type:") else None
+            continue
+
+        if not current_file or current_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            code = raw_line[1:]
+            line = f"- {current_file}:{current_line} | {code}"
+            line_chars = len(line) + 1
+            if used_chars + line_chars > max_chars:
+                truncated = True
+                break
+            anchors.append(line)
+            used_chars += line_chars
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    if not anchors:
+        return "[No source-branch changed lines are available as review anchors.]"
+    if truncated:
+        anchors.append("[Allowed review anchors truncated to fit prompt budget.]")
+    return "\n".join(anchors)
 
 
 def get_system_prompt(verbosity: str, language: str) -> str:
@@ -241,6 +300,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                     "(-), and surrounding unchanged context. Use repository context, diff context lines, and "
                     "linked work item documentation only to understand the rest of the repository, product intent, and "
                     "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
+                    "Only the SOURCE BRANCH CODE TO VALIDATE and allowed review anchors may justify problem comments. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
                     "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
@@ -253,6 +313,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "removidas (-) e contexto inalterado à volta das alterações. Usa o contexto do repositório, as "
                 "linhas de contexto do diff e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
                 "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
+                "Só o SOURCE BRANCH CODE TO VALIDATE e as âncoras permitidas podem justificar comentários de problema. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
                 "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
@@ -336,12 +397,25 @@ def build_user_message(diff: str, files_summary: list[dict],
         )
 
     parts.append(
-        "### Review target:\n"
-        "Review only the PR changes below. Use all context above only to understand "
-        "the repository and requirements. Problem comments must point to added or "
-        "modified lines in this diff.\n"
+        "### SOURCE BRANCH CODE TO VALIDATE (allowed review anchors):\n"
+        "Problem comments may only target and quote these current source-branch "
+        "changed lines:\n"
+        f"{build_source_branch_review_anchors(diff)}\n"
     )
-    parts.append("### Diff for review:")
+    parts.append(
+        "### TARGET BRANCH BASELINE / READ-ONLY CONTEXT:\n"
+        "Lines beginning with '-' in the diff are the current target-branch baseline. "
+        "Use them only to understand what changed. Do not comment on target-only or "
+        "deleted code.\n"
+    )
+    parts.append(
+        "### Review target:\n"
+        "Review only the current source-branch PR changes below. Use all context above "
+        "only to understand the repository and requirements. Problem comments must "
+        "point to added or modified source-branch lines and quote exact source-branch "
+        "evidence from the allowed anchors.\n"
+    )
+    parts.append("### SOURCE BRANCH DIFF FOR REVIEW:")
     parts.append(f"```diff\n{diff}\n```")
 
     return "\n".join(parts)
@@ -878,6 +952,7 @@ class LLMClient:
                 "comment": raw_response,
                 "suggestion": "",
                 "reference": "",
+                "evidence": "",
             }]
 
         # Validate and normalize each comment
@@ -891,6 +966,7 @@ class LLMClient:
                 "comment": str(c.get("comment", "")),
                 "suggestion": str(c.get("suggestion", "")),
                 "reference": str(c.get("reference", "")),
+                "evidence": str(c.get("evidence", "")),
             })
         return validated
 

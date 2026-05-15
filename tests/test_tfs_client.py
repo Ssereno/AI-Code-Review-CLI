@@ -341,6 +341,18 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "+new" in full[4]
     assert unified[0].startswith("diff --git")
     assert get_file.call_count == 3
+    assert get_file.call_args_list[0].kwargs == {
+        "version": "feature",
+        "version_type": "branch",
+    }
+    assert get_file.call_args_list[1].kwargs == {
+        "version": "main",
+        "version_type": "branch",
+    }
+    assert get_file.call_args_list[2].kwargs == {
+        "version": "feature",
+        "version_type": "branch",
+    }
 
     mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=RuntimeError("boom"))
     fallback_full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
@@ -497,6 +509,32 @@ def test_get_changed_and_requested_file_contexts_validate_paths(mocker) -> None:
     assert "/src/helper.py" in requested_context
     assert "#### /assets/logo.png" not in requested_context
     assert "secret" in requested_context
+    assert get_file.call_count == 2
+    assert all(call.kwargs["version"] == "feature/context" for call in get_file.call_args_list)
+    assert all(call.kwargs["version_type"] == "branch" for call in get_file.call_args_list)
+
+
+def test_get_source_file_contents_fetches_latest_source_branch(mocker) -> None:
+    """It should fetch comment validation content from the current source branch."""
+    client = TFSClient(make_tfs_config())
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["print('x')", RuntimeError("missing")],
+    )
+
+    contents = client.get_source_file_contents(
+        "repo-a",
+        "refs/heads/feature/current",
+        ["src/app.py", "src/app.py", "missing.py"],
+    )
+
+    assert contents == {"src/app.py": "print('x')"}
+    get_file.assert_any_call(
+        "repo-a",
+        "/src/app.py",
+        version="feature/current",
+        version_type="branch",
+    )
     assert get_file.call_count == 2
 
 

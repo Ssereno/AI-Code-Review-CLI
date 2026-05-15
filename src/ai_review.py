@@ -404,6 +404,113 @@ def _changed_lines_by_file(diff: str) -> dict[str, set[int]]:
     return {path: lines for path, lines in changed_lines.items() if lines}
 
 
+def _source_changed_hunks_by_file(diff: str) -> dict[str, list[dict]]:
+    """Extracts source-branch hunk text and added line anchors from a diff."""
+    hunks: dict[str, list[dict]] = {}
+    current_file = ""
+    current_line: int | None = None
+    current_hunk: dict | None = None
+    hunk_re = re.compile(r"@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+    def flush_hunk() -> None:
+        nonlocal current_hunk
+        if current_file and current_hunk and current_hunk["added_lines"]:
+            current_hunk["text"] = "\n".join(current_hunk["source_lines"])
+            hunks.setdefault(current_file, []).append(current_hunk)
+        current_hunk = None
+
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("+++ "):
+            flush_hunk()
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            current_file = (
+                _normalize_review_path(file_path)
+                if file_path != "/dev/null" else ""
+            )
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            flush_hunk()
+            match = hunk_re.match(raw_line)
+            if match:
+                current_line = int(match.group(1))
+            elif raw_line.startswith("@@ Change type:"):
+                current_line = 1
+            else:
+                current_line = None
+            current_hunk = {
+                "added_lines": set(),
+                "source_lines": [],
+                "line_text": {},
+                "text": "",
+            }
+            continue
+
+        if not current_file or current_line is None or current_hunk is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            code = raw_line[1:]
+            current_hunk["added_lines"].add(current_line)
+            current_hunk["source_lines"].append(code)
+            current_hunk["line_text"][current_line] = code
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_hunk["source_lines"].append(raw_line[1:])
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    flush_hunk()
+    return hunks
+
+
+def _text_contains_evidence(text: str, evidence: str) -> bool:
+    """Returns whether evidence is grounded in source text."""
+    evidence = str(evidence or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not evidence:
+        return False
+    if evidence in text:
+        return True
+    evidence_lines = [line.strip() for line in evidence.splitlines() if line.strip()]
+    source_lines = [line.strip() for line in text.splitlines()]
+    if not evidence_lines:
+        return False
+    return all(
+        any(evidence_line == source_line for source_line in source_lines)
+        for evidence_line in evidence_lines
+    )
+
+
+def _quoted_code_terms(*parts: str) -> list[str]:
+    """Extracts quoted/backticked code terms that a comment claims to discuss."""
+    text = "\n".join(str(part or "") for part in parts)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", text):
+        term = next(group for group in match.groups() if group is not None).strip()
+        if len(term) < 3:
+            continue
+        if not re.search(r"[A-Za-z_]", term):
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+    return terms
+
+
+def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bool:
+    """Detects quoted code terms in the comment that are absent from source code."""
+    for term in _quoted_code_terms(comment.get("comment", "")):
+        if term not in source_text:
+            return True
+    return False
+
+
 def _filter_comments_to_changed_lines(comments: list[dict],
                                       diff: str) -> tuple[list[dict], list[dict]]:
     """Keeps problem comments only when they point to added PR diff lines."""
@@ -429,6 +536,66 @@ def _filter_comments_to_changed_lines(comments: list[dict],
             discarded.append(comment)
 
     return kept, discarded
+
+
+def _filter_comments_to_grounded_source_lines(
+    comments: list[dict],
+    diff: str,
+    source_file_contents: dict[str, str] | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Keeps problem comments only when grounded in source-branch changed code."""
+    source_file_contents = source_file_contents or {}
+    source_file_contents = {
+        _normalize_review_path(path): content
+        for path, content in source_file_contents.items()
+    }
+    hunks_by_file = _source_changed_hunks_by_file(diff)
+    kept: list[dict] = []
+    discarded_location: list[dict] = []
+    discarded_grounding: list[dict] = []
+
+    for comment in comments:
+        comment_type = str(comment.get("type", "")).lower()
+        if comment_type == "praise":
+            kept.append(comment)
+            continue
+
+        file_path = _normalize_review_path(comment.get("file", ""))
+        try:
+            line = int(comment.get("line", 0))
+        except (TypeError, ValueError):
+            line = 0
+
+        hunk = next(
+            (
+                item for item in hunks_by_file.get(file_path, [])
+                if line in item.get("added_lines", set())
+            ),
+            None,
+        )
+        if not file_path or line <= 0 or hunk is None:
+            discarded_location.append(comment)
+            continue
+
+        evidence = str(comment.get("evidence", "")).strip()
+        hunk_text = str(hunk.get("text", ""))
+        source_text = source_file_contents.get(file_path, hunk_text)
+
+        if not _text_contains_evidence(hunk_text, evidence):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_text, evidence):
+            discarded_grounding.append(comment)
+            continue
+
+        if _comment_mentions_absent_source_terms(comment, source_text):
+            discarded_grounding.append(comment)
+            continue
+
+        kept.append(comment)
+
+    return kept, discarded_location, discarded_grounding
 
 
 def _join_context_sections(*sections: str) -> str:
@@ -1067,13 +1234,51 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_error(str(exc)))
         return 1
 
-    structured_comments, discarded_comments = _filter_comments_to_changed_lines(
-        structured_comments,
-        diff_truncated,
+    source_file_contents = {}
+    comment_paths = [
+        comment.get("file", "")
+        for comment in structured_comments
+        if comment.get("file")
+    ]
+    if comment_paths:
+        try:
+            source_file_contents = tfs.get_source_file_contents(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                comment_paths,
+            )
+            if not isinstance(source_file_contents, dict):
+                source_file_contents = {}
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not verify source-branch file contents; using diff anchors only: {exc}"
+            ))
+
+    structured_comments, discarded_comments, discarded_ungrounded = (
+        _filter_comments_to_grounded_source_lines(
+            structured_comments,
+            diff_truncated,
+            source_file_contents,
+        )
     )
     if discarded_comments:
         print(formatter.format_info(
-            f"Discarded {len(discarded_comments)} comment(s) outside changed PR lines."
+            f"Discarded {len(discarded_comments)} comment(s) outside changed source-branch lines."
+        ))
+    if discarded_ungrounded:
+        print(formatter.format_info(
+            f"Discarded {len(discarded_ungrounded)} comment(s) without source-branch evidence."
+        ))
+
+    # Preserve the old location-only filter as a final guard in case future
+    # changes bypass the evidence gate.
+    structured_comments, extra_discarded_comments = _filter_comments_to_changed_lines(
+        structured_comments,
+        diff_truncated,
+    )
+    if extra_discarded_comments:
+        print(formatter.format_info(
+            f"Discarded {len(extra_discarded_comments)} comment(s) outside changed PR lines."
         ))
 
     existing_threads = []

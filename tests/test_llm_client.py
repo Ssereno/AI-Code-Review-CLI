@@ -10,7 +10,15 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from src.config import ReviewConfig
-from src.llm_client import LLMClient, LLMError, build_user_message, get_pr_comment_prompt, get_scope_guidance, get_system_prompt
+from src.llm_client import (
+    LLMClient,
+    LLMError,
+    build_source_branch_review_anchors,
+    build_user_message,
+    get_pr_comment_prompt,
+    get_scope_guidance,
+    get_system_prompt,
+)
 
 
 class FakeResponse:
@@ -97,6 +105,7 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "selected on-demand repository files" in contextual_guidance
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
+    assert "SOURCE BRANCH CODE TO VALIDATE" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
@@ -105,7 +114,14 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
 def test_build_user_message_includes_files_and_context() -> None:
     """It should compose files, context and diff sections."""
     message = build_user_message(
-        diff="+print('x')",
+        diff="\n".join([
+            "diff --git a/src/app.py b/src/app.py",
+            "--- a/src/app.py",
+            "+++ b/src/app.py",
+            "@@ -1 +1 @@",
+            "-print('old')",
+            "+print('x')",
+        ]),
         files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
         context="Please focus on safety.",
         project_context="Existing helper: src/helpers.py",
@@ -119,14 +135,37 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
     assert "totals include tax" in message
+    assert "SOURCE BRANCH CODE TO VALIDATE" in message
+    assert "TARGET BRANCH BASELINE" in message
+    assert "src/app.py:1 | print('x')" in message
     assert "Review target" in message
-    assert "Review only the PR changes below" in message
+    assert "Review only the current source-branch PR changes below" in message
     assert "```diff" in message
+
+
+def test_build_source_branch_review_anchors_lists_only_added_lines() -> None:
+    """It should expose only current source-branch changed lines as anchors."""
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -10,2 +10,3 @@",
+        " existing()",
+        "-old_call()",
+        "+new_call()",
+        "+another_call()",
+    ])
+
+    anchors = build_source_branch_review_anchors(diff)
+
+    assert "src/app.py:11 | new_call()" in anchors
+    assert "src/app.py:12 | another_call()" in anchors
+    assert "old_call" not in anchors
 
 
 def test_prompt_budget_trims_repository_context() -> None:
     """It should trim only repository context when a prompt budget is configured."""
-    client = LLMClient(make_llm_config(max_prompt_tokens=160))
+    client = LLMClient(make_llm_config(max_prompt_tokens=500))
     message = client._build_user_message_with_prompt_budget(
         system_prompt="system",
         diff="+print('x')",
@@ -236,13 +275,13 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     client = LLMClient(make_llm_config(llm_provider="copilot"))
     copilot = mocker.patch(
         "src.llm_client.LLMClient._call_copilot",
-        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]',
+        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]',
     )
 
     comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     assert copilot.called
-    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]
+    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]
 
 
 def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
@@ -257,6 +296,7 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     fallback = client._parse_structured_comments("not json at all")
 
     assert fenced[0]["file"] == "a.py"
+    assert fenced[0]["evidence"] == ""
     assert single[0]["line"] == 2
     assert fallback[0]["comment"] == "not json at all"
 

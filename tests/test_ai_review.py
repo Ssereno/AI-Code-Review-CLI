@@ -252,9 +252,17 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     llm.review.return_value = "General review"
     llm.request_context_files.side_effect = [["src/helper.py"], []]
     structured_comments = [
-        {"file": "a.py", "line": 2, "type": "bug", "severity": "high", "comment": "msg"}
+        {
+            "file": "a.py",
+            "line": 2,
+            "type": "bug",
+            "severity": "high",
+            "comment": "msg",
+            "evidence": "value = 2",
+        }
     ]
     llm.review_pr_structured.return_value = structured_comments
+    tfs.get_source_file_contents.return_value = {"a.py": "class Example:\n    value = 2\n    other = value"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -313,6 +321,11 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     )
     tfs.get_project_manifest.assert_called_once()
     tfs.get_project_files_context.assert_called_once()
+    tfs.get_source_file_contents.assert_called_once_with(
+        "repo-a",
+        "feature/test",
+        ["a.py"],
+    )
     assert llm.request_context_files.call_count == 2
     assert llm.review.call_args.kwargs["project_context"] == (
         "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
@@ -439,9 +452,17 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     llm.review.return_value = "General review"
     llm.request_context_files.return_value = []
     structured_comments = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+        {
+            "file": "a.py",
+            "line": 1,
+            "type": "bug",
+            "severity": "high",
+            "comment": "msg",
+            "evidence": "print('x')",
+        }
     ]
     llm.review_pr_structured.return_value = structured_comments
+    tfs.get_source_file_contents.return_value = {"a.py": "print('x')"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -568,6 +589,76 @@ def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff:
 
     assert kept == [comments[0], comments[3]]
     assert discarded == [comments[1], comments[2]]
+
+
+def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff: str) -> None:
+    """It should keep only comments grounded in source-branch changed code."""
+    comments = [
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed",
+            "evidence": "print('new')",
+        },
+        {
+            "file": "src/app.py",
+            "line": 1,
+            "type": "bug",
+            "comment": "context",
+            "evidence": "import os",
+        },
+        {
+            "file": "src/app.py",
+            "line": 3,
+            "type": "bug",
+            "comment": "mentions absent `GeDemandViewFiltersInput`",
+            "evidence": "print('extra')",
+        },
+        {
+            "file": "src/app.py",
+            "line": 3,
+            "type": "bug",
+            "comment": "missing evidence",
+            "evidence": "",
+        },
+        {"file": "", "line": 0, "type": "praise", "comment": "looks good"},
+    ]
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            comments,
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert kept == [comments[0], comments[4]]
+    assert discarded_location == [comments[1]]
+    assert discarded_grounding == [comments[2], comments[3]]
+
+
+def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(sample_diff: str) -> None:
+    """It should discard comments when evidence is absent from latest source code."""
+    comment = {
+        "file": "src/app.py",
+        "line": 2,
+        "type": "bug",
+        "comment": "changed",
+        "evidence": "print('new')",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            sample_diff,
+            {"src/app.py": "import os\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == [comment]
 
 
 def test_build_general_summary_comment_is_compact(review_config) -> None:
