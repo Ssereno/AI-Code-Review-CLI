@@ -505,8 +505,24 @@ def _quoted_code_terms(*parts: str) -> list[str]:
 
 def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bool:
     """Detects quoted code terms in the comment that are absent from source code."""
-    for term in _quoted_code_terms(comment.get("comment", "")):
+    for term in _quoted_code_terms(
+        comment.get("comment", ""),
+        comment.get("problematic_code", ""),
+    ):
         if term not in source_text:
+            return True
+    return False
+
+
+def _suggestion_already_applied(comment: dict, hunk_text: str, source_text: str) -> bool:
+    """Detects comments that suggest code already present in source branch."""
+    problematic_code = str(comment.get("problematic_code", "")).strip()
+    for suggested_code in _quoted_code_terms(comment.get("suggestion", "")):
+        if not suggested_code or suggested_code == problematic_code:
+            continue
+        if _text_contains_evidence(hunk_text, suggested_code):
+            return True
+        if _text_contains_evidence(source_text, suggested_code):
             return True
     return False
 
@@ -578,8 +594,17 @@ def _filter_comments_to_grounded_source_lines(
             continue
 
         evidence = str(comment.get("evidence", "")).strip()
+        problematic_code = str(comment.get("problematic_code", "")).strip()
         hunk_text = str(hunk.get("text", ""))
         source_text = source_file_contents.get(file_path, hunk_text)
+
+        if not _text_contains_evidence(hunk_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
 
         if not _text_contains_evidence(hunk_text, evidence):
             discarded_grounding.append(comment)
@@ -590,6 +615,10 @@ def _filter_comments_to_grounded_source_lines(
             continue
 
         if _comment_mentions_absent_source_terms(comment, source_text):
+            discarded_grounding.append(comment)
+            continue
+
+        if _suggestion_already_applied(comment, hunk_text, source_text):
             discarded_grounding.append(comment)
             continue
 
@@ -615,36 +644,14 @@ def _build_on_demand_project_context(
     formatter: ReviewFormatter,
     repo_name: str,
     source_branch: str,
-    changed_files: list[dict],
     diff: str,
     files_summary: list[dict],
     user_context: str,
     work_item_context: str,
+    source_files_context: str,
 ) -> str:
     """Builds repository context by letting the model request files from a manifest."""
-    changed_files_context = ""
     project_manifest = ""
-
-    try:
-        changed_files_context = tfs.get_changed_files_context(
-            repo_name,
-            source_branch,
-            changed_files,
-            max_chars=config.project_context_retrieval_max_chars,
-            file_max_chars=config.project_context_retrieval_file_max_chars,
-            file_extensions=config.project_context_file_extensions,
-            exclude_patterns=config.project_context_exclude_patterns,
-        )
-    except Exception as exc:
-        print(formatter.format_warning(
-            f"Could not load changed file context; continuing with diff only: {exc}"
-        ))
-
-    if changed_files_context:
-        print(formatter.format_info(
-            f"Changed file context loaded ({len(changed_files_context):,} characters). "
-            f"{_review_scope_context_note(config.review_scope)}"
-        ))
 
     try:
         project_manifest = tfs.get_project_manifest(
@@ -660,7 +667,7 @@ def _build_on_demand_project_context(
         ))
 
     if not project_manifest:
-        return changed_files_context
+        return ""
 
     print(formatter.format_info(
         f"Repository manifest loaded ({len(project_manifest):,} characters). "
@@ -680,7 +687,7 @@ def _build_on_demand_project_context(
             files_summary=files_summary,
             project_manifest=project_manifest,
             context=user_context,
-            changed_files_context=changed_files_context,
+            changed_files_context=source_files_context,
             work_item_context=work_item_context,
             fetched_context=fetched_context,
             max_files=remaining_files,
@@ -728,7 +735,7 @@ def _build_on_demand_project_context(
             f"On-demand repository context loaded ({len(fetched_context):,} characters)."
         ))
 
-    return _join_context_sections(changed_files_context, fetched_context)
+    return fetched_context
 
 
 def _get_llm_usage_events(llm: LLMClient) -> list:
@@ -1149,6 +1156,32 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
 
+    source_files_context = ""
+    if use_contextual_review and config.project_context_enabled:
+        print(formatter.format_progress(
+            "Getting full source-branch contents for changed files"
+        ))
+        try:
+            source_files_context = tfs.get_changed_files_context(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                pr_details.get("changed_files", []),
+                max_chars=config.project_context_retrieval_max_chars,
+                file_max_chars=config.project_context_retrieval_file_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not load source-branch changed file contents; continuing with diff only: {exc}"
+            ))
+
+        if source_files_context:
+            print(formatter.format_info(
+                f"Source-branch changed file contents loaded ({len(source_files_context):,} characters). "
+                f"{_review_scope_context_note(config.review_scope)}"
+            ))
+
     project_context = ""
     project_context_mode = (config.project_context_mode or "on_demand").lower()
     if (
@@ -1194,11 +1227,11 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 formatter=formatter,
                 repo_name=repo_name,
                 source_branch=pr_details.get("source_branch", ""),
-                changed_files=pr_details.get("changed_files", []),
                 diff=diff_truncated,
                 files_summary=files_summary,
                 user_context=getattr(args, "context", ""),
                 work_item_context=work_item_context,
+                source_files_context=source_files_context,
             )
     except LLMError as exc:
         print(formatter.format_error(str(exc)))
@@ -1218,6 +1251,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             review_scope=config.review_scope,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
 
         # Get structured comments to post
@@ -1228,6 +1262,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             review_scope=config.review_scope,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
     except LLMError as exc:
         progress.stop()

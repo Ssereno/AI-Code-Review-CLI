@@ -745,10 +745,11 @@ class TFSClient:
             repository=repository,
             branch_name=branch_name,
             requested_paths=paths,
-            title="Changed file context",
+            title="Source branch full files with changes applied",
             intro=(
-                "These are the full contents of files changed by the PR. Use them "
-                "for context, but keep findings anchored to changed PR lines."
+                "These are the latest source branch contents of files changed by "
+                "the PR. Use them as primary code context, but keep findings "
+                "anchored to changed PR lines."
             ),
             max_files=len(paths) if paths else 1,
             max_chars=max_chars,

@@ -126,12 +126,15 @@ def test_build_user_message_includes_files_and_context() -> None:
         context="Please focus on safety.",
         project_context="Existing helper: src/helpers.py",
         work_item_context="Acceptance Criteria: totals include tax",
+        source_files_context="### /src/app.py\nprint('x')",
     )
 
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
-    assert "Repository context (read-only, not review target)" in message
+    assert "SOURCE BRANCH FULL FILES WITH CHANGES APPLIED" in message
+    assert "### /src/app.py" in message
+    assert "Additional source-branch repository context" in message
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
     assert "totals include tax" in message
@@ -275,13 +278,13 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     client = LLMClient(make_llm_config(llm_provider="copilot"))
     copilot = mocker.patch(
         "src.llm_client.LLMClient._call_copilot",
-        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]',
+        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "problematic_code": "broken_call()", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]',
     )
 
     comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     assert copilot.called
-    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]
+    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "problematic_code": "broken_call()", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]
 
 
 def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
@@ -296,6 +299,7 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     fallback = client._parse_structured_comments("not json at all")
 
     assert fenced[0]["file"] == "a.py"
+    assert fenced[0]["problematic_code"] == ""
     assert fenced[0]["evidence"] == ""
     assert single[0]["line"] == 2
     assert fallback[0]["comment"] == "not json at all"

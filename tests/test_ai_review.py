@@ -258,6 +258,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
             "type": "bug",
             "severity": "high",
             "comment": "msg",
+            "problematic_code": "value = 2",
             "evidence": "value = 2",
         }
     ]
@@ -327,13 +328,11 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         ["a.py"],
     )
     assert llm.request_context_files.call_count == 2
-    assert llm.review.call_args.kwargs["project_context"] == (
-        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
-    )
+    assert llm.review.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
+    assert llm.review.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
-    assert llm.review_pr_structured.call_args.kwargs["project_context"] == (
-        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
-    )
+    assert llm.review_pr_structured.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
     assert llm.review.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
@@ -458,6 +457,7 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
             "type": "bug",
             "severity": "high",
             "comment": "msg",
+            "problematic_code": "print('x')",
             "evidence": "print('x')",
         }
     ]
@@ -599,6 +599,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 2,
             "type": "bug",
             "comment": "changed",
+            "problematic_code": "print('new')",
             "evidence": "print('new')",
         },
         {
@@ -606,6 +607,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 1,
             "type": "bug",
             "comment": "context",
+            "problematic_code": "import os",
             "evidence": "import os",
         },
         {
@@ -613,6 +615,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 3,
             "type": "bug",
             "comment": "mentions absent `GeDemandViewFiltersInput`",
+            "problematic_code": "print('extra')",
             "evidence": "print('extra')",
         },
         {
@@ -620,6 +623,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 3,
             "type": "bug",
             "comment": "missing evidence",
+            "problematic_code": "print('extra')",
             "evidence": "",
         },
         {"file": "", "line": 0, "type": "praise", "comment": "looks good"},
@@ -645,6 +649,7 @@ def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(samp
         "line": 2,
         "type": "bug",
         "comment": "changed",
+        "problematic_code": "print('new')",
         "evidence": "print('new')",
     }
 
@@ -653,6 +658,44 @@ def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(samp
             [comment],
             sample_diff,
             {"src/app.py": "import os\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == [comment]
+
+
+def test_filter_comments_discards_already_applied_suggestion() -> None:
+    """It should reject comments that suggest code already present in source branch."""
+    diff = "\n".join([
+        "diff --git a/UpdateDemanPlanScenario.cs b/UpdateDemanPlanScenario.cs",
+        "--- a/UpdateDemanPlanScenario.cs",
+        "+++ b/UpdateDemanPlanScenario.cs",
+        "@@ -158,1 +159,1 @@",
+        "-var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id));",
+        "+var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+    ])
+    comment = {
+        "file": "UpdateDemanPlanScenario.cs",
+        "line": 159,
+        "type": "bug",
+        "comment": "Dictionary lookup uses the old `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id)` key type.",
+        "problematic_code": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+        "suggestion": "Use `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString())`.",
+        "evidence": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            diff,
+            {
+                "UpdateDemanPlanScenario.cs": (
+                    "var relationsToUpdate = relationPlannedFiguresCollection.Where("
+                    "x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));"
+                )
+            },
         )
     )
 

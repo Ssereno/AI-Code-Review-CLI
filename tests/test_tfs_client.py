@@ -502,7 +502,7 @@ def test_get_changed_and_requested_file_contexts_validate_paths(mocker) -> None:
         file_max_chars=1000,
     )
 
-    assert "Changed file context" in changed_context
+    assert "Source branch full files with changes applied" in changed_context
     assert "/src/app.py" in changed_context
     assert "deleted.py" not in changed_context
     assert "Requested repository context" in requested_context

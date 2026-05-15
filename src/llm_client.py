@@ -162,11 +162,13 @@ PR_COMMENT_PROMPT = {
         '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
+        '- "problematic_code": citação EXATA do código atual da source branch que está errado\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
         '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n'
         '- "evidence": citação EXATA do código da SOURCE BRANCH CODE TO VALIDATE que justifica o problema.\n\n'
         "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
-        "A evidência tem de existir nas âncoras permitidas da source branch. "
+        "problematic_code e evidence têm de existir nas âncoras permitidas da source branch. "
+        "Se a sugestão já estiver aplicada no código atual da source branch, NÃO comentes. "
         "Não comentes código que exista apenas no target branch, em linhas removidas, documentação, contexto ou ficheiros auxiliares. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
@@ -179,6 +181,7 @@ PR_COMMENT_PROMPT = {
         '    "type": "security",\n'
         '    "severity": "high",\n'
         '    "comment": "Password armazenada em texto simples sem hashing",\n'
+        '    "problematic_code": "password = request.form[\\"password\\"]",\n'
         '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
         '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)",\n'
         '    "evidence": "password = request.form[\\"password\\"]"\n'
@@ -196,11 +199,13 @@ PR_COMMENT_PROMPT = {
         '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
         '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
+        '- "problematic_code": exact quote of the current source-branch code that is wrong\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n'
         '- "evidence": exact quote from SOURCE BRANCH CODE TO VALIDATE that proves the issue.\n\n'
         "Only return problem comments when file and line point to an added or modified PR line. "
-        "The evidence must exist in the allowed source-branch anchors. "
+        "Both problematic_code and evidence must exist in the allowed source-branch anchors. "
+        "If the suggestion is already applied in the current source branch code, do NOT comment. "
         "Do not comment on code that exists only in the target branch, deleted lines, documentation, context, or helper files. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
@@ -367,7 +372,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
 
 def build_user_message(diff: str, files_summary: list[dict],
                        context: str = "", project_context: str = "",
-                       work_item_context: str = "") -> str:
+                       work_item_context: str = "",
+                       source_files_context: str = "") -> str:
     """
     Builds the user message with the diff and context.
     """
@@ -390,9 +396,18 @@ def build_user_message(diff: str, files_summary: list[dict],
             f"{work_item_context}\n"
         )
 
+    if source_files_context:
+        parts.append(
+            "### SOURCE BRANCH FULL FILES WITH CHANGES APPLIED:\n"
+            "These are the latest full contents of the changed files from the "
+            "source branch. Use them as the primary code context. They do not "
+            "expand the review target beyond the allowed changed-line anchors.\n"
+            f"{source_files_context}\n"
+        )
+
     if project_context:
         parts.append(
-            "### Repository context (read-only, not review target):\n"
+            "### Additional source-branch repository context (read-only support only):\n"
             f"{project_context}\n"
         )
 
@@ -406,7 +421,8 @@ def build_user_message(diff: str, files_summary: list[dict],
         "### TARGET BRANCH BASELINE / READ-ONLY CONTEXT:\n"
         "Lines beginning with '-' in the diff are the current target-branch baseline. "
         "Use them only to understand what changed. Do not comment on target-only or "
-        "deleted code.\n"
+        "deleted code. If source-branch full files disagree with target-branch baseline, "
+        "the source branch is authoritative for validation.\n"
     )
     parts.append(
         "### Review target:\n"
@@ -450,7 +466,7 @@ def build_context_request_message(diff: str, files_summary: list[dict],
 
     if changed_files_context:
         parts.append(
-            "### Changed file context:\n"
+            "### SOURCE BRANCH FULL FILES WITH CHANGES APPLIED:\n"
             f"{changed_files_context}\n"
         )
 
@@ -637,6 +653,7 @@ class LLMClient:
         context: str,
         project_context: str,
         work_item_context: str,
+        source_files_context: str = "",
     ) -> str:
         """Trims repository context when the full prompt would exceed the budget."""
         limit = self._effective_prompt_token_limit()
@@ -649,6 +666,7 @@ class LLMClient:
             context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         if self._estimate_prompt_tokens(system_prompt, full_message) <= limit:
             return project_context
@@ -659,6 +677,7 @@ class LLMClient:
             context,
             project_context="",
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         base_tokens = self._estimate_prompt_tokens(system_prompt, base_message)
         available_tokens = limit - base_tokens
@@ -691,6 +710,7 @@ class LLMClient:
         context: str,
         project_context: str,
         work_item_context: str,
+        source_files_context: str = "",
     ) -> str:
         """Builds the user prompt, trimming only repo context if necessary."""
         project_context = self._trim_project_context_for_prompt_budget(
@@ -700,6 +720,7 @@ class LLMClient:
             context=context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         return build_user_message(
             diff,
@@ -707,6 +728,7 @@ class LLMClient:
             context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
 
     def request_context_files(self, diff: str, files_summary: list[dict],
@@ -722,7 +744,7 @@ class LLMClient:
 
         system_prompt = (
             "You are selecting additional repository files for a code review. "
-            "Use the PR diff, changed file context, work item documentation, and "
+            "Use the PR diff, current source-branch changed file contents, work item documentation, and "
             "repository manifest to decide whether extra files are needed. "
             "Return JSON only. Do not review the code yet."
         )
@@ -819,7 +841,8 @@ class LLMClient:
 
     def review(self, diff: str, files_summary: list[dict],
                context: str = "", review_scope: str = "diff_with_context",
-               project_context: str = "", work_item_context: str = "") -> str:
+               project_context: str = "", work_item_context: str = "",
+               source_files_context: str = "") -> str:
         """
         Sends the diff to the LLM and returns the review as text.
         """
@@ -859,13 +882,15 @@ class LLMClient:
             context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         return self._run_tracked_call("general_review", system_prompt, user_message)
 
     def review_pr_structured(self, diff: str, files_summary: list[dict],
                              context: str = "", review_scope: str = "diff_with_context",
                              project_context: str = "",
-                             work_item_context: str = "") -> list[dict]:
+                             work_item_context: str = "",
+                             source_files_context: str = "") -> list[dict]:
         """
         Sends the diff to the LLM and returns structured PR comments.
         
@@ -905,6 +930,7 @@ class LLMClient:
             context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
 
         raw = self._run_tracked_call(
@@ -950,6 +976,7 @@ class LLMClient:
                 "type": "suggestion",
                 "severity": "info",
                 "comment": raw_response,
+                "problematic_code": "",
                 "suggestion": "",
                 "reference": "",
                 "evidence": "",
@@ -964,6 +991,7 @@ class LLMClient:
                 "type": str(c.get("type", "suggestion")),
                 "severity": str(c.get("severity", "info")),
                 "comment": str(c.get("comment", "")),
+                "problematic_code": str(c.get("problematic_code", "")),
                 "suggestion": str(c.get("suggestion", "")),
                 "reference": str(c.get("reference", "")),
                 "evidence": str(c.get("evidence", "")),
