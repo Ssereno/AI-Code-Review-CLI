@@ -579,6 +579,41 @@ def test_review_scope_context_note_matches_scope() -> None:
     assert "diff_only mode" in diff_only
 
 
+def test_build_pr_metadata_issues_flags_review_risks() -> None:
+    """It should report metadata problems that affect PR validation quality."""
+    issues = ai_review._build_pr_metadata_issues(
+        {
+            "title": "",
+            "description": "",
+            "merge_status": "conflicts",
+            "is_draft": True,
+        },
+        linked_work_item_count=0,
+    )
+
+    assert issues == [
+        "PR title is empty.",
+        "PR description is empty.",
+        "PR merge status is 'conflicts' instead of 'succeeded'.",
+        "PR is marked as draft.",
+        "PR has no linked work items.",
+    ]
+
+
+def test_limit_comments_to_post_keeps_highest_severity() -> None:
+    """It should cap comments by severity while preserving kept input order."""
+    comments = [
+        {"severity": "low", "comment": "low"},
+        {"severity": "critical", "comment": "critical"},
+        {"severity": "high", "comment": "high"},
+    ]
+
+    kept, omitted = ai_review._limit_comments_to_post(comments, 2)
+
+    assert kept == [comments[1], comments[2]]
+    assert omitted == [comments[0]]
+
+
 def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff: str) -> None:
     """It should keep problem comments anchored to added lines only."""
     comments = [
@@ -590,8 +625,8 @@ def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff:
 
     kept, discarded = ai_review._filter_comments_to_changed_lines(comments, sample_diff)
 
-    assert kept == [comments[0], comments[3]]
-    assert discarded == [comments[1], comments[2]]
+    assert kept == [comments[0]]
+    assert discarded == [comments[1], comments[2], comments[3]]
 
 
 def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff: str) -> None:
@@ -640,8 +675,8 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
         )
     )
 
-    assert kept == [comments[0], comments[4]]
-    assert discarded_location == [comments[1]]
+    assert kept == [comments[0]]
+    assert discarded_location == [comments[1], comments[4]]
     assert discarded_grounding == [comments[2], comments[3]]
 
 

@@ -107,6 +107,7 @@ DEFAULT_WORK_ITEM_CONTEXT_FIELDS = list(WORK_ITEM_CONTEXT_FIELD_LABELS)
 TOOL_COMMENT_MARKER = "<!-- ai-code-review-cli -->"
 TOOL_COMMENT_KIND_PREFIX = "<!-- ai-code-review-kind:"
 TOOL_COMMENT_FINGERPRINT_PREFIX = "<!-- ai-code-review-fingerprint:"
+VISIBLE_TOOL_COMMENT_MARKER = "`#AI`"
 
 THREAD_STATUS_NAMES = {
     1: "active",
@@ -1046,16 +1047,14 @@ class TFSClient:
     def get_work_item_context(self, repository: str, pr_id: int,
                               max_items: int = 20,
                               max_chars: int = 100000,
-                              fields: Optional[list[str]] = None) -> str:
+                              fields: Optional[list[str]] = None,
+                              work_item_ids: Optional[list[int]] = None) -> str:
         """
         Builds read-only context from documentation fields on PR-linked work items.
         """
-        refs = self._list_pull_request_work_items(repository, pr_id)
-        ids = [
-            int(ref["id"])
-            for ref in refs
-            if str(ref.get("id", "")).isdigit()
-        ]
+        ids = work_item_ids if work_item_ids is not None else (
+            self.list_pull_request_work_item_ids(repository, pr_id)
+        )
         if not ids:
             return ""
 
@@ -1113,6 +1112,15 @@ class TFSClient:
             )
 
         return "\n".join(parts).strip()
+
+    def list_pull_request_work_item_ids(self, repository: str, pr_id: int) -> list[int]:
+        """Lists numeric work item IDs associated with a pull request."""
+        refs = self._list_pull_request_work_items(repository, pr_id)
+        return [
+            int(ref["id"])
+            for ref in refs
+            if str(ref.get("id", "")).isdigit()
+        ]
 
     def _list_pull_request_work_items(self, repository: str, pr_id: int) -> list[dict]:
         """Lists work item references associated with a pull request."""
@@ -1321,7 +1329,8 @@ class TFSClient:
     def post_inline_comment(self, repository: str, pr_id: int,
                             file_path: str, line: int, comment: str,
                             status: str = "active",
-                            right_file: bool = True) -> dict:
+                            right_file: bool = True,
+                            end_line: Optional[int] = None) -> dict:
         """
         Posts an inline comment on a specific line of a PR file.
         
@@ -1342,21 +1351,28 @@ class TFSClient:
         if not file_path.startswith("/"):
             file_path = f"/{file_path}"
 
-        # Get most recent iteration
-        iterations_path = f"git/repositories/{repository}/pullrequests/{pr_id}/iterations"
-        iterations = self._get(iterations_path)
-        if not iterations.get("value"):
-            raise TFSError(f"PR #{pr_id} has no iterations.")
-        last_iteration = iterations["value"][-1]["id"]
+        last_iteration = self._get_latest_iteration_id(repository, pr_id)
+        change_tracking_id = self._get_change_tracking_id(
+            repository,
+            pr_id,
+            last_iteration,
+            file_path,
+        )
+        try:
+            end_line = int(end_line or 0)
+        except (TypeError, ValueError):
+            end_line = 0
+        if end_line <= line:
+            end_line = line + 1
 
         path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
 
         thread_context = {
             "filePath": file_path,
             "rightFileStart": {"line": line, "offset": 1} if right_file else None,
-            "rightFileEnd": {"line": line, "offset": 1} if right_file else None,
+            "rightFileEnd": {"line": end_line, "offset": 1} if right_file else None,
             "leftFileStart": {"line": line, "offset": 1} if not right_file else None,
-            "leftFileEnd": {"line": line, "offset": 1} if not right_file else None,
+            "leftFileEnd": {"line": end_line, "offset": 1} if not right_file else None,
         }
         # Remover Nones
         thread_context = {k: v for k, v in thread_context.items() if v is not None}
@@ -1376,10 +1392,46 @@ class TFSClient:
                     "firstComparingIteration": 1,
                     "secondComparingIteration": last_iteration,
                 },
-                "changeTrackingId": 0,
+                "changeTrackingId": change_tracking_id,
             },
         }
         return self._post(path, data)
+
+    def _get_latest_iteration_id(self, repository: str, pr_id: int) -> int:
+        """Returns the latest PR iteration ID."""
+        iterations_path = f"git/repositories/{repository}/pullrequests/{pr_id}/iterations"
+        iterations = self._get(iterations_path)
+        if not iterations.get("value"):
+            raise TFSError(f"PR #{pr_id} has no iterations.")
+        return int(iterations["value"][-1]["id"])
+
+    def _get_change_tracking_id(
+        self,
+        repository: str,
+        pr_id: int,
+        iteration_id: int,
+        file_path: str,
+    ) -> int:
+        """Returns the Azure DevOps changeTrackingId for a PR file."""
+        changes_path = (
+            f"git/repositories/{repository}/pullrequests/{pr_id}"
+            f"/iterations/{iteration_id}/changes"
+        )
+        changes = self._get(changes_path, {"$top": 200})
+        target_path = self._normalize_path(file_path)
+
+        for change in changes.get("changeEntries", []) or []:
+            item = change.get("item", {}) or {}
+            candidate_paths = [
+                item.get("path", ""),
+                change.get("originalPath", ""),
+            ]
+            if any(self._normalize_path(path) == target_path for path in candidate_paths):
+                change_tracking_id = change.get("changeTrackingId")
+                if change_tracking_id is not None:
+                    return int(change_tracking_id)
+
+        raise TFSError(f"Could not find changeTrackingId for {file_path}.")
 
     def reply_to_thread(self, repository: str, pr_id: int,
                         thread_id: int, comment: str) -> dict:
@@ -1494,14 +1546,18 @@ class TFSClient:
 
             file_path = c.get("file", "")
             line = c.get("line", 0)
-            comment_type = str(c.get("type", "")).lower()
-            is_problem = comment_type not in ("praise", "")
+            end_line = c.get("end_line", 0) or None
 
             try:
                 if use_inline_comments and file_path and line > 0:
                     # Inline comment
                     result = self.post_inline_comment(
-                        repository, pr_id, file_path, line, text
+                        repository,
+                        pr_id,
+                        file_path,
+                        line,
+                        text,
+                        end_line=end_line,
                     )
                 else:
                     # No inline position: post as general PR comment
@@ -1526,7 +1582,10 @@ class TFSClient:
 
     def _format_review_comment(self, comment: dict) -> str:
         """Formats and tags a structured comment for Azure DevOps Markdown."""
-        body = self._format_review_comment_body(comment)
+        body = "\n\n".join([
+            VISIBLE_TOOL_COMMENT_MARKER,
+            self._format_review_comment_body(comment),
+        ])
         return self.tag_tool_comment(
             body,
             self._comment_fingerprint(comment),
@@ -1539,23 +1598,36 @@ class TFSClient:
             "bug": "Bug",
             "security": "Security",
             "performance": "Performance",
-            "style": "Code Style",
+            "null_safety": "Bug",
+            "data_integrity": "Bug",
+            "api_contract": "Bug",
+            "error_handling": "Bug",
+            "resource": "Bug",
+            "work_item": "Bug",
             "suggestion": "Suggestion",
-            "praise": "Positive",
         }
 
-        severity = comment.get("severity", "info")
         comment_type = comment.get("type", "suggestion")
         label = type_labels.get(comment_type, comment_type.title())
 
-        parts = [f"**{label}** ({severity.upper()})"]
-        parts.append("")
-        parts.append(comment.get("comment", ""))
+        parts = [f"{label}: {comment.get('comment', '')}".strip()]
 
         suggestion = comment.get("suggestion", "")
         if suggestion:
             parts.append("")
-            parts.append(f"**Suggestion:** {suggestion}")
+            parts.append("**Suggested fix:**")
+            suggestion_block = self._format_suggestion_block(comment)
+            if suggestion_block:
+                parts.append(suggestion_block)
+            else:
+                parts.append(suggestion)
+
+                replacement = str(comment.get("suggestion_replacement", "")).strip()
+                if replacement:
+                    parts.append("")
+                    parts.append("```")
+                    parts.append(replacement)
+                    parts.append("```")
 
         reference = comment.get("reference", "")
         if reference:
@@ -1563,6 +1635,36 @@ class TFSClient:
             parts.append(f"**Reference:** {reference}")
 
         return "\n".join(parts)
+
+    def _format_suggestion_block(self, comment: dict) -> str:
+        """Formats a TFS suggestion block when the replacement line count is valid."""
+        if "suggestion_replacement" not in comment:
+            return ""
+
+        replacement = str(comment.get("suggestion_replacement", ""))
+        if replacement == "":
+            return ""
+        try:
+            line = int(comment.get("line", 0))
+            end_line = int(comment.get("end_line", 0) or 0)
+        except (TypeError, ValueError):
+            return ""
+
+        if line <= 0:
+            return ""
+        if end_line <= line:
+            end_line = line + 1
+
+        range_line_count = end_line - line
+        replacement_line_count = len(replacement.splitlines())
+        if replacement_line_count != range_line_count:
+            return ""
+
+        return "\n".join([
+            "```suggestion",
+            replacement,
+            "```",
+        ])
 
     def tag_tool_comment(self, text: str, fingerprint: str,
                          kind: str = "comment") -> str:
@@ -1573,7 +1675,7 @@ class TFSClient:
             f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint} -->",
         ]
         body = text.strip()
-        if "AI Code Review" not in body:
+        if "AI Code Review" not in body and VISIBLE_TOOL_COMMENT_MARKER not in body:
             body = (
                 f"{body}\n\n"
                 "---\n"
@@ -1630,13 +1732,17 @@ class TFSClient:
                 continue
 
             for existing_comment in thread.get("comments", []) or []:
+                raw_body = str(existing_comment.get("content", ""))
+                if VISIBLE_TOOL_COMMENT_MARKER in raw_body:
+                    return self._build_existing_comment_match(thread, raw_body)
+
                 body = self._normalize_for_match(
-                    self._strip_tool_metadata(existing_comment.get("content", ""))
+                    self._strip_tool_metadata(raw_body)
                 )
                 if current_text in body:
                     return self._build_existing_comment_match(
                         thread,
-                        str(existing_comment.get("content", "")),
+                        raw_body,
                     )
 
         return None
@@ -1646,7 +1752,10 @@ class TFSClient:
         return {
             "thread_id": thread.get("id"),
             "status_name": self._thread_status_name(thread.get("status")),
-            "is_tool_comment": TOOL_COMMENT_MARKER in body,
+            "is_tool_comment": (
+                TOOL_COMMENT_MARKER in body
+                or VISIBLE_TOOL_COMMENT_MARKER in body
+            ),
         }
 
     def _thread_matches_comment_location(self, thread: dict, comment: dict) -> bool:
@@ -1689,6 +1798,7 @@ class TFSClient:
         """Removes hidden tool metadata tags before text comparisons."""
         value = str(text or "")
         value = re.sub(r"<!--\s*ai-code-review-[^>]*-->\s*", "", value)
+        value = value.replace(VISIBLE_TOOL_COMMENT_MARKER, "")
         return value
 
     def _normalize_for_match(self, value: object) -> str:

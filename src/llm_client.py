@@ -156,20 +156,25 @@ PR_COMMENT_PROMPT = {
     "pt": (
         "Analisa o diff de código de um Pull Request "
         "e retorna os teus comentários em formato JSON estruturado.\n\n"
-        "Para CADA problema encontrado, retorna um objeto JSON com:\n"
+        "Para CADA problema acionável encontrado, retorna um objeto JSON com:\n"
         '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
         '- "line": número da linha no ficheiro novo/right-side para a linha adicionada ou modificada do PR (inteiro, ou 0 se não houver localização inline)\n'
-        '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
+        '- "end_line": linha final exclusiva no ficheiro novo/right-side (opcional; usa line + 1 para uma única linha)\n'
+        '- "type": tipo de issue ("bug", "security", "performance", "null_safety", "data_integrity", "api_contract", "error_handling", "resource", "work_item", "suggestion")\n'
+        '- "severity": severidade ("critical", "high", "medium", "low")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
         '- "problematic_code": citação EXATA do código atual da source branch que está errado\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
+        '- "suggestion_replacement": texto EXATO que deve substituir o intervalo line/end_line se a correção for aplicável por suggestion block; string vazia se não tiveres a certeza\n'
         '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n'
         '- "evidence": citação EXATA do código da SOURCE BRANCH CODE TO VALIDATE que justifica o problema.\n\n'
+        "Foca apenas correção, null safety, edge cases, segurança, integridade de dados, contratos de API, resource management, performance relevante e alinhamento com work items. "
+        "Não retornes elogios, comentários de estilo/naming/formatação ou sugestões gerais que não sejam defeitos acionáveis. "
         "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
         "problematic_code e evidence têm de existir nas âncoras permitidas da source branch. "
         "Se a sugestão já estiver aplicada no código atual da source branch, NÃO comentes. "
         "Não comentes código que exista apenas no target branch, em linhas removidas, documentação, contexto ou ficheiros auxiliares. "
+        "Retorna no máximo 20 comentários, escolhendo os problemas de maior impacto. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -178,40 +183,47 @@ PR_COMMENT_PROMPT = {
         '  {\n'
         '    "file": "src/auth.py",\n'
         '    "line": 42,\n'
+        '    "end_line": 43,\n'
         '    "type": "security",\n'
         '    "severity": "high",\n'
         '    "comment": "Password armazenada em texto simples sem hashing",\n'
         '    "problematic_code": "password = request.form[\\"password\\"]",\n'
         '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
+        '    "suggestion_replacement": "password_hash = hash_password(request.form[\\"password\\"])",\n'
         '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)",\n'
         '    "evidence": "password = request.form[\\"password\\"]"\n'
         '  }\n'
         ']\n\n'
-        "Se o código estiver bom, retorna um array com um único comentário de tipo "
-        '"praise". Responde APENAS com JSON válido, sem markdown ou texto extra.'
+        "Se não houver problemas acionáveis, retorna []. "
+        "Responde APENAS com JSON válido, sem markdown ou texto extra."
     ),
     "en": (
         "Analyze the Pull Request code diff "
         "and return your comments in structured JSON format.\n\n"
-        "For EACH issue found, return a JSON object with:\n"
+        "For EACH actionable issue found, return a JSON object with:\n"
         '- "file": file path (e.g., "src/auth.py")\n'
         '- "line": line number in the new/right-side file for the added or modified PR line (integer, or 0 if no inline location)\n'
-        '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
+        '- "end_line": exclusive ending line in the new/right-side file (optional; use line + 1 for one line)\n'
+        '- "type": issue type ("bug", "security", "performance", "null_safety", "data_integrity", "api_contract", "error_handling", "resource", "work_item", "suggestion")\n'
+        '- "severity": severity ("critical", "high", "medium", "low")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
         '- "problematic_code": exact quote of the current source-branch code that is wrong\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
+        '- "suggestion_replacement": exact replacement text for the line/end_line range if the fix can be applied as a suggestion block; empty string when unsure\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n'
         '- "evidence": exact quote from SOURCE BRANCH CODE TO VALIDATE that proves the issue.\n\n'
+        "Focus only on correctness, null safety, edge cases, security, data integrity, API contracts, resource management, meaningful performance, and work-item alignment. "
+        "Do not return praise, style/naming/formatting comments, or general suggestions that are not actionable defects. "
         "Only return problem comments when file and line point to an added or modified PR line. "
         "Both problematic_code and evidence must exist in the allowed source-branch anchors. "
         "If the suggestion is already applied in the current source branch code, do NOT comment. "
         "Do not comment on code that exists only in the target branch, deleted lines, documentation, context, or helper files. "
+        "Return at most 20 comments, choosing the highest-impact issues. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
-        "Respond ONLY with a valid JSON array. If the code looks good, return an "
-        'array with a single "praise" type comment. Respond ONLY with valid JSON.'
+        "Respond ONLY with a valid JSON array. If there are no actionable issues, "
+        "return []. Respond ONLY with valid JSON."
     ),
 }
 
@@ -310,7 +322,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
                     "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
                     "already exists, do not report it as missing. "
-                    "Do not emit general problem comments without file/line."
+                    "Do not emit general problem comments without file/line. "
+                    "Return [] when there are no actionable defects."
                 )
             return (
                 "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
@@ -323,7 +336,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
                 "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
                 "propriedade, contrato ou comportamento já existe, não o reportes como ausente. "
-                "Não emitas comentários gerais de problema sem file/line."
+                "Não emitas comentários gerais de problema sem file/line. "
+                "Retorna [] quando não houver defeitos acionáveis."
             )
 
         if language == "en":
@@ -349,14 +363,16 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "Focus exclusively on issues introduced by the new lines in this PR. "
                 "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                 "The file and line must point to a modified line in the PR diff. "
-                "Do not emit general problem comments without file/line."
+                "Do not emit general problem comments without file/line. "
+                "Return [] when there are no actionable defects."
             )
         return (
             "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
             "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
             "O file e line devem apontar para uma linha modificada no diff do PR. "
-            "Não emitas comentários gerais de problema sem file/line."
+            "Não emitas comentários gerais de problema sem file/line. "
+            "Retorna [] quando não houver defeitos acionáveis."
         )
 
     if language == "en":
@@ -969,30 +985,29 @@ class LLMClient:
             if not isinstance(comments, list):
                 comments = [comments]
         except json.JSONDecodeError:
-            # Fallback: return as a general comment
-            return [{
-                "file": "",
-                "line": 0,
-                "type": "suggestion",
-                "severity": "info",
-                "comment": raw_response,
-                "problematic_code": "",
-                "suggestion": "",
-                "reference": "",
-                "evidence": "",
-            }]
+            return []
 
         # Validate and normalize each comment
         validated = []
         for c in comments:
+            try:
+                line = int(c.get("line", 0))
+            except (TypeError, ValueError):
+                line = 0
+            try:
+                end_line = int(c.get("end_line", 0) or 0)
+            except (TypeError, ValueError):
+                end_line = 0
             validated.append({
                 "file": str(c.get("file", "")),
-                "line": int(c.get("line", 0)),
+                "line": line,
+                "end_line": end_line,
                 "type": str(c.get("type", "suggestion")),
                 "severity": str(c.get("severity", "info")),
                 "comment": str(c.get("comment", "")),
                 "problematic_code": str(c.get("problematic_code", "")),
                 "suggestion": str(c.get("suggestion", "")),
+                "suggestion_replacement": str(c.get("suggestion_replacement", "")),
                 "reference": str(c.get("reference", "")),
                 "evidence": str(c.get("evidence", "")),
             })

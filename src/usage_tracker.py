@@ -73,6 +73,7 @@ def build_pr_usage_record(
     comments_generated: int,
     events: list[TokenUsage],
     pricing_config: dict[str, Any] | None = None,
+    metadata_issues: list[str] | None = None,
 ) -> dict[str, Any]:
     """Builds the persisted usage record for one PR review."""
     calls = []
@@ -109,6 +110,7 @@ def build_pr_usage_record(
         "verbosity": verbosity,
         "dry_run": dry_run,
         "comments_generated": comments_generated,
+        "metadata_issues": list(metadata_issues or []),
         "tokens": aggregate_usage(events),
         "calls": calls,
     }
@@ -196,6 +198,7 @@ def summarize_usage_by_pr(records: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "_cost_currencies": set(),
                 "_cost_estimated": False,
                 "_missing_pricing": set(),
+                "_metadata_issues": set(),
             },
         )
 
@@ -236,6 +239,10 @@ def summarize_usage_by_pr(records: list[dict[str, Any]]) -> list[dict[str, Any]]
         if isinstance(missing_pricing, list):
             bucket["_missing_pricing"].update(str(item) for item in missing_pricing)
 
+        metadata_issues = record.get("metadata_issues") or []
+        if isinstance(metadata_issues, list):
+            bucket["_metadata_issues"].update(str(item) for item in metadata_issues)
+
     summaries: list[dict[str, Any]] = []
     for bucket in buckets.values():
         currencies = sorted(bucket.pop("_cost_currencies"))
@@ -243,10 +250,13 @@ def summarize_usage_by_pr(records: list[dict[str, Any]]) -> list[dict[str, Any]]
         cost_amount = bucket.pop("_cost_amount")
         cost_estimated = bucket.pop("_cost_estimated")
         missing_pricing = sorted(bucket.pop("_missing_pricing"))
+        metadata_issues = sorted(bucket.pop("_metadata_issues"))
 
         bucket["providers"] = sorted(bucket["providers"])
         bucket["models"] = sorted(bucket["models"])
         bucket["missing_pricing"] = missing_pricing
+        bucket["metadata_issues"] = metadata_issues
+        bucket["metadata_issue_count"] = len(metadata_issues)
         if cost_count:
             bucket["cost"] = {
                 "amount": round(cost_amount, 8),

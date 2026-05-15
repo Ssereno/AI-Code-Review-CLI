@@ -632,7 +632,18 @@ def test_raw_get_and_comment_endpoints(mocker) -> None:
 
     post_mock = mocker.patch("src.tfs_client.TFSClient._post", return_value={"id": 10})
     patch_mock = mocker.patch("src.tfs_client.TFSClient._patch", return_value={"id": 11})
-    get_mock = mocker.patch("src.tfs_client.TFSClient._get", return_value={"value": [{"id": 3}]})
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": 3}]},
+            {"changeEntries": [
+                {
+                    "item": {"path": "/src/app.py"},
+                    "changeTrackingId": 44,
+                }
+            ]},
+        ],
+    )
 
     assert client.post_general_comment("repo-a", 1, "hello")["id"] == 10
     inline = client.post_inline_comment("repo-a", 1, "src/app.py", 7, "msg", right_file=False)
@@ -641,6 +652,8 @@ def test_raw_get_and_comment_endpoints(mocker) -> None:
     _, payload = post_mock.call_args.args[:2]
     assert payload["threadContext"]["filePath"] == "/src/app.py"
     assert payload["threadContext"]["leftFileStart"]["line"] == 7
+    assert payload["threadContext"]["leftFileEnd"]["line"] == 8
+    assert payload["pullRequestThreadContext"]["changeTrackingId"] == 44
     assert client.reply_to_thread("repo-a", 1, 5, "reply")["id"] == 10
     assert client.update_thread_status("repo-a", 1, 5, "fixed")["id"] == 11
     patch_mock.assert_called_once()
@@ -723,6 +736,39 @@ def test_plan_review_comments_skips_duplicates_and_reopens_fixed_tool_comments(m
     assert fixed_plan["resolved_reappeared"][0]["status"] == "fixed"
 
 
+def test_plan_review_comments_detects_visible_ai_marker_duplicates(mocker) -> None:
+    """It should treat existing visible #AI comments at the same line as duplicates."""
+    client = TFSClient(make_tfs_config())
+    comment = {
+        "file": "src/app.py",
+        "line": 7,
+        "type": "bug",
+        "severity": "high",
+        "comment": "New wording from the latest run",
+    }
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {
+                    "id": 10,
+                    "status": 1,
+                    "threadContext": {
+                        "filePath": "/src/app.py",
+                        "rightFileStart": {"line": 7},
+                    },
+                    "comments": [{"content": "`#AI`\n\nBug: Older wording"}],
+                }
+            ]
+        },
+    )
+
+    plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert plan["new_comments"] == []
+    assert plan["skipped_duplicates"][0]["is_tool_comment"] is True
+
+
 def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
     """It should activate the old thread and add a tagged re-check reply."""
     client = TFSClient(make_tfs_config())
@@ -751,6 +797,41 @@ def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
     reply_body = reply.call_args.args[3]
     assert "ai-code-review-cli" in reply_body
     assert "AI Code Review re-check" in reply_body
+
+
+def test_format_review_comment_uses_visible_marker_and_safe_suggestion_blocks() -> None:
+    """It should emit TFS suggestion blocks only for matching line ranges."""
+    client = TFSClient(make_tfs_config())
+
+    valid = client._format_review_comment(
+        {
+            "file": "src/app.py",
+            "line": 7,
+            "end_line": 8,
+            "type": "bug",
+            "severity": "high",
+            "comment": "Use the safe helper",
+            "suggestion": "Replace the unsafe call",
+            "suggestion_replacement": "safe_call()",
+        }
+    )
+    mismatch = client._format_review_comment(
+        {
+            "file": "src/app.py",
+            "line": 7,
+            "end_line": 9,
+            "type": "bug",
+            "severity": "high",
+            "comment": "Use the safe helper",
+            "suggestion": "Replace both unsafe calls",
+            "suggestion_replacement": "safe_call()",
+        }
+    )
+
+    assert "`#AI`" in valid
+    assert "```suggestion\nsafe_call()\n```" in valid
+    assert "```suggestion" not in mismatch
+    assert "```" in mismatch
 
 
 def test_repository_helpers_and_status_formatting(mocker) -> None:

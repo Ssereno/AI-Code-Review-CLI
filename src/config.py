@@ -91,6 +91,7 @@ class ReviewConfig:
     review_scope: str = "diff_with_context"  # "diff_only" | "diff_with_context" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
+    max_comments_to_post: int = 20          # Max actionable inline comments per review
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)
     project_context_enabled: bool = True     # Include repository files as read-only context
@@ -265,6 +266,7 @@ class ReviewConfig:
             "review_scope": ("review", "scope"),
             "max_diff_files": ("review", "max_diff_files"),
             "max_diff_lines": ("review", "max_diff_lines"),
+            "max_comments_to_post": ("review", "max_comments_to_post"),
             "custom_prompt_file": ("review", "custom_prompt_file"),
             "file_extensions_filter": ("review", "file_extensions_filter"),
             "project_context_enabled": ("review", "project_context", "enabled"),
@@ -390,6 +392,12 @@ class ReviewConfig:
         if self.max_diff_lines <= 0:
             issues.append(
                 f"Invalid max_diff_lines: '{self.max_diff_lines}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.max_comments_to_post <= 0:
+            issues.append(
+                f"Invalid max_comments_to_post: '{self.max_comments_to_post}'. "
                 "Use an integer greater than 0."
             )
 

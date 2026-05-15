@@ -178,6 +178,7 @@ review:
   scope: full_code
   max_diff_files: 12
   max_diff_lines: 456
+  max_comments_to_post: 9
   custom_prompt_file: prompt.md
   file_extensions_filter:
     - .py
@@ -255,6 +256,7 @@ usage:
     assert config.review_scope == "full_code"
     assert config.max_diff_files == 12
     assert config.max_diff_lines == 456
+    assert config.max_comments_to_post == 9
     assert config.custom_prompt_file == "prompt.md"
     assert config.file_extensions_filter == [".py", ".md"]
     assert config.project_context_enabled is False
@@ -322,6 +324,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
         max_prompt_tokens=-1,
         max_diff_files=0,
         max_diff_lines=0,
+        max_comments_to_post=0,
         project_context_mode="everything",
         project_context_max_files=-1,
         project_context_max_chars=-1,
@@ -341,6 +344,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     assert any("Invalid llm.max_prompt_tokens" in issue for issue in issues)
     assert any("Invalid max_diff_files" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
+    assert any("Invalid max_comments_to_post" in issue for issue in issues)
     assert any("Invalid project_context.mode" in issue for issue in issues)
     assert any("Invalid project_context.max_files" in issue for issue in issues)
     assert any("Invalid project_context.max_chars" in issue for issue in issues)

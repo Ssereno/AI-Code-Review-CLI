@@ -362,9 +362,18 @@ def _format_structured_review_text(
     discarded_count: int = 0,
     duplicate_count: int = 0,
     resolved_reappeared_count: int = 0,
+    metadata_issues: list[str] | None = None,
 ) -> str:
     """Builds the terminal/saved review from final structured comments only."""
     lines: list[str] = ["## Structured Review"]
+    metadata_issues = metadata_issues or []
+
+    if metadata_issues:
+        lines.append("")
+        lines.append("## PR Metadata Checks")
+        for issue in metadata_issues:
+            lines.append(f"- {issue}")
+        lines.append("")
 
     if comments:
         plural = "s" if len(comments) != 1 else ""
@@ -427,6 +436,72 @@ def _format_structured_review_text(
             )
 
     return "\n".join(lines).strip()
+
+
+def _build_pr_metadata_issues(
+    pr_details: dict,
+    *,
+    linked_work_item_count: int | None = None,
+) -> list[str]:
+    """Returns PR metadata issues that should be surfaced with the review."""
+    issues: list[str] = []
+
+    if not str(pr_details.get("title", "")).strip():
+        issues.append("PR title is empty.")
+
+    if not str(pr_details.get("description", "")).strip():
+        issues.append("PR description is empty.")
+
+    merge_status = str(pr_details.get("merge_status", "") or "").strip()
+    if merge_status.lower() != "succeeded":
+        issues.append(
+            f"PR merge status is '{merge_status or 'unknown'}' instead of 'succeeded'."
+        )
+
+    if bool(pr_details.get("is_draft", False)):
+        issues.append("PR is marked as draft.")
+
+    if linked_work_item_count == 0:
+        issues.append("PR has no linked work items.")
+
+    return issues
+
+
+def _severity_rank(comment: dict) -> int:
+    """Returns a sortable severity rank for comment prioritization."""
+    ranks = {
+        "critical": 0,
+        "high": 1,
+        "medium": 2,
+        "low": 3,
+        "info": 4,
+    }
+    return ranks.get(str(comment.get("severity", "info")).lower(), 4)
+
+
+def _limit_comments_to_post(
+    comments: list[dict],
+    max_comments: int,
+) -> tuple[list[dict], list[dict]]:
+    """Keeps only the highest-impact comments up to the configured cap."""
+    if max_comments <= 0 or len(comments) <= max_comments:
+        return comments, []
+
+    indexed = list(enumerate(comments))
+    ordered = sorted(
+        indexed,
+        key=lambda item: (_severity_rank(item[1]), item[0]),
+    )
+    kept_indexes = {index for index, _ in ordered[:max_comments]}
+    kept = [
+        comment for index, comment in indexed
+        if index in kept_indexes
+    ]
+    omitted = [
+        comment for index, comment in indexed
+        if index not in kept_indexes
+    ]
+    return kept, omitted
 
 
 def _normalize_review_path(path: object) -> str:
@@ -557,6 +632,33 @@ def _text_contains_evidence(text: str, evidence: str) -> bool:
     )
 
 
+def _comment_line_range(comment: dict) -> tuple[int, int]:
+    """Returns the source-branch line range targeted by a comment."""
+    try:
+        start = int(comment.get("line", 0))
+    except (TypeError, ValueError):
+        start = 0
+
+    try:
+        end = int(comment.get("end_line", 0) or 0)
+    except (TypeError, ValueError):
+        end = 0
+
+    if start <= 0:
+        return 0, 0
+    if end <= start:
+        end = start + 1
+    return start, end
+
+
+def _source_text_for_range(source_text: str, start: int, end: int) -> str:
+    """Returns source file text for a 1-based, end-exclusive line range."""
+    if start <= 0 or end <= start:
+        return ""
+    lines = str(source_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(lines[start - 1:end - 1])
+
+
 def _quoted_code_terms(*parts: str) -> list[str]:
     """Extracts quoted/backticked code terms that a comment claims to discuss."""
     text = "\n".join(str(part or "") for part in parts)
@@ -581,6 +683,7 @@ def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bo
     for term in _quoted_code_terms(
         comment.get("comment", ""),
         comment.get("problematic_code", ""),
+        comment.get("evidence", ""),
     ):
         if term not in source_text:
             return True
@@ -590,6 +693,12 @@ def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bo
 def _suggestion_already_applied(comment: dict, hunk_text: str, source_text: str) -> bool:
     """Detects comments that suggest code already present in source branch."""
     problematic_code = str(comment.get("problematic_code", "")).strip()
+    line, end_line = _comment_line_range(comment)
+    source_range = _source_text_for_range(source_text, line, end_line).strip()
+    suggestion_replacement = str(comment.get("suggestion_replacement", "")).strip()
+    if suggestion_replacement and source_range and suggestion_replacement == source_range:
+        return True
+
     for suggested_code in _quoted_code_terms(comment.get("suggestion", "")):
         if not suggested_code or suggested_code == problematic_code:
             continue
@@ -609,17 +718,17 @@ def _filter_comments_to_changed_lines(comments: list[dict],
 
     for comment in comments:
         comment_type = str(comment.get("type", "")).lower()
-        if comment_type == "praise":
-            kept.append(comment)
-            continue
 
         file_path = _normalize_review_path(comment.get("file", ""))
-        try:
-            line = int(comment.get("line", 0))
-        except (TypeError, ValueError):
-            line = 0
+        line, end_line = _comment_line_range(comment)
+        required_lines = set(range(line, end_line))
 
-        if file_path and line > 0 and line in changed_lines.get(file_path, set()):
+        if (
+            comment_type not in ("praise", "style", "")
+            and file_path
+            and required_lines
+            and required_lines.issubset(changed_lines.get(file_path, set()))
+        ):
             kept.append(comment)
         else:
             discarded.append(comment)
@@ -645,33 +754,42 @@ def _filter_comments_to_grounded_source_lines(
 
     for comment in comments:
         comment_type = str(comment.get("type", "")).lower()
-        if comment_type == "praise":
-            kept.append(comment)
+        if comment_type in ("praise", "style", ""):
+            discarded_location.append(comment)
             continue
 
         file_path = _normalize_review_path(comment.get("file", ""))
-        try:
-            line = int(comment.get("line", 0))
-        except (TypeError, ValueError):
-            line = 0
+        line, end_line = _comment_line_range(comment)
+        required_lines = set(range(line, end_line))
 
         hunk = next(
             (
                 item for item in hunks_by_file.get(file_path, [])
-                if line in item.get("added_lines", set())
+                if required_lines.issubset(item.get("added_lines", set()))
             ),
             None,
         )
-        if not file_path or line <= 0 or hunk is None:
+        if not file_path or not required_lines or hunk is None:
             discarded_location.append(comment)
             continue
 
         evidence = str(comment.get("evidence", "")).strip()
         problematic_code = str(comment.get("problematic_code", "")).strip()
         hunk_text = str(hunk.get("text", ""))
-        source_text = source_file_contents.get(file_path, hunk_text)
+        source_text = source_file_contents.get(file_path)
+        has_full_source_text = source_text is not None
+        if source_text is None:
+            source_text = hunk_text
+        source_range = (
+            _source_text_for_range(source_text, line, end_line)
+            if has_full_source_text else hunk_text
+        )
 
         if not _text_contains_evidence(hunk_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_range, problematic_code):
             discarded_grounding.append(comment)
             continue
 
@@ -848,6 +966,7 @@ def _store_pr_usage(
     dry_run: bool,
     comments_generated: int,
     usage_events: list,
+    metadata_issues: list[str] | None = None,
 ) -> None:
     """Persists token usage for a completed PR review."""
     if not config.usage_tracking_enabled or not usage_events:
@@ -865,6 +984,7 @@ def _store_pr_usage(
             comments_generated=comments_generated,
             events=usage_events,
             pricing_config=config.usage_pricing,
+            metadata_issues=metadata_issues,
         )
         path = append_usage_record(config.usage_file, record)
         print(formatter.format_info(f"{_format_usage_summary(record)} -> {path}"))
@@ -906,6 +1026,9 @@ def _format_usage_pr_list(summaries: list[dict], usage_file: str) -> str:
             f"(input {tokens.get('prompt_tokens', 0)}, "
             f"output {tokens.get('completion_tokens', 0)}) | Cost: {cost}"
         )
+        metadata_issue_count = int(summary.get("metadata_issue_count", 0) or 0)
+        if metadata_issue_count:
+            lines.append(f"       Metadata issues: {metadata_issue_count}")
         lines.append(f"       {c.DIM}Latest: {latest}{c.RESET}")
         lines.append("")
 
@@ -983,6 +1106,11 @@ def _format_usage_details(summary: dict) -> str:
             "    Missing pricing: "
             + ", ".join(summary.get("missing_pricing", []))
         )
+
+    metadata_issues = summary.get("metadata_issues") or []
+    if metadata_issues:
+        lines.extend(["", f"{c.BOLD}  Metadata Issues{c.RESET}"])
+        lines.extend(f"    - {issue}" for issue in metadata_issues)
 
     providers = ", ".join(summary.get("providers", [])) or "unknown"
     models = ", ".join(summary.get("models", [])) or "unknown"
@@ -1207,15 +1335,34 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     use_contextual_review = review_scope == "diff_with_context"
 
     work_item_context = ""
+    linked_work_item_ids: list[int] | None = None
     if use_contextual_review and config.work_item_context_enabled:
         print(formatter.format_progress("Getting documentation from linked work items"))
         try:
+            linked_work_item_ids = tfs.list_pull_request_work_item_ids(
+                repo_name,
+                pr_id,
+            )
+            if not isinstance(linked_work_item_ids, list):
+                linked_work_item_ids = None
+        except TFSError as exc:
+            linked_work_item_ids = None
+            print(formatter.format_warning(
+                f"Could not inspect linked work items for metadata checks: {exc}"
+            ))
+
+        try:
+            work_item_kwargs = {
+                "max_items": config.work_item_context_max_items,
+                "max_chars": config.work_item_context_max_chars,
+                "fields": config.work_item_context_fields,
+            }
+            if linked_work_item_ids is not None:
+                work_item_kwargs["work_item_ids"] = linked_work_item_ids
             work_item_context = tfs.get_work_item_context(
                 repo_name,
                 pr_id,
-                max_items=config.work_item_context_max_items,
-                max_chars=config.work_item_context_max_chars,
-                fields=config.work_item_context_fields,
+                **work_item_kwargs,
             )
         except TFSError as exc:
             print(formatter.format_warning(
@@ -1228,6 +1375,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 f"Linked work item documentation loaded ({len(work_item_context):,} characters). "
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
+
+    metadata_issues = _build_pr_metadata_issues(
+        pr_details,
+        linked_work_item_count=(
+            len(linked_work_item_ids)
+            if linked_work_item_ids is not None else None
+        ),
+    )
+    for issue in metadata_issues:
+        print(formatter.format_warning(f"PR metadata: {issue}"))
 
     source_files_context = ""
     if use_contextual_review and config.project_context_enabled:
@@ -1402,16 +1559,28 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             "still appear in the latest review."
         ))
 
+    structured_comments, capped_comments = _limit_comments_to_post(
+        structured_comments,
+        config.max_comments_to_post,
+    )
+    if capped_comments:
+        print(formatter.format_info(
+            f"Limited review output to the top {config.max_comments_to_post} "
+            f"comment(s); omitted {len(capped_comments)} lower-priority comment(s)."
+        ))
+
     total_discarded_comments = (
         len(discarded_comments)
         + len(discarded_ungrounded)
         + len(extra_discarded_comments)
+        + len(capped_comments)
     )
     review_text = _format_structured_review_text(
         structured_comments,
         discarded_count=total_discarded_comments,
         duplicate_count=len(skipped_duplicates),
         resolved_reappeared_count=len(resolved_reappeared),
+        metadata_issues=metadata_issues,
     )
 
     elapsed = time.time() - start_time
@@ -1425,6 +1594,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         dry_run=dry_run,
         comments_generated=len(structured_comments),
         usage_events=_get_llm_usage_events(llm),
+        metadata_issues=metadata_issues,
     )
 
     # --- Show general review ---

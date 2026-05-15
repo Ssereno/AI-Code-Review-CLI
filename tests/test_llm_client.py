@@ -106,7 +106,10 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
     assert "SOURCE BRANCH CODE TO VALIDATE" in contextual_guidance
+    assert "Return []" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
+    assert "Do not return praise" in get_pr_comment_prompt("en")
+    assert "suggestion_replacement" in get_pr_comment_prompt("en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
 
@@ -284,7 +287,19 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     assert copilot.called
-    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "problematic_code": "broken_call()", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]
+    assert comments == [{
+        "file": "src/app.py",
+        "line": 5,
+        "end_line": 0,
+        "type": "bug",
+        "severity": "high",
+        "comment": "boom",
+        "problematic_code": "broken_call()",
+        "suggestion": "fix",
+        "suggestion_replacement": "",
+        "reference": "Docs",
+        "evidence": "broken_call()",
+    }]
 
 
 def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
@@ -302,7 +317,7 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     assert fenced[0]["problematic_code"] == ""
     assert fenced[0]["evidence"] == ""
     assert single[0]["line"] == 2
-    assert fallback[0]["comment"] == "not json at all"
+    assert fallback == []
 
 
 def test_call_openai_builds_expected_payload_and_validates_configuration(mocker) -> None:

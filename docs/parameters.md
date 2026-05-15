@@ -54,6 +54,7 @@ review:
   custom_prompt_file: review_prompt.md
   max_diff_files: 50
   max_diff_lines: 2000
+  max_comments_to_post: 20
   file_extensions_filter: []
   project_context:
     enabled: true
@@ -163,6 +164,7 @@ Bedrock credential modes:
 | `review.custom_prompt_file` | `review_prompt.md` | Markdown file with extra review rules/context injected into the prompt. |
 | `review.max_diff_files` | `50` | Maximum changed files sent to the LLM. Must be greater than `0`. |
 | `review.max_diff_lines` | `2000` | Maximum diff lines per file. Must be greater than `0`. |
+| `review.max_comments_to_post` | `20` | Maximum actionable inline comments kept after grounding, duplicate checks, and severity prioritization. Must be greater than `0`. |
 | `review.file_extensions_filter` | `[]` | Allowlist for files reviewed from the PR diff. Empty list means all file types. |
 
 ### Review / Validation Scope
@@ -236,6 +238,13 @@ fields:
 
 Comments produced by the tool are tagged with hidden metadata so later runs can
 detect duplicates and check whether previously resolved tool comments reappear.
+Inline comments also include a visible `` `#AI` `` marker and may include Azure
+DevOps/TFS suggestion blocks when the replacement text exactly matches the
+selected source-branch line range.
+
+The PR reviewer only keeps actionable structured findings. Praise, style-only
+comments, general suggestions, deleted-file comments, target-only evidence, and
+comments outside modified source-branch lines are discarded before posting.
 
 ## Output Parameters
 
@@ -288,6 +297,7 @@ The config validator reports issues for:
 - Missing required provider credentials or Bedrock region.
 - Invalid `review.verbosity` or `review.scope`.
 - Non-positive `review.max_diff_files` or `review.max_diff_lines`.
+- Non-positive `review.max_comments_to_post`.
 - Negative `llm.max_prompt_tokens`.
 - Invalid `review.project_context.mode`.
 - Negative full-mode project context limits.

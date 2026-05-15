@@ -99,6 +99,10 @@ review:
   # Limit of diff lines per file (larger sections are truncated)
   max_diff_lines: 4500
 
+  # Maximum actionable inline comments posted/shown per review.
+  # The tool keeps the highest-severity findings when the model returns more.
+  max_comments_to_post: 20
+
   # Filter by file extensions (empty list = all files)
   # Example: [".py", ".js", ".cs", ".ts"]
   file_extensions_filter: []

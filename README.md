@@ -93,6 +93,7 @@ review:
   scope: diff_with_context             # diff_with_context, diff_only, full_code
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
+  max_comments_to_post: 20
   project_context:
     enabled: true
     mode: on_demand                      # on_demand, full
@@ -113,6 +114,11 @@ repository manifest, then the model requests any extra files it needs. Set
 snapshot instead. Bedrock uses a default estimated prompt budget of 180000
 tokens; override it with `llm.max_prompt_tokens` if your model supports more or
 less.
+
+For Copilot-backed reviews, Claude Sonnet models are often strong choices for
+large PR validation, for example `llm.provider: copilot` with a Claude Sonnet
+model available to your organization. The tool still enforces the same
+source-branch grounding, duplicate checks, and comment cap regardless of model.
 
 ## Development & Testing
 

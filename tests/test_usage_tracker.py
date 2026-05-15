@@ -50,6 +50,7 @@ def test_build_pr_usage_record_aggregates_tokens_and_cost() -> None:
         dry_run=True,
         comments_generated=3,
         events=events,
+        metadata_issues=["PR is marked as draft."],
         pricing_config={
             "openai": {
                 "gpt-4o-mini": {
@@ -67,6 +68,7 @@ def test_build_pr_usage_record_aggregates_tokens_and_cost() -> None:
     assert record["tokens"]["total_tokens"] == 3_750
     assert record["cost"]["amount"] == 0.0009
     assert record["calls"][0]["operation"] == "general_review"
+    assert record["metadata_issues"] == ["PR is marked as draft."]
 
 
 def test_build_pr_usage_record_reports_missing_pricing() -> None:
@@ -154,6 +156,7 @@ def test_summarize_usage_by_pr_groups_records() -> None:
                 "estimated": False,
             },
             "cost": {"amount": 0.01, "currency": "USD", "estimated": False},
+            "metadata_issues": ["PR description is empty."],
         },
         {
             "repository": "repo-a",
@@ -171,6 +174,7 @@ def test_summarize_usage_by_pr_groups_records() -> None:
             },
             "cost": None,
             "missing_pricing": ["openai/gpt-4o-mini"],
+            "metadata_issues": ["PR is marked as draft."],
         },
     ]
 
@@ -184,3 +188,8 @@ def test_summarize_usage_by_pr_groups_records() -> None:
     assert summary["tokens"]["estimated"] is True
     assert summary["cost"]["amount"] == 0.01
     assert summary["missing_pricing"] == ["openai/gpt-4o-mini"]
+    assert summary["metadata_issue_count"] == 2
+    assert summary["metadata_issues"] == [
+        "PR description is empty.",
+        "PR is marked as draft.",
+    ]
