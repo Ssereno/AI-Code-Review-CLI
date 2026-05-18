@@ -13,6 +13,7 @@ from src.config import ReviewConfig
 from src.llm_client import (
     LLMClient,
     LLMError,
+    build_change_review_packets,
     build_source_branch_review_anchors,
     build_user_message,
     get_pr_comment_prompt,
@@ -39,6 +40,19 @@ class FakeResponse:
     def json(self) -> object:
         """Return the configured JSON payload."""
         return self._json_data
+
+
+class _FakePromptResource:
+    """Minimal importlib.resources path object for prompt tests."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def joinpath(self, name: str) -> "_FakePromptResource":
+        return self
+
+    def read_text(self, encoding: str = "utf-8") -> str:
+        return self._text
 
 
 def install_requests(monkeypatch: pytest.MonkeyPatch, response: FakeResponse) -> ModuleType:
@@ -106,9 +120,11 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
     assert "SOURCE BRANCH CODE TO VALIDATE" in contextual_guidance
+    assert "REVIEWABLE" in contextual_guidance
     assert "Return []" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
     assert "Do not return praise" in get_pr_comment_prompt("en")
+    assert "anchor_code" in get_pr_comment_prompt("en")
     assert "suggestion_replacement" in get_pr_comment_prompt("en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
@@ -129,14 +145,22 @@ def test_build_user_message_includes_files_and_context() -> None:
         context="Please focus on safety.",
         project_context="Existing helper: src/helpers.py",
         work_item_context="Acceptance Criteria: totals include tax",
-        source_files_context="### /src/app.py\nprint('x')",
+        source_files_context="\n".join([
+            "#### /src/app.py",
+            "````text",
+            "print('x')",
+            "````",
+        ]),
     )
 
     assert "Changed Files" in message
     assert "src/app.py" in message
     assert "Please focus on safety." in message
-    assert "SOURCE BRANCH FULL FILES WITH CHANGES APPLIED" in message
-    assert "### /src/app.py" in message
+    assert "CHANGE REVIEW PACKETS" in message
+    assert "Reviewable source-branch changed lines" in message
+    assert message.find("CHANGE REVIEW PACKETS") < message.find("full files")
+    assert "Source branch full files with changes applied (read-only support context)" in message
+    assert "#### /src/app.py" in message
     assert "Additional source-branch repository context" in message
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
@@ -144,9 +168,42 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "SOURCE BRANCH CODE TO VALIDATE" in message
     assert "TARGET BRANCH BASELINE" in message
     assert "src/app.py:1 | print('x')" in message
+    assert "1 [REVIEWABLE] print('x')" in message
     assert "Review target" in message
-    assert "Review only the current source-branch PR changes below" in message
+    assert "Review only the REVIEWABLE source-branch changed lines" in message
     assert "```diff" in message
+
+
+def test_build_change_review_packets_marks_only_changed_lines_reviewable() -> None:
+    """It should render changed lines separately from read-only source context."""
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -2,3 +2,3 @@",
+        " keep_before()",
+        "-old_call()",
+        "+new_call()",
+        " keep_after()",
+    ])
+    source_context = "\n".join([
+        "#### /src/app.py",
+        "````text",
+        "header()",
+        "keep_before()",
+        "new_call()",
+        "keep_after()",
+        "footer()",
+        "````",
+    ])
+
+    packets = build_change_review_packets(diff, source_context, context_radius=1)
+
+    assert "src/app.py:3 | new_call()" in packets
+    assert "target:3 | old_call()" in packets
+    assert "3 [REVIEWABLE] new_call()" in packets
+    assert "2 [context-only] keep_before()" in packets
+    assert "4 [context-only] keep_after()" in packets
 
 
 def test_build_source_branch_review_anchors_lists_only_added_lines() -> None:
@@ -225,13 +282,17 @@ def test_parse_context_file_request_handles_bad_payloads() -> None:
 
 
 def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
-    """It should handle empty, missing and readable prompt files."""
+    """It should handle empty, missing, packaged fallback, and readable files."""
     config = make_llm_config(custom_prompt_file="")
     client = LLMClient(config)
     assert client._load_custom_prompt_text() == ""
 
     config.custom_prompt_file = str(tmp_path / "missing.md")
-    assert client._load_custom_prompt_text() == ""
+    mocker.patch(
+        "src.llm_client.importlib.resources.files",
+        return_value=_FakePromptResource("packaged context"),
+    )
+    assert client._load_custom_prompt_text() == "packaged context"
 
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("extra instructions", encoding="utf-8")
@@ -240,6 +301,19 @@ def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
 
     mocker.patch("builtins.open", side_effect=OSError("boom"))
     assert client._load_custom_prompt_text() == ""
+
+
+def test_load_custom_prompt_text_uses_local_context_without_merging(tmp_path: Path, mocker) -> None:
+    """It should let local context override the packaged example instead of merging."""
+    local_context = tmp_path / "review_context.local.md"
+    local_context.write_text("local-only context", encoding="utf-8")
+    mocker.patch(
+        "src.llm_client.importlib.resources.files",
+        return_value=_FakePromptResource("packaged context"),
+    )
+    client = LLMClient(make_llm_config(custom_prompt_file=str(local_context)))
+
+    assert client._load_custom_prompt_text() == "local-only context"
 
 
 def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> None:
@@ -260,8 +334,8 @@ def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> N
 
     assert result == "review text"
     system_prompt, user_message = openai.call_args.args[:2]
-    assert "Custom user instructions" in system_prompt
-    assert "Custom context loaded from" in user_message
+    assert "Custom reviewer context" in system_prompt
+    assert "Review context loaded from" in user_message
     assert "Repo contract" in user_message
     assert "Requirement docs" in user_message
     assert client.usage_events[0].operation == "general_review"
@@ -281,7 +355,7 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     client = LLMClient(make_llm_config(llm_provider="copilot"))
     copilot = mocker.patch(
         "src.llm_client.LLMClient._call_copilot",
-        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "problematic_code": "broken_call()", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]',
+        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "anchor_code": "broken_call()", "problematic_code": "broken_call()", "suggestion": "fix", "reference": "Docs", "evidence": "broken_call()"}]',
     )
 
     comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
@@ -294,6 +368,7 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
         "type": "bug",
         "severity": "high",
         "comment": "boom",
+        "anchor_code": "broken_call()",
         "problematic_code": "broken_call()",
         "suggestion": "fix",
         "suggestion_replacement": "",
@@ -314,6 +389,7 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     fallback = client._parse_structured_comments("not json at all")
 
     assert fenced[0]["file"] == "a.py"
+    assert fenced[0]["anchor_code"] == ""
     assert fenced[0]["problematic_code"] == ""
     assert fenced[0]["evidence"] == ""
     assert single[0]["line"] == 2

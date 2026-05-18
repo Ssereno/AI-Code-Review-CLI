@@ -334,7 +334,10 @@ def _review_scope_context_note(review_scope: str) -> str:
             "limited to modified PR lines."
         )
     if scope == "full_code":
-        return "Review is running in full_code mode for changed file contents."
+        return (
+            "Review is running in full_code mode; full changed files are context, "
+            "but comments remain limited to actual PR changes."
+        )
     return "Review is running in diff_only mode."
 
 
@@ -356,6 +359,57 @@ def _build_general_summary_comment(config: ReviewConfig,
     ])
 
 
+def _comment_location(comment: dict) -> str:
+    """Formats a comment location for diagnostic output."""
+    file_path = str(comment.get("file", "") or "general")
+    line = comment.get("line", 0)
+    end_line = comment.get("end_line", 0)
+    if line and end_line and end_line > line + 1:
+        return f"{file_path}:{line}-{end_line - 1}"
+    if line:
+        return f"{file_path}:{line}"
+    return file_path
+
+
+def _append_comment_diagnostics(
+    lines: list[str],
+    title: str,
+    comments: list[dict],
+) -> None:
+    """Appends discarded or skipped comments for terminal/save diagnostics."""
+    if not comments:
+        return
+
+    lines.append("")
+    lines.append(f"### {title}")
+    lines.append(
+        "Logged for diagnosis only; these comments are not eligible for posting."
+    )
+
+    for index, comment in enumerate(comments, 1):
+        comment_type = str(comment.get("type", "suggestion")).title()
+        severity = str(comment.get("severity", "info")).upper()
+        lines.append("")
+        lines.append(
+            f"{index}. {_comment_location(comment)} - {comment_type} ({severity})"
+        )
+
+        body = str(comment.get("comment", "")).strip()
+        if body:
+            lines.append(f"   Comment: {body}")
+
+        for label, key in (
+            ("Anchor", "anchor_code"),
+            ("Problematic code", "problematic_code"),
+            ("Evidence", "evidence"),
+            ("Suggestion", "suggestion"),
+            ("Reference", "reference"),
+        ):
+            value = str(comment.get(key, "")).strip()
+            if value:
+                lines.append(f"   {label}: {value}")
+
+
 def _format_structured_review_text(
     comments: list[dict],
     *,
@@ -363,10 +417,20 @@ def _format_structured_review_text(
     duplicate_count: int = 0,
     resolved_reappeared_count: int = 0,
     metadata_issues: list[str] | None = None,
+    discarded_location_comments: list[dict] | None = None,
+    discarded_grounding_comments: list[dict] | None = None,
+    discarded_changed_line_comments: list[dict] | None = None,
+    capped_comments: list[dict] | None = None,
+    duplicate_comments: list[dict] | None = None,
 ) -> str:
-    """Builds the terminal/saved review from final structured comments only."""
+    """Builds the terminal/saved review with kept and diagnostic comments."""
     lines: list[str] = ["## Structured Review"]
     metadata_issues = metadata_issues or []
+    discarded_location_comments = discarded_location_comments or []
+    discarded_grounding_comments = discarded_grounding_comments or []
+    discarded_changed_line_comments = discarded_changed_line_comments or []
+    capped_comments = capped_comments or []
+    duplicate_comments = duplicate_comments or []
 
     if metadata_issues:
         lines.append("")
@@ -434,6 +498,32 @@ def _format_structured_review_text(
                 f"- {resolved_reappeared_count} resolved/closed tool comment(s) "
                 "still appear in the latest structured review."
             )
+
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Outside Changed Source Lines",
+        discarded_location_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Failed Source Evidence Checks",
+        discarded_grounding_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Failed Final Changed-Line Check",
+        discarded_changed_line_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Omitted: Lower Priority Than Comment Limit",
+        capped_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Skipped: Duplicate Existing PR Comments",
+        duplicate_comments,
+    )
 
     return "\n".join(lines).strip()
 
@@ -690,7 +780,31 @@ def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bo
     return False
 
 
-def _suggestion_already_applied(comment: dict, hunk_text: str, source_text: str) -> bool:
+def _comment_mentions_non_anchor_terms(comment: dict, anchor_text: str) -> bool:
+    """Detects quoted claim terms that are absent from the reviewable anchor."""
+    for term in _quoted_code_terms(
+        comment.get("comment", ""),
+        comment.get("anchor_code", ""),
+        comment.get("problematic_code", ""),
+        comment.get("evidence", ""),
+    ):
+        if term not in anchor_text:
+            return True
+    return False
+
+
+def _changed_text_for_required_lines(hunk: dict, required_lines: set[int]) -> str:
+    """Returns the exact changed source text covered by a comment range."""
+    line_text = hunk.get("line_text", {})
+    lines = []
+    for line_no in sorted(required_lines):
+        if line_no not in line_text:
+            return ""
+        lines.append(str(line_text[line_no]))
+    return "\n".join(lines)
+
+
+def _suggestion_already_applied(comment: dict, anchor_text: str, source_text: str) -> bool:
     """Detects comments that suggest code already present in source branch."""
     problematic_code = str(comment.get("problematic_code", "")).strip()
     line, end_line = _comment_line_range(comment)
@@ -702,7 +816,7 @@ def _suggestion_already_applied(comment: dict, hunk_text: str, source_text: str)
     for suggested_code in _quoted_code_terms(comment.get("suggestion", "")):
         if not suggested_code or suggested_code == problematic_code:
             continue
-        if _text_contains_evidence(hunk_text, suggested_code):
+        if _text_contains_evidence(anchor_text, suggested_code):
             return True
         if _text_contains_evidence(source_text, suggested_code):
             return True
@@ -774,18 +888,31 @@ def _filter_comments_to_grounded_source_lines(
             continue
 
         evidence = str(comment.get("evidence", "")).strip()
+        anchor_code = str(comment.get("anchor_code", "")).strip()
         problematic_code = str(comment.get("problematic_code", "")).strip()
-        hunk_text = str(hunk.get("text", ""))
+        anchor_text = _changed_text_for_required_lines(hunk, required_lines)
         source_text = source_file_contents.get(file_path)
         has_full_source_text = source_text is not None
         if source_text is None:
-            source_text = hunk_text
+            source_text = anchor_text
         source_range = (
             _source_text_for_range(source_text, line, end_line)
-            if has_full_source_text else hunk_text
+            if has_full_source_text else anchor_text
         )
 
-        if not _text_contains_evidence(hunk_text, problematic_code):
+        if not anchor_text:
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, anchor_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, evidence):
             discarded_grounding.append(comment)
             continue
 
@@ -797,10 +924,6 @@ def _filter_comments_to_grounded_source_lines(
             discarded_grounding.append(comment)
             continue
 
-        if not _text_contains_evidence(hunk_text, evidence):
-            discarded_grounding.append(comment)
-            continue
-
         if not _text_contains_evidence(source_text, evidence):
             discarded_grounding.append(comment)
             continue
@@ -809,7 +932,11 @@ def _filter_comments_to_grounded_source_lines(
             discarded_grounding.append(comment)
             continue
 
-        if _suggestion_already_applied(comment, hunk_text, source_text):
+        if _comment_mentions_non_anchor_terms(comment, anchor_text):
+            discarded_grounding.append(comment)
+            continue
+
+        if _suggestion_already_applied(comment, anchor_text, source_text):
             discarded_grounding.append(comment)
             continue
 
@@ -1333,6 +1460,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         ))
 
     use_contextual_review = review_scope == "diff_with_context"
+    load_changed_file_context = review_scope in ("diff_with_context", "full_code")
 
     work_item_context = ""
     linked_work_item_ids: list[int] | None = None
@@ -1387,7 +1515,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_warning(f"PR metadata: {issue}"))
 
     source_files_context = ""
-    if use_contextual_review and config.project_context_enabled:
+    if load_changed_file_context and config.project_context_enabled:
         print(formatter.format_progress(
             "Getting full source-branch contents for changed files"
         ))
@@ -1581,6 +1709,11 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         duplicate_count=len(skipped_duplicates),
         resolved_reappeared_count=len(resolved_reappeared),
         metadata_issues=metadata_issues,
+        discarded_location_comments=discarded_comments,
+        discarded_grounding_comments=discarded_ungrounded,
+        discarded_changed_line_comments=extra_discarded_comments,
+        capped_comments=capped_comments,
+        duplicate_comments=skipped_duplicates,
     )
 
     elapsed = time.time() - start_time
@@ -2014,17 +2147,44 @@ def _show_config(config: ReviewConfig) -> None:
 # ---------------------------------------------------------------------------
 # Init command
 # ---------------------------------------------------------------------------
+def _ensure_local_context_gitignored(cwd: str, c: Colors) -> None:
+    """Ensures the generated local reviewer context is ignored by git."""
+    gitignore_dest = os.path.join(cwd, ".gitignore")
+    ignore_entry = "review_context.local.md"
+
+    try:
+        existing = ""
+        if os.path.exists(gitignore_dest):
+            with open(gitignore_dest, "r", encoding="utf-8") as fh:
+                existing = fh.read()
+            if any(line.strip() == ignore_entry for line in existing.splitlines()):
+                return
+
+        with open(gitignore_dest, "a", encoding="utf-8") as fh:
+            if existing and not existing.endswith(("\n", "\r")):
+                fh.write("\n")
+            fh.write(f"{ignore_entry}\n")
+
+        print(f"{c.GREEN}✅ .gitignore updated with:{c.RESET} {ignore_entry}")
+    except OSError as exc:
+        print(
+            f"{c.YELLOW}Warning: could not update .gitignore for "
+            f"{ignore_entry}: {exc}{c.RESET}"
+        )
+
+
 def cmd_init() -> int:
-    """Copies a config.yaml template and review_prompt.md to the current working directory.
+    """Copies config.yaml and reviewer context files to the current directory.
 
-    Creates a ``config.yaml`` file pre-populated with all available options
-    and inline documentation, and a ``review_prompt.md`` file with default
-    review style rules. If either file already exists in the current directory
-    the user is prompted for confirmation before overwriting.
+    Creates a ``config.yaml`` file pre-populated with all available options,
+    a kept ``review_context.example.md`` file, and a user-editable
+    ``review_context.local.md`` file. The local context file is added to
+    ``.gitignore``. Existing files are preserved unless the user confirms
+    overwrite.
 
-    Both files are bundled with the package at ``src/prompts/`` and are
-    resolved at runtime via :mod:`importlib.resources`, so they work
-    regardless of how the package was installed.
+    The templates are bundled with the package at ``src/prompts/`` and are
+    resolved at runtime via :mod:`importlib.resources`, so they work regardless
+    of how the package was installed.
 
     Returns:
         int: Exit code. ``0`` on success or user cancellation, ``1`` on error.
@@ -2034,8 +2194,10 @@ def cmd_init() -> int:
 
             $ ai-review init
             ✅ config.yaml created at: /home/user/my-project/config.yaml
-            ✅ review_prompt.md created at: /home/user/my-project/review_prompt.md
-               Edit them to add your credentials, preferences and review rules.
+            ✅ review_context.example.md created at: /home/user/my-project/review_context.example.md
+            ✅ review_context.local.md created at: /home/user/my-project/review_context.local.md
+            ✅ .gitignore updated with: review_context.local.md
+               Edit config.yaml and review_context.local.md for local settings.
     """
     cwd = os.getcwd()
     c = Colors()
@@ -2059,29 +2221,30 @@ def cmd_init() -> int:
     with open(config_dest, "w", encoding="utf-8") as fh:
         fh.write(config_content)
 
-    # --- review_prompt.md ---
-    prompt_dest = os.path.join(cwd, "review_prompt.md")
-    if os.path.exists(prompt_dest):
-        print(f"{c.YELLOW}review_prompt.md already exists in the current directory.{c.RESET}")
-        answer = input("Overwrite? [y/N] ").strip().lower()
-        if answer != "y":
-            print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
-            print("   Skipped review_prompt.md (kept existing).")
-            return 0
-
     try:
-        ref = importlib.resources.files("src.prompts").joinpath("review_prompt.md.template")
+        ref = importlib.resources.files("src.prompts").joinpath("review_context.example.md")
         prompt_content = ref.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError) as exc:
-        print(f"{c.RED}Error: could not locate review_prompt template: {exc}{c.RESET}")
+        print(f"{c.RED}Error: could not locate review context example: {exc}{c.RESET}")
         return 1
 
-    with open(prompt_dest, "w", encoding="utf-8") as fh:
-        fh.write(prompt_content)
-
     print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
-    print(f"{c.GREEN}✅ review_prompt.md created at:{c.RESET} {prompt_dest}")
-    print("   Edit them to add your credentials, preferences and review rules.")
+    for filename in ("review_context.example.md", "review_context.local.md"):
+        prompt_dest = os.path.join(cwd, filename)
+        if os.path.exists(prompt_dest):
+            print(f"{c.YELLOW}{filename} already exists in the current directory.{c.RESET}")
+            answer = input("Overwrite? [y/N] ").strip().lower()
+            if answer != "y":
+                print(f"   Skipped {filename} (kept existing).")
+                continue
+
+        with open(prompt_dest, "w", encoding="utf-8") as fh:
+            fh.write(prompt_content)
+
+        print(f"{c.GREEN}✅ {filename} created at:{c.RESET} {prompt_dest}")
+
+    _ensure_local_context_gitignored(cwd, c)
+    print("   Edit config.yaml and review_context.local.md for local settings.")
     return 0
 
 

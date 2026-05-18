@@ -277,7 +277,7 @@ def test_get_pr_changed_files_handles_error_paths(mocker) -> None:
 
 
 def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
-    """It should build diffs using the selected review scope."""
+    """It should always build PR review diffs from target/source branch comparison."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -290,8 +290,9 @@ def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
     full_code = mocker.patch("src.tfs_client.TFSClient._build_full_code_diff_part", return_value=["FULL"])
     unified = mocker.patch("src.tfs_client.TFSClient._build_unified_diff_part", return_value=["UNIFIED"])
 
-    assert "FULL" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
-    assert full_code.called
+    assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
+    assert unified.called
+    assert not full_code.called
 
     mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -301,6 +302,7 @@ def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
             {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
         ],
     )
+    unified.reset_mock()
     assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1)
     assert unified.called
 
@@ -585,6 +587,84 @@ def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
     assert details_call.args[1]["$expand"] == "relations"
     assert "System.Description" in details_call.args[1]["fields"].split(",")
     assert details_call.kwargs["api_version"] == "7.1"
+
+
+def test_work_item_context_retries_without_relations_expand(mocker) -> None:
+    """It should keep work item docs when a server rejects field plus relation expansion."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            TFSError("400 Client Error: Bad Request"),
+            {
+                "value": [
+                    {
+                        "id": 12976,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Validate checkout totals</p>",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["System.Description"],
+        work_item_ids=[12976],
+    )
+
+    assert "Work Item 12976: Checkout validation" in context
+    assert "Validate checkout totals" in context
+    first_details_call = get_mock.call_args_list[0]
+    retry_call = get_mock.call_args_list[1]
+    assert first_details_call.args[1]["$expand"] == "relations"
+    assert "$expand" not in retry_call.args[1]
+    assert retry_call.kwargs["api_version"] == "7.1"
+
+
+def test_work_item_context_falls_back_to_individual_items(mocker) -> None:
+    """It should fetch individual work items if compatible list requests all fail."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[TFSError("bad request")] * 9 + [
+            {
+                "id": 101,
+                "fields": {
+                    "System.Title": "Checkout validation",
+                    "System.WorkItemType": "User Story",
+                    "System.State": "Active",
+                    "System.Description": "<p>Validate checkout totals</p>",
+                },
+                "relations": [
+                    {
+                        "rel": "Hyperlink",
+                        "url": "https://example.invalid/spec",
+                        "attributes": {"comment": "Spec"},
+                    }
+                ],
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["System.Description"],
+        work_item_ids=[101],
+    )
+
+    assert "Work Item 101: Checkout validation" in context
+    assert "Spec: https://example.invalid/spec" in context
+    individual_call = get_mock.call_args_list[-1]
+    assert individual_call.args[0] == "wit/workitems/101"
+    assert individual_call.args[1]["$expand"] == "all"
 
 
 def test_work_item_context_always_requests_description(mocker) -> None:

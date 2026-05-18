@@ -257,6 +257,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
             "type": "bug",
             "severity": "high",
             "comment": "msg",
+            "anchor_code": "value = 2",
             "problematic_code": "value = 2",
             "evidence": "value = 2",
         }
@@ -460,6 +461,7 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
             "type": "bug",
             "severity": "high",
             "comment": "msg",
+            "anchor_code": "print('x')",
             "problematic_code": "print('x')",
             "evidence": "print('x')",
         }
@@ -637,6 +639,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 2,
             "type": "bug",
             "comment": "changed",
+            "anchor_code": "print('new')",
             "problematic_code": "print('new')",
             "evidence": "print('new')",
         },
@@ -645,6 +648,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 1,
             "type": "bug",
             "comment": "context",
+            "anchor_code": "import os",
             "problematic_code": "import os",
             "evidence": "import os",
         },
@@ -653,6 +657,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 3,
             "type": "bug",
             "comment": "mentions absent `GeDemandViewFiltersInput`",
+            "anchor_code": "print('extra')",
             "problematic_code": "print('extra')",
             "evidence": "print('extra')",
         },
@@ -661,6 +666,7 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
             "line": 3,
             "type": "bug",
             "comment": "missing evidence",
+            "anchor_code": "print('extra')",
             "problematic_code": "print('extra')",
             "evidence": "",
         },
@@ -687,6 +693,7 @@ def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(samp
         "line": 2,
         "type": "bug",
         "comment": "changed",
+        "anchor_code": "print('new')",
         "problematic_code": "print('new')",
         "evidence": "print('new')",
     }
@@ -704,6 +711,42 @@ def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(samp
     assert discarded_grounding == [comment]
 
 
+def test_filter_comments_rejects_context_only_claim_on_changed_anchor(sample_diff: str) -> None:
+    """It should reject comments whose problem is grounded in unchanged context."""
+    comments = [
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed line incorrectly depends on context",
+            "anchor_code": "print('new')",
+            "problematic_code": "import os",
+            "evidence": "import os",
+        },
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed line references stale `import os` context",
+            "anchor_code": "print('new')",
+            "problematic_code": "print('new')",
+            "evidence": "print('new')",
+        },
+    ]
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            comments,
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == comments
+
+
 def test_filter_comments_discards_already_applied_suggestion() -> None:
     """It should reject comments that suggest code already present in source branch."""
     diff = "\n".join([
@@ -719,6 +762,7 @@ def test_filter_comments_discards_already_applied_suggestion() -> None:
         "line": 159,
         "type": "bug",
         "comment": "Dictionary lookup uses the old `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id)` key type.",
+        "anchor_code": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
         "problematic_code": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
         "suggestion": "Use `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString())`.",
         "evidence": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
@@ -760,6 +804,33 @@ def test_build_general_summary_comment_is_compact(review_config) -> None:
     ])
     assert "General review" not in rendered
     assert "Automatic review generated" not in rendered
+
+
+def test_format_structured_review_text_includes_discarded_comment_details() -> None:
+    """It should expose discarded comments in the terminal/saved review text."""
+    discarded = [{
+        "file": "src/app.py",
+        "line": 42,
+        "type": "bug",
+        "severity": "high",
+        "comment": "This was not grounded on the changed line.",
+        "anchor_code": "call()",
+        "problematic_code": "call()",
+        "evidence": "call()",
+        "suggestion": "Use the changed-line anchor.",
+    }]
+
+    rendered = ai_review._format_structured_review_text(
+        [],
+        discarded_count=1,
+        discarded_grounding_comments=discarded,
+    )
+
+    assert "Discarded: Failed Source Evidence Checks" in rendered
+    assert "Logged for diagnosis only" in rendered
+    assert "src/app.py:42" in rendered
+    assert "This was not grounded on the changed line." in rendered
+    assert "Use the changed-line anchor." in rendered
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:
@@ -869,8 +940,8 @@ def test_main_prints_help_when_no_command_is_parsed(mocker) -> None:
 # cmd_init
 # ---------------------------------------------------------------------------
 
-def test_cmd_init_creates_both_files(mocker, tmp_path) -> None:
-    """It should create config.yaml and review_prompt.md in the current directory."""
+def test_cmd_init_creates_config_and_context_files(mocker, tmp_path) -> None:
+    """It should create config.yaml and both reviewer context files."""
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -882,7 +953,9 @@ def test_cmd_init_creates_both_files(mocker, tmp_path) -> None:
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "prompt-template"
+    assert "review_context.local.md" in (tmp_path / ".gitignore").read_text()
 
 
 def test_cmd_init_aborts_when_user_declines_config_overwrite(mocker, tmp_path) -> None:
@@ -896,12 +969,13 @@ def test_cmd_init_aborts_when_user_declines_config_overwrite(mocker, tmp_path) -
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "existing"
-    assert not (tmp_path / "review_prompt.md").exists()
+    assert not (tmp_path / "review_context.example.md").exists()
+    assert not (tmp_path / "review_context.local.md").exists()
 
 
-def test_cmd_init_skips_prompt_overwrite_when_user_declines(mocker, tmp_path) -> None:
-    """It should write config.yaml but keep existing review_prompt.md when user declines."""
-    (tmp_path / "review_prompt.md").write_text("existing-prompt")
+def test_cmd_init_skips_local_context_overwrite_when_user_declines(mocker, tmp_path) -> None:
+    """It should write config/example but keep existing local context on decline."""
+    (tmp_path / "review_context.local.md").write_text("existing-local")
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -914,7 +988,9 @@ def test_cmd_init_skips_prompt_overwrite_when_user_declines(mocker, tmp_path) ->
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "existing-prompt"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "existing-local"
+    assert "review_context.local.md" in (tmp_path / ".gitignore").read_text()
 
 
 def test_cmd_init_returns_error_when_template_missing(mocker, tmp_path) -> None:
@@ -932,8 +1008,8 @@ def test_cmd_init_returns_error_when_template_missing(mocker, tmp_path) -> None:
     assert result == 1
 
 
-def test_cmd_init_returns_error_when_prompt_template_missing(mocker, tmp_path) -> None:
-    """It should return 1 when the review_prompt.md template cannot be found.
+def test_cmd_init_returns_error_when_context_example_missing(mocker, tmp_path) -> None:
+    """It should return 1 when the review context example cannot be found.
 
     config.yaml is already written at that point; the function still surfaces the error.
     """
@@ -959,13 +1035,15 @@ def test_cmd_init_returns_error_when_prompt_template_missing(mocker, tmp_path) -
     assert result == 1
     # config.yaml was already written before the error
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert not (tmp_path / "review_prompt.md").exists()
+    assert not (tmp_path / "review_context.example.md").exists()
+    assert not (tmp_path / "review_context.local.md").exists()
 
 
-def test_cmd_init_overwrites_both_files_when_user_accepts(mocker, tmp_path) -> None:
-    """It should overwrite both existing files when the user confirms both prompts."""
+def test_cmd_init_overwrites_existing_files_when_user_accepts(mocker, tmp_path) -> None:
+    """It should overwrite existing init files when the user confirms prompts."""
     (tmp_path / "config.yaml").write_text("old-config")
-    (tmp_path / "review_prompt.md").write_text("old-prompt")
+    (tmp_path / "review_context.example.md").write_text("old-example")
+    (tmp_path / "review_context.local.md").write_text("old-local")
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -978,7 +1056,8 @@ def test_cmd_init_overwrites_both_files_when_user_accepts(mocker, tmp_path) -> N
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "prompt-template"
 
 
 def test_main_dispatches_to_cmd_init(mocker) -> None:
@@ -1019,7 +1098,7 @@ def _fake_pkg_resources(package: str) -> _FakeResource:
         def joinpath(self, name: str) -> _FakeResource:
             if name == "config.yaml.template":
                 return _FakeResource("config-template")
-            if name == "review_prompt.md.template":
+            if name == "review_context.example.md":
                 return _FakeResource("prompt-template")
             raise FileNotFoundError(name)
 

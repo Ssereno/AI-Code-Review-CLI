@@ -92,7 +92,7 @@ class ReviewConfig:
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
     max_comments_to_post: int = 20          # Max actionable inline comments per review
-    custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
+    custom_prompt_file: str = "review_context.local.md"  # Local reviewer context override
     file_extensions_filter: list = field(default_factory=list)
     project_context_enabled: bool = True     # Include repository files as read-only context
     project_context_mode: str = "on_demand"  # "on_demand" | "full"

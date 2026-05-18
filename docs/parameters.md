@@ -51,7 +51,7 @@ review:
   language: en
   verbosity: detailed
   scope: diff_with_context
-  custom_prompt_file: review_prompt.md
+  custom_prompt_file: review_context.local.md
   max_diff_files: 50
   max_diff_lines: 2000
   max_comments_to_post: 20
@@ -161,7 +161,7 @@ Bedrock credential modes:
 | `review.language` | `pt` | Review language. Valid values: `pt`, `en`. |
 | `review.verbosity` | `detailed` | Review style. Valid values: `quick`, `detailed`, `security`. |
 | `review.scope` | `diff_with_context` | Review/validation scope. Valid values: `diff_with_context`, `diff_only`, `full_code`. |
-| `review.custom_prompt_file` | `review_prompt.md` | Markdown file with extra review rules/context injected into the prompt. |
+| `review.custom_prompt_file` | `review_context.local.md` | One active Markdown reviewer context file. If the configured file is missing, the packaged `src/prompts/review_context.example.md` is used instead. Explicit custom paths continue to work when that file exists. |
 | `review.max_diff_files` | `50` | Maximum changed files sent to the LLM. Must be greater than `0`. |
 | `review.max_diff_lines` | `2000` | Maximum diff lines per file. Must be greater than `0`. |
 | `review.max_comments_to_post` | `20` | Maximum actionable inline comments kept after grounding, duplicate checks, and severity prioritization. Must be greater than `0`. |
@@ -170,14 +170,21 @@ Bedrock credential modes:
 ### Review / Validation Scope
 
 `diff_with_context` is the default. It validates only modified PR lines while
-giving the model read-only context from the unified diff, full changed-file
-contents, linked work item documentation, and on-demand repository files.
+giving the model read-only context from per-hunk change packets, full changed-file
+contents, linked work item documentation, and on-demand repository files. Only
+lines marked as reviewable in the source-branch change packets can become inline
+comments.
+
+The reviewer context is intentionally single-file at runtime. `ai-review init`
+creates `review_context.example.md` as the kept example and
+`review_context.local.md` as the local override, then adds that local file to
+`.gitignore`. The LLM never concatenates multiple Markdown context files.
 
 | Scope | Behavior |
 |---|---|
-| `diff_with_context` | Default. Reviews PR changes with surrounding diff context, full changed files, work item docs, and repository context. Findings and inline comments must still point to modified PR lines. |
+| `diff_with_context` | Default. Reviews PR changes through source-branch change packets, with full changed files, work item docs, and repository context as read-only support. Findings and inline comments must still point to actual modified PR lines. |
 | `diff_only` | Reviews only added PR lines. Context and deleted lines are removed before calling the LLM. Project and work item context are not loaded. |
-| `full_code` | Reviews the full contents represented for changed files. Project and work item context are not loaded. |
+| `full_code` | Loads full changed-file contents as read-only support context, but PR inline comments still require actual branch-diff changed-line anchors. Project and work item context are not loaded. |
 
 ## Project Context Parameters
 
@@ -243,8 +250,9 @@ DevOps/TFS suggestion blocks when the replacement text exactly matches the
 selected source-branch line range.
 
 The PR reviewer only keeps actionable structured findings. Praise, style-only
-comments, general suggestions, deleted-file comments, target-only evidence, and
-comments outside modified source-branch lines are discarded before posting.
+comments, general suggestions, deleted-file comments, target-only evidence,
+comments outside modified source-branch lines, and comments whose quoted evidence
+does not match the exact reviewable changed line are discarded before posting.
 
 ## Output Parameters
 

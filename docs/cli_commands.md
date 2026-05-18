@@ -2,6 +2,27 @@
 
 Complete usage guide for the command-line tool.
 
+## init - Initialize Configuration
+
+Generate the config template and reviewer context files in the current
+directory:
+
+```bash
+ai-review init
+```
+
+Creates:
+
+- `config.yaml`
+- `review_context.example.md`
+- `review_context.local.md`
+- `.gitignore` entry for `review_context.local.md`
+
+`review_context.local.md` is the default local override and should be ignored by
+git. When it is missing, the CLI falls back to the packaged
+`src/prompts/review_context.example.md`. Existing files are preserved unless you
+confirm overwrite.
+
 ## pr-review - Pull Request Review
 
 Main command to review Pull Requests.
@@ -74,7 +95,7 @@ ai-review pr-review 42 --review-scope diff_with_context
 # Apenas as mudanças no diff
 ai-review pr-review 42 --review-scope diff_only
 
-# Código completo dos ficheiros modificados
+# Ficheiros completos como contexto; comentários só nas linhas alteradas
 ai-review pr-review 42 --review-scope full_code
 ```
 
@@ -319,6 +340,7 @@ review:
   language: pt
   verbosity: detailed
   scope: diff_with_context
+  custom_prompt_file: review_context.local.md
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
   max_diff_lines: 2000
@@ -354,7 +376,7 @@ ai-review pr-review 123 --quick --auto-post
 ### Scenario 2: Security audit
 
 ```bash
-# Review focado em segurança
+# Review focado em segurança, com ficheiros completos apenas como contexto
 ai-review pr-review 456 \
   --security \
   --review-scope full_code \

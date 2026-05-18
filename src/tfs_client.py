@@ -421,8 +421,6 @@ class TFSClient:
         )
         changes = self._get(changes_path)
 
-        review_scope = (review_scope or "diff_with_context").lower()
-
         # Build diff from the changes
         diff_parts = []
         for change in changes.get("changeEntries", []):
@@ -432,18 +430,6 @@ class TFSClient:
             original_path = change.get("originalPath") or file_path
 
             if item.get("isFolder"):
-                continue
-
-            if review_scope == "full_code":
-                diff_parts.extend(
-                    self._build_full_code_diff_part(
-                        repository=repository,
-                        file_path=file_path,
-                        change_type=change_type,
-                        source_branch=source_branch,
-                    )
-                )
-                diff_parts.append("")
                 continue
 
             diff_parts.extend(
@@ -749,8 +735,8 @@ class TFSClient:
             title="Source branch full files with changes applied",
             intro=(
                 "These are the latest source branch contents of files changed by "
-                "the PR. Use them as primary code context, but keep findings "
-                "anchored to changed PR lines."
+                "the PR. Use them as read-only support context, but keep findings "
+                "anchored to actual changed PR lines."
             ),
             max_files=len(paths) if paths else 1,
             max_chars=max_chars,
@@ -1129,26 +1115,94 @@ class TFSClient:
         return data.get("value", [])
 
     def _get_work_items(self, ids: list[int], fields: list[str]) -> list[dict]:
-        """Fetches work item details, falling back if optional fields are unavailable."""
-        params = {
-            "ids": ",".join(str(item_id) for item_id in ids),
-            "fields": ",".join(fields),
-            "$expand": "relations",
-            "errorPolicy": "Omit",
-        }
-        try:
-            data = self._get("wit/workitems", params, api_version="7.1")
-        except TFSError:
-            required_fields = [
-                "System.Title",
-                "System.WorkItemType",
-                "System.State",
-                "System.Description",
-            ]
-            params["fields"] = ",".join(required_fields)
-            data = self._get("wit/workitems", params, api_version="7.1")
+        """Fetches work item details across TFS/Azure DevOps API variants."""
+        required_fields = [
+            "System.Title",
+            "System.WorkItemType",
+            "System.State",
+            "System.Description",
+        ]
+        candidate_field_sets = [
+            fields,
+            [field for field in required_fields if field in fields],
+        ]
+        field_sets: list[list[str]] = []
+        seen_field_sets: set[tuple[str, ...]] = set()
+        for candidate_fields in candidate_field_sets:
+            key = tuple(candidate_fields)
+            if key and key not in seen_field_sets:
+                seen_field_sets.add(key)
+                field_sets.append(candidate_fields)
+        versions = ["7.1", "7.0", "6.0"]
+        errors: list[str] = []
 
-        return data.get("value", [])
+        for selected_fields in field_sets:
+            if not selected_fields:
+                continue
+            for version in versions:
+                for include_relations, include_error_policy in [
+                    (True, True),
+                    (False, True),
+                    (False, False),
+                ]:
+                    params = {
+                        "ids": ",".join(str(item_id) for item_id in ids),
+                        "fields": ",".join(selected_fields),
+                    }
+                    if include_relations:
+                        params["$expand"] = "relations"
+                    if include_error_policy:
+                        params["errorPolicy"] = "Omit"
+
+                    try:
+                        data = self._get(
+                            "wit/workitems",
+                            params,
+                            api_version=version,
+                        )
+                    except TFSError as exc:
+                        errors.append(str(exc))
+                        continue
+
+                    work_items = data.get("value", [])
+                    if work_items:
+                        return work_items
+
+        individual = self._get_work_items_individually(ids, versions, errors)
+        if individual:
+            return individual
+
+        if errors:
+            raise TFSError(
+                "Could not fetch work item details after trying compatible "
+                f"TFS/Azure DevOps request shapes. Last error: {errors[-1]}"
+            )
+        return []
+
+    def _get_work_items_individually(
+        self,
+        ids: list[int],
+        versions: list[str],
+        errors: list[str],
+    ) -> list[dict]:
+        """Fetches work items one by one as a compatibility fallback."""
+        for version in versions:
+            work_items = []
+            for item_id in ids:
+                try:
+                    data = self._get(
+                        f"wit/workitems/{item_id}",
+                        {"$expand": "all"},
+                        api_version=version,
+                    )
+                except TFSError as exc:
+                    errors.append(str(exc))
+                    continue
+                if data:
+                    work_items.append(data)
+            if work_items:
+                return work_items
+        return []
 
     def _resolve_work_item_fields(self, fields: Optional[list[str]]) -> list[str]:
         """Returns deduplicated work item fields, preserving required metadata."""
