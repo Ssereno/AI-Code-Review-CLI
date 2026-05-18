@@ -19,9 +19,11 @@ ai-review init
 **Output:**
 ```
 config.yaml created at: /home/user/my-project/config.yaml
-review_prompt.md created at: /home/user/my-project/review_prompt.md
+review_context.example.md created at: /home/user/my-project/review_context.example.md
+review_context.local.md created at: /home/user/my-project/review_context.local.md
+.gitignore updated with: review_context.local.md
 
-Edit them to add your credentials, preferences, and review rules.
+Edit config.yaml and review_context.local.md for local settings.
 ```
 
 If files already exist, confirmation is requested:

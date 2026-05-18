@@ -249,12 +249,21 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     tfs.get_project_files_context.return_value = "REQUESTED PROJECT CONTEXT"
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.request_context_files.side_effect = [["src/helper.py"], []]
     structured_comments = [
-        {"file": "a.py", "line": 2, "type": "bug", "severity": "high", "comment": "msg"}
+        {
+            "file": "a.py",
+            "line": 2,
+            "type": "bug",
+            "severity": "high",
+            "comment": "msg",
+            "anchor_code": "value = 2",
+            "problematic_code": "value = 2",
+            "evidence": "value = 2",
+        }
     ]
     llm.review_pr_structured.return_value = structured_comments
+    tfs.get_source_file_contents.return_value = {"a.py": "class Example:\n    value = 2\n    other = value"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -313,18 +322,26 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     )
     tfs.get_project_manifest.assert_called_once()
     tfs.get_project_files_context.assert_called_once()
+    tfs.get_source_file_contents.assert_called_once_with(
+        "repo-a",
+        "feature/test",
+        ["a.py"],
+    )
     assert llm.request_context_files.call_count == 2
-    assert llm.review.call_args.kwargs["project_context"] == (
-        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
-    )
-    assert llm.review.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
-    assert llm.review_pr_structured.call_args.kwargs["project_context"] == (
-        "CHANGED FILE CONTEXT\n\nREQUESTED PROJECT CONTEXT"
-    )
+    llm.review.assert_not_called()
+    assert llm.review_pr_structured.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
-    assert llm.review.call_args.kwargs["diff"] == diff
+    assert llm.review_pr_structured.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
+    review_text = formatter.format_review.call_args.args[0]
+    assert "Structured Review" in review_text
+    assert "msg" in review_text
+    assert "General review" not in review_text
+    saved_markdown = save_output.call_args.args[0]
+    assert "Structured Review" in saved_markdown
+    assert "msg" in saved_markdown
 
 
 def test_store_pr_usage_persists_usage_record(mocker, tmp_path, review_config) -> None:
@@ -436,12 +453,21 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.request_context_files.return_value = []
     structured_comments = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+        {
+            "file": "a.py",
+            "line": 1,
+            "type": "bug",
+            "severity": "high",
+            "comment": "msg",
+            "anchor_code": "print('x')",
+            "problematic_code": "print('x')",
+            "evidence": "print('x')",
+        }
     ]
     llm.review_pr_structured.return_value = structured_comments
+    tfs.get_source_file_contents.return_value = {"a.py": "print('x')"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -507,7 +533,6 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     tfs.get_pull_request_diff.return_value = diff
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
     llm.review_pr_structured.return_value = []
     tfs.plan_review_comments.return_value = {
         "new_comments": [],
@@ -538,10 +563,11 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     assert result == 0
     tfs.get_work_item_context.assert_not_called()
     tfs.get_project_context.assert_not_called()
-    assert llm.review.call_args.kwargs["project_context"] == ""
-    assert llm.review.call_args.kwargs["work_item_context"] == ""
+    llm.review.assert_not_called()
+    assert llm.review_pr_structured.call_args.kwargs["project_context"] == ""
+    assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == ""
     git_utils.filter_diff_additions_only.assert_called_once_with(diff)
-    assert llm.review.call_args.kwargs["diff"] == filtered_diff
+    assert llm.review_pr_structured.call_args.kwargs["diff"] == filtered_diff
 
 
 def test_review_scope_context_note_matches_scope() -> None:
@@ -555,6 +581,41 @@ def test_review_scope_context_note_matches_scope() -> None:
     assert "diff_only mode" in diff_only
 
 
+def test_build_pr_metadata_issues_flags_review_risks() -> None:
+    """It should report metadata problems that affect PR validation quality."""
+    issues = ai_review._build_pr_metadata_issues(
+        {
+            "title": "",
+            "description": "",
+            "merge_status": "conflicts",
+            "is_draft": True,
+        },
+        linked_work_item_count=0,
+    )
+
+    assert issues == [
+        "PR title is empty.",
+        "PR description is empty.",
+        "PR merge status is 'conflicts' instead of 'succeeded'.",
+        "PR is marked as draft.",
+        "PR has no linked work items.",
+    ]
+
+
+def test_limit_comments_to_post_keeps_highest_severity() -> None:
+    """It should cap comments by severity while preserving kept input order."""
+    comments = [
+        {"severity": "low", "comment": "low"},
+        {"severity": "critical", "comment": "critical"},
+        {"severity": "high", "comment": "high"},
+    ]
+
+    kept, omitted = ai_review._limit_comments_to_post(comments, 2)
+
+    assert kept == [comments[1], comments[2]]
+    assert omitted == [comments[0]]
+
+
 def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff: str) -> None:
     """It should keep problem comments anchored to added lines only."""
     comments = [
@@ -566,8 +627,163 @@ def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff:
 
     kept, discarded = ai_review._filter_comments_to_changed_lines(comments, sample_diff)
 
-    assert kept == [comments[0], comments[3]]
-    assert discarded == [comments[1], comments[2]]
+    assert kept == [comments[0]]
+    assert discarded == [comments[1], comments[2], comments[3]]
+
+
+def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff: str) -> None:
+    """It should keep only comments grounded in source-branch changed code."""
+    comments = [
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed",
+            "anchor_code": "print('new')",
+            "problematic_code": "print('new')",
+            "evidence": "print('new')",
+        },
+        {
+            "file": "src/app.py",
+            "line": 1,
+            "type": "bug",
+            "comment": "context",
+            "anchor_code": "import os",
+            "problematic_code": "import os",
+            "evidence": "import os",
+        },
+        {
+            "file": "src/app.py",
+            "line": 3,
+            "type": "bug",
+            "comment": "mentions absent `GeDemandViewFiltersInput`",
+            "anchor_code": "print('extra')",
+            "problematic_code": "print('extra')",
+            "evidence": "print('extra')",
+        },
+        {
+            "file": "src/app.py",
+            "line": 3,
+            "type": "bug",
+            "comment": "missing evidence",
+            "anchor_code": "print('extra')",
+            "problematic_code": "print('extra')",
+            "evidence": "",
+        },
+        {"file": "", "line": 0, "type": "praise", "comment": "looks good"},
+    ]
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            comments,
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert kept == [comments[0]]
+    assert discarded_location == [comments[1], comments[4]]
+    assert discarded_grounding == [comments[2], comments[3]]
+
+
+def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(sample_diff: str) -> None:
+    """It should discard comments when evidence is absent from latest source code."""
+    comment = {
+        "file": "src/app.py",
+        "line": 2,
+        "type": "bug",
+        "comment": "changed",
+        "anchor_code": "print('new')",
+        "problematic_code": "print('new')",
+        "evidence": "print('new')",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            sample_diff,
+            {"src/app.py": "import os\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == [comment]
+
+
+def test_filter_comments_rejects_context_only_claim_on_changed_anchor(sample_diff: str) -> None:
+    """It should reject comments whose problem is grounded in unchanged context."""
+    comments = [
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed line incorrectly depends on context",
+            "anchor_code": "print('new')",
+            "problematic_code": "import os",
+            "evidence": "import os",
+        },
+        {
+            "file": "src/app.py",
+            "line": 2,
+            "type": "bug",
+            "comment": "changed line references stale `import os` context",
+            "anchor_code": "print('new')",
+            "problematic_code": "print('new')",
+            "evidence": "print('new')",
+        },
+    ]
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            comments,
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == comments
+
+
+def test_filter_comments_discards_already_applied_suggestion() -> None:
+    """It should reject comments that suggest code already present in source branch."""
+    diff = "\n".join([
+        "diff --git a/UpdateDemanPlanScenario.cs b/UpdateDemanPlanScenario.cs",
+        "--- a/UpdateDemanPlanScenario.cs",
+        "+++ b/UpdateDemanPlanScenario.cs",
+        "@@ -158,1 +159,1 @@",
+        "-var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id));",
+        "+var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+    ])
+    comment = {
+        "file": "UpdateDemanPlanScenario.cs",
+        "line": 159,
+        "type": "bug",
+        "comment": "Dictionary lookup uses the old `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id)` key type.",
+        "anchor_code": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+        "problematic_code": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+        "suggestion": "Use `plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString())`.",
+        "evidence": "var relationsToUpdate = relationPlannedFiguresCollection.Where(x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            diff,
+            {
+                "UpdateDemanPlanScenario.cs": (
+                    "var relationsToUpdate = relationPlannedFiguresCollection.Where("
+                    "x => plannedFiguresToUpdate.ContainsKey(x.TargetEntity.Id.ToString()));"
+                )
+            },
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == [comment]
 
 
 def test_build_general_summary_comment_is_compact(review_config) -> None:
@@ -588,6 +804,33 @@ def test_build_general_summary_comment_is_compact(review_config) -> None:
     ])
     assert "General review" not in rendered
     assert "Automatic review generated" not in rendered
+
+
+def test_format_structured_review_text_includes_discarded_comment_details() -> None:
+    """It should expose discarded comments in the terminal/saved review text."""
+    discarded = [{
+        "file": "src/app.py",
+        "line": 42,
+        "type": "bug",
+        "severity": "high",
+        "comment": "This was not grounded on the changed line.",
+        "anchor_code": "call()",
+        "problematic_code": "call()",
+        "evidence": "call()",
+        "suggestion": "Use the changed-line anchor.",
+    }]
+
+    rendered = ai_review._format_structured_review_text(
+        [],
+        discarded_count=1,
+        discarded_grounding_comments=discarded,
+    )
+
+    assert "Discarded: Failed Source Evidence Checks" in rendered
+    assert "Logged for diagnosis only" in rendered
+    assert "src/app.py:42" in rendered
+    assert "This was not grounded on the changed line." in rendered
+    assert "Use the changed-line anchor." in rendered
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:
@@ -697,8 +940,8 @@ def test_main_prints_help_when_no_command_is_parsed(mocker) -> None:
 # cmd_init
 # ---------------------------------------------------------------------------
 
-def test_cmd_init_creates_both_files(mocker, tmp_path) -> None:
-    """It should create config.yaml and review_prompt.md in the current directory."""
+def test_cmd_init_creates_config_and_context_files(mocker, tmp_path) -> None:
+    """It should create config.yaml and both reviewer context files."""
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -710,7 +953,9 @@ def test_cmd_init_creates_both_files(mocker, tmp_path) -> None:
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "prompt-template"
+    assert "review_context.local.md" in (tmp_path / ".gitignore").read_text()
 
 
 def test_cmd_init_aborts_when_user_declines_config_overwrite(mocker, tmp_path) -> None:
@@ -724,12 +969,13 @@ def test_cmd_init_aborts_when_user_declines_config_overwrite(mocker, tmp_path) -
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "existing"
-    assert not (tmp_path / "review_prompt.md").exists()
+    assert not (tmp_path / "review_context.example.md").exists()
+    assert not (tmp_path / "review_context.local.md").exists()
 
 
-def test_cmd_init_skips_prompt_overwrite_when_user_declines(mocker, tmp_path) -> None:
-    """It should write config.yaml but keep existing review_prompt.md when user declines."""
-    (tmp_path / "review_prompt.md").write_text("existing-prompt")
+def test_cmd_init_skips_local_context_overwrite_when_user_declines(mocker, tmp_path) -> None:
+    """It should write config/example but keep existing local context on decline."""
+    (tmp_path / "review_context.local.md").write_text("existing-local")
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -742,7 +988,9 @@ def test_cmd_init_skips_prompt_overwrite_when_user_declines(mocker, tmp_path) ->
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "existing-prompt"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "existing-local"
+    assert "review_context.local.md" in (tmp_path / ".gitignore").read_text()
 
 
 def test_cmd_init_returns_error_when_template_missing(mocker, tmp_path) -> None:
@@ -760,8 +1008,8 @@ def test_cmd_init_returns_error_when_template_missing(mocker, tmp_path) -> None:
     assert result == 1
 
 
-def test_cmd_init_returns_error_when_prompt_template_missing(mocker, tmp_path) -> None:
-    """It should return 1 when the review_prompt.md template cannot be found.
+def test_cmd_init_returns_error_when_context_example_missing(mocker, tmp_path) -> None:
+    """It should return 1 when the review context example cannot be found.
 
     config.yaml is already written at that point; the function still surfaces the error.
     """
@@ -787,13 +1035,15 @@ def test_cmd_init_returns_error_when_prompt_template_missing(mocker, tmp_path) -
     assert result == 1
     # config.yaml was already written before the error
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert not (tmp_path / "review_prompt.md").exists()
+    assert not (tmp_path / "review_context.example.md").exists()
+    assert not (tmp_path / "review_context.local.md").exists()
 
 
-def test_cmd_init_overwrites_both_files_when_user_accepts(mocker, tmp_path) -> None:
-    """It should overwrite both existing files when the user confirms both prompts."""
+def test_cmd_init_overwrites_existing_files_when_user_accepts(mocker, tmp_path) -> None:
+    """It should overwrite existing init files when the user confirms prompts."""
     (tmp_path / "config.yaml").write_text("old-config")
-    (tmp_path / "review_prompt.md").write_text("old-prompt")
+    (tmp_path / "review_context.example.md").write_text("old-example")
+    (tmp_path / "review_context.local.md").write_text("old-local")
     mocker.patch("src.ai_review.os.getcwd", return_value=str(tmp_path))
     mocker.patch(
         "src.ai_review.importlib.resources.files",
@@ -806,7 +1056,8 @@ def test_cmd_init_overwrites_both_files_when_user_accepts(mocker, tmp_path) -> N
 
     assert result == 0
     assert (tmp_path / "config.yaml").read_text() == "config-template"
-    assert (tmp_path / "review_prompt.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.example.md").read_text() == "prompt-template"
+    assert (tmp_path / "review_context.local.md").read_text() == "prompt-template"
 
 
 def test_main_dispatches_to_cmd_init(mocker) -> None:
@@ -847,7 +1098,7 @@ def _fake_pkg_resources(package: str) -> _FakeResource:
         def joinpath(self, name: str) -> _FakeResource:
             if name == "config.yaml.template":
                 return _FakeResource("config-template")
-            if name == "review_prompt.md.template":
+            if name == "review_context.example.md":
                 return _FakeResource("prompt-template")
             raise FileNotFoundError(name)
 

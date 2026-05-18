@@ -13,6 +13,7 @@ Supported providers:
 """
 
 import datetime
+import importlib.resources
 import json
 import os
 
@@ -29,6 +30,7 @@ ESTIMATED_CHARS_PER_TOKEN = 3
 DEFAULT_PROMPT_TOKEN_LIMITS = {
     "bedrock": 180000,
 }
+PACKAGED_REVIEW_CONTEXT_FILE = "review_context.example.md"
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +158,27 @@ PR_COMMENT_PROMPT = {
     "pt": (
         "Analisa o diff de código de um Pull Request "
         "e retorna os teus comentários em formato JSON estruturado.\n\n"
-        "Para CADA problema encontrado, retorna um objeto JSON com:\n"
+        "Para CADA problema acionável encontrado, retorna um objeto JSON com:\n"
         '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
-        '- "line": número da linha no ficheiro novo/right-side para a linha adicionada ou modificada do PR (inteiro, ou 0 se não houver localização inline)\n'
-        '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
+        '- "line": número da linha no ficheiro novo/right-side para uma linha REVIEWABLE adicionada ou modificada do PR (inteiro > 0)\n'
+        '- "end_line": linha final exclusiva no ficheiro novo/right-side (opcional; usa line + 1 para uma única linha)\n'
+        '- "type": tipo de issue ("bug", "security", "performance", "null_safety", "data_integrity", "api_contract", "error_handling", "resource", "work_item", "suggestion")\n'
+        '- "severity": severidade ("critical", "high", "medium", "low")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
+        '- "anchor_code": citação EXATA da linha alterada marcada como REVIEWABLE que estás a criticar\n'
+        '- "problematic_code": citação EXATA do código atual da source branch que está errado\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
-        '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        '- "suggestion_replacement": texto EXATO que deve substituir o intervalo line/end_line se a correção for aplicável por suggestion block; string vazia se não tiveres a certeza\n'
+        '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n'
+        '- "evidence": citação EXATA do código da SOURCE BRANCH CODE TO VALIDATE que justifica o problema.\n\n'
+        "Foca apenas correção, null safety, edge cases, segurança, integridade de dados, contratos de API, resource management, performance relevante e alinhamento com work items. "
+        "Não retornes elogios, comentários de estilo/naming/formatação ou sugestões gerais que não sejam defeitos acionáveis. "
         "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
+        "anchor_code, problematic_code e evidence têm de existir nas linhas REVIEWABLE das âncoras permitidas da source branch. "
+        "O problema descrito tem de ser causado pela própria linha REVIEWABLE, não por uma linha apenas de contexto. "
+        "Se a sugestão já estiver aplicada no código atual da source branch, NÃO comentes. "
+        "Não comentes código que exista apenas no target branch, em linhas removidas, documentação, contexto ou ficheiros auxiliares. "
+        "Retorna no máximo 20 comentários, escolhendo os problemas de maior impacto. "
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -173,35 +187,321 @@ PR_COMMENT_PROMPT = {
         '  {\n'
         '    "file": "src/auth.py",\n'
         '    "line": 42,\n'
+        '    "end_line": 43,\n'
         '    "type": "security",\n'
         '    "severity": "high",\n'
         '    "comment": "Password armazenada em texto simples sem hashing",\n'
+        '    "anchor_code": "password = request.form[\\"password\\"]",\n'
+        '    "problematic_code": "password = request.form[\\"password\\"]",\n'
         '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
-        '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)"\n'
+        '    "suggestion_replacement": "password_hash = hash_password(request.form[\\"password\\"])",\n'
+        '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)",\n'
+        '    "evidence": "password = request.form[\\"password\\"]"\n'
         '  }\n'
         ']\n\n'
-        "Se o código estiver bom, retorna um array com um único comentário de tipo "
-        '"praise". Responde APENAS com JSON válido, sem markdown ou texto extra.'
+        "Se não houver problemas acionáveis, retorna []. "
+        "Responde APENAS com JSON válido, sem markdown ou texto extra."
     ),
     "en": (
         "Analyze the Pull Request code diff "
         "and return your comments in structured JSON format.\n\n"
-        "For EACH issue found, return a JSON object with:\n"
+        "For EACH actionable issue found, return a JSON object with:\n"
         '- "file": file path (e.g., "src/auth.py")\n'
-        '- "line": line number in the new/right-side file for the added or modified PR line (integer, or 0 if no inline location)\n'
-        '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
+        '- "line": line number in the new/right-side file for a REVIEWABLE added or modified PR line (integer > 0)\n'
+        '- "end_line": exclusive ending line in the new/right-side file (optional; use line + 1 for one line)\n'
+        '- "type": issue type ("bug", "security", "performance", "null_safety", "data_integrity", "api_contract", "error_handling", "resource", "work_item", "suggestion")\n'
+        '- "severity": severity ("critical", "high", "medium", "low")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
+        '- "anchor_code": exact quote of the REVIEWABLE changed source line being criticized\n'
+        '- "problematic_code": exact quote of the current source-branch code that is wrong\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
-        '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
+        '- "suggestion_replacement": exact replacement text for the line/end_line range if the fix can be applied as a suggestion block; empty string when unsure\n'
+        '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n'
+        '- "evidence": exact quote from SOURCE BRANCH CODE TO VALIDATE that proves the issue.\n\n'
+        "Focus only on correctness, null safety, edge cases, security, data integrity, API contracts, resource management, meaningful performance, and work-item alignment. "
+        "Do not return praise, style/naming/formatting comments, or general suggestions that are not actionable defects. "
         "Only return problem comments when file and line point to an added or modified PR line. "
+        "anchor_code, problematic_code, and evidence must exist in the REVIEWABLE allowed source-branch anchor lines. "
+        "The described issue must be caused by the REVIEWABLE changed line itself, not by a context-only line. "
+        "If the suggestion is already applied in the current source branch code, do NOT comment. "
+        "Do not comment on code that exists only in the target branch, deleted lines, documentation, context, or helper files. "
+        "Return at most 20 comments, choosing the highest-impact issues. "
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
-        "Respond ONLY with a valid JSON array. If the code looks good, return an "
-        'array with a single "praise" type comment. Respond ONLY with valid JSON.'
+        "Respond ONLY with a valid JSON array. If there are no actionable issues, "
+        "return []. Respond ONLY with valid JSON."
     ),
 }
+
+
+def build_source_branch_review_anchors(diff: str, max_chars: int = 60000) -> str:
+    """Builds the explicit source-branch lines that problem comments may target."""
+    anchors: list[str] = []
+    current_file = ""
+    current_line: int | None = None
+    truncated = False
+    used_chars = 0
+
+    for raw_line in (diff or "").splitlines():
+        if raw_line.startswith("+++ "):
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            if file_path != "/dev/null":
+                current_file = file_path[2:] if file_path.startswith("b/") else file_path
+            else:
+                current_file = ""
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            marker = raw_line.split("+", 1)[1].split(" ", 1)[0] if "+" in raw_line else ""
+            start = marker.split(",", 1)[0]
+            try:
+                current_line = int(start)
+            except ValueError:
+                current_line = 1 if raw_line.startswith("@@ Change type:") else None
+            continue
+
+        if not current_file or current_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            code = raw_line[1:]
+            line = f"- {current_file}:{current_line} | {code}"
+            line_chars = len(line) + 1
+            if used_chars + line_chars > max_chars:
+                truncated = True
+                break
+            anchors.append(line)
+            used_chars += line_chars
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    if not anchors:
+        return "[No source-branch changed lines are available as review anchors.]"
+    if truncated:
+        anchors.append("[Allowed review anchors truncated to fit prompt budget.]")
+    return "\n".join(anchors)
+
+
+def _display_review_path(path: str) -> str:
+    """Normalizes diff paths for prompt display."""
+    value = str(path or "").replace("\\", "/").strip()
+    if value.startswith(("a/", "b/")):
+        value = value[2:]
+    return value.lstrip("/")
+
+
+def _parse_hunk_ranges(header: str) -> tuple[int, int] | None:
+    """Returns target/source start lines from a unified diff hunk header."""
+    if not header.startswith("@@"):
+        return None
+
+    old_start = 0
+    new_start = 0
+    for part in header.split():
+        if part.startswith("-"):
+            try:
+                old_start = int(part[1:].split(",", 1)[0])
+            except ValueError:
+                old_start = 0
+        elif part.startswith("+"):
+            try:
+                new_start = int(part[1:].split(",", 1)[0])
+            except ValueError:
+                new_start = 0
+
+    if new_start <= 0:
+        return None
+    return old_start, new_start
+
+
+def _parse_source_file_context_blocks(source_files_context: str) -> dict[str, list[str]]:
+    """Extracts file contents from repository-context markdown blocks."""
+    files: dict[str, list[str]] = {}
+    current_path = ""
+    current_lines: list[str] = []
+    in_block = False
+
+    def flush() -> None:
+        nonlocal current_path, current_lines
+        if current_path:
+            files[_display_review_path(current_path).lower()] = current_lines
+        current_path = ""
+        current_lines = []
+
+    for line in (source_files_context or "").splitlines():
+        if line.startswith("#### "):
+            if current_path and not in_block:
+                flush()
+            current_path = line[5:].strip()
+            current_lines = []
+            in_block = False
+            continue
+
+        if not current_path:
+            continue
+
+        if line.startswith("````"):
+            if in_block:
+                in_block = False
+                flush()
+            else:
+                in_block = True
+            continue
+
+        if in_block:
+            current_lines.append(line)
+
+    if current_path:
+        flush()
+
+    return files
+
+
+def _parse_diff_review_hunks(diff: str) -> list[dict]:
+    """Parses unified diff hunks into reviewable source-line packets."""
+    hunks: list[dict] = []
+    current_file = ""
+    current_hunk: dict | None = None
+    old_line: int | None = None
+    new_line: int | None = None
+
+    def flush_hunk() -> None:
+        nonlocal current_hunk
+        if current_hunk and current_hunk["changed_lines"]:
+            hunks.append(current_hunk)
+        current_hunk = None
+
+    for raw_line in (diff or "").splitlines():
+        if raw_line.startswith("+++ "):
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            current_file = "" if file_path == "/dev/null" else _display_review_path(file_path)
+            continue
+
+        if raw_line.startswith("@@"):
+            flush_hunk()
+            ranges = _parse_hunk_ranges(raw_line)
+            if not ranges or not current_file:
+                old_line = None
+                new_line = None
+                continue
+
+            old_line, new_line = ranges
+            current_hunk = {
+                "file": current_file,
+                "header": raw_line,
+                "changed_lines": [],
+                "line_text": {},
+                "target_lines": [],
+                "source_context": [],
+            }
+            continue
+
+        if not current_hunk or old_line is None or new_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            code = raw_line[1:]
+            current_hunk["changed_lines"].append(new_line)
+            current_hunk["line_text"][new_line] = code
+            current_hunk["source_context"].append((new_line, code, True))
+            new_line += 1
+        elif raw_line.startswith(" "):
+            code = raw_line[1:]
+            current_hunk["source_context"].append((new_line, code, False))
+            old_line += 1
+            new_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            current_hunk["target_lines"].append((old_line, raw_line[1:]))
+            old_line += 1
+
+    flush_hunk()
+    return hunks
+
+
+def _render_source_local_context(
+    hunk: dict,
+    source_files: dict[str, list[str]],
+    context_radius: int,
+) -> list[str]:
+    """Renders read-only local source context around a hunk."""
+    changed_lines = hunk["changed_lines"]
+    changed_set = set(changed_lines)
+    source_lines = source_files.get(str(hunk["file"]).lower())
+    rendered: list[str] = []
+
+    if source_lines:
+        start = max(1, min(changed_lines) - context_radius)
+        end = min(len(source_lines), max(changed_lines) + context_radius)
+        for line_no in range(start, end + 1):
+            marker = "REVIEWABLE" if line_no in changed_set else "context-only"
+            rendered.append(f"{line_no} [{marker}] {source_lines[line_no - 1]}")
+        return rendered
+
+    for line_no, code, is_changed in hunk["source_context"]:
+        marker = "REVIEWABLE" if is_changed else "context-only"
+        rendered.append(f"{line_no} [{marker}] {code}")
+    return rendered
+
+
+def build_change_review_packets(
+    diff: str,
+    source_files_context: str = "",
+    context_radius: int = 4,
+    max_chars: int = 80000,
+) -> str:
+    """Builds per-hunk review packets where only changed source lines are reviewable."""
+    source_files = _parse_source_file_context_blocks(source_files_context)
+    packets: list[str] = []
+    used_chars = 0
+    truncated = False
+
+    for index, hunk in enumerate(_parse_diff_review_hunks(diff), start=1):
+        packet_lines = [
+            f"#### Change packet {index}: {hunk['file']}",
+            f"Hunk: {hunk['header']}",
+            "",
+            "Reviewable source-branch changed lines:",
+        ]
+        for line_no in hunk["changed_lines"]:
+            packet_lines.append(
+                f"- {hunk['file']}:{line_no} | {hunk['line_text'][line_no]}"
+            )
+
+        packet_lines.extend([
+            "",
+            "Target branch baseline lines (read-only, not valid evidence):",
+        ])
+        if hunk["target_lines"]:
+            for line_no, code in hunk["target_lines"]:
+                packet_lines.append(f"- target:{line_no} | {code}")
+        else:
+            packet_lines.append("- [No removed or replaced target lines in this hunk.]")
+
+        packet_lines.extend([
+            "",
+            "Source local context (read-only unless marked REVIEWABLE):",
+            *_render_source_local_context(hunk, source_files, context_radius),
+            "",
+        ])
+
+        packet = "\n".join(packet_lines)
+        packet_chars = len(packet) + 1
+        if used_chars + packet_chars > max_chars:
+            truncated = True
+            break
+        packets.append(packet)
+        used_chars += packet_chars
+
+    if not packets:
+        return "[No reviewable source-branch changed lines were found.]"
+    if truncated:
+        packets.append("[Change review packets truncated to fit prompt budget.]")
+    return "\n\n".join(packets)
 
 
 def get_system_prompt(verbosity: str, language: str) -> str:
@@ -222,14 +522,19 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     if scope == "full_code":
         if language == "en":
             return (
-                "Review scope: full_code. The diff contains only added lines (+) for each file. "
-                "Analyze the complete content of the changed files and identify issues in the new code. "
-                "Do not comment on deleted or absent code."
+                "Review scope: full_code. Full changed-file contents may be provided as read-only "
+                "support context, but inline PR comments must still target actual source-branch "
+                "changed lines from the branch comparison. Do not treat unchanged full-file lines "
+                "as reviewable code. For every problem, provide file and line (>0) for a "
+                "REVIEWABLE changed line, or return [] if there are no actionable defects."
             )
         return (
-            "Escopo de review: full_code. O diff contém apenas linhas adicionadas (+) de cada ficheiro. "
-            "Analisa o conteúdo completo dos ficheiros alterados e identifica problemas no novo código. "
-            "Não comentes código eliminado ou ausente."
+            "Escopo de review: full_code. O conteúdo completo dos ficheiros alterados pode ser "
+            "fornecido como contexto read-only, mas comentários inline do PR devem continuar a "
+            "apontar para linhas realmente alteradas da source branch na comparação entre branches. "
+            "Não trates linhas inalteradas do ficheiro completo como código reviewable. Para cada "
+            "problema, fornece file e line (>0) para uma linha REVIEWABLE alterada, ou retorna [] "
+            "se não houver defeitos acionáveis."
         )
 
     if scope == "diff_with_context":
@@ -241,11 +546,13 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                     "(-), and surrounding unchanged context. Use repository context, diff context lines, and "
                     "linked work item documentation only to understand the rest of the repository, product intent, and "
                     "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
+                    "Only lines marked REVIEWABLE in the SOURCE BRANCH CODE TO VALIDATE packets may justify problem comments. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
                     "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
                     "already exists, do not report it as missing. "
-                    "Do not emit general problem comments without file/line."
+                    "Do not emit general problem comments without file/line. "
+                    "Return [] when there are no actionable defects."
                 )
             return (
                 "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
@@ -253,11 +560,13 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "removidas (-) e contexto inalterado à volta das alterações. Usa o contexto do repositório, as "
                 "linhas de contexto do diff e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
                 "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
+                "Só linhas marcadas como REVIEWABLE nos pacotes SOURCE BRANCH CODE TO VALIDATE podem justificar comentários de problema. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
                 "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
                 "propriedade, contrato ou comportamento já existe, não o reportes como ausente. "
-                "Não emitas comentários gerais de problema sem file/line."
+                "Não emitas comentários gerais de problema sem file/line. "
+                "Retorna [] quando não houver defeitos acionáveis."
             )
 
         if language == "en":
@@ -283,14 +592,16 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "Focus exclusively on issues introduced by the new lines in this PR. "
                 "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                 "The file and line must point to a modified line in the PR diff. "
-                "Do not emit general problem comments without file/line."
+                "Do not emit general problem comments without file/line. "
+                "Return [] when there are no actionable defects."
             )
         return (
             "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
             "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
             "O file e line devem apontar para uma linha modificada no diff do PR. "
-            "Não emitas comentários gerais de problema sem file/line."
+            "Não emitas comentários gerais de problema sem file/line. "
+            "Retorna [] quando não houver defeitos acionáveis."
         )
 
     if language == "en":
@@ -306,7 +617,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
 
 def build_user_message(diff: str, files_summary: list[dict],
                        context: str = "", project_context: str = "",
-                       work_item_context: str = "") -> str:
+                       work_item_context: str = "",
+                       source_files_context: str = "") -> str:
     """
     Builds the user message with the diff and context.
     """
@@ -323,25 +635,55 @@ def build_user_message(diff: str, files_summary: list[dict],
     if context:
         parts.append(f"### Additional context:\n{context}\n")
 
+    parts.append(
+        "### CHANGE REVIEW PACKETS (SOURCE BRANCH CODE TO VALIDATE):\n"
+        "Only lines marked REVIEWABLE are valid inline comment targets and valid "
+        "source evidence. Target baseline lines and context-only source lines are "
+        "read-only support context.\n"
+        f"{build_change_review_packets(diff, source_files_context=source_files_context)}\n"
+    )
+
     if work_item_context:
         parts.append(
-            "### Linked work item documentation (read-only, not review target):\n"
+            "### Linked work item documentation (read-only support context):\n"
+            "Use this only to understand requirements. It cannot create a review "
+            "target unless the issue is grounded in a REVIEWABLE changed line.\n"
             f"{work_item_context}\n"
+        )
+
+    if source_files_context:
+        parts.append(
+            "### Source branch full files with changes applied (read-only support context):\n"
+            "These are the latest full contents of the changed files from the "
+            "source branch. Use them only to understand surrounding code. Do not "
+            "use lines from this section as evidence unless the same code appears "
+            "in a REVIEWABLE change packet line.\n"
+            f"{source_files_context}\n"
         )
 
     if project_context:
         parts.append(
-            "### Repository context (read-only, not review target):\n"
+            "### Additional source-branch repository context (read-only support context):\n"
+            "Use this only for architecture, contracts, dependencies, and call sites. "
+            "It cannot be the review target by itself.\n"
             f"{project_context}\n"
         )
 
     parts.append(
-        "### Review target:\n"
-        "Review only the PR changes below. Use all context above only to understand "
-        "the repository and requirements. Problem comments must point to added or "
-        "modified lines in this diff.\n"
+        "### TARGET BRANCH BASELINE / READ-ONLY CONTEXT:\n"
+        "Target baseline lines appear inside the change packets and raw diff only "
+        "to explain what changed. Do not comment on target-only or deleted code. "
+        "If source-branch context disagrees with target-branch baseline, the source "
+        "branch is authoritative for validation.\n"
     )
-    parts.append("### Diff for review:")
+    parts.append(
+        "### Review target:\n"
+        "Review only the REVIEWABLE source-branch changed lines in the change packets. "
+        "Use all other sections only to understand the repository and requirements. "
+        "Problem comments must point to REVIEWABLE source-branch lines and quote exact "
+        "source-branch evidence from those same lines.\n"
+    )
+    parts.append("### SOURCE BRANCH DIFF FOR REVIEW:")
     parts.append(f"```diff\n{diff}\n```")
 
     return "\n".join(parts)
@@ -368,6 +710,14 @@ def build_context_request_message(diff: str, files_summary: list[dict],
     if context:
         parts.append(f"### Additional context:\n{context}\n")
 
+    parts.append(
+        "### Change review packets (context selection only):\n"
+        "These packets show the actual source-branch changed lines and nearby "
+        "read-only context. Use them to decide which extra files are needed; do "
+        "not review the code yet.\n"
+        f"{build_change_review_packets(diff, source_files_context=changed_files_context)}\n"
+    )
+
     if work_item_context:
         parts.append(
             "### Linked work item documentation:\n"
@@ -376,7 +726,7 @@ def build_context_request_message(diff: str, files_summary: list[dict],
 
     if changed_files_context:
         parts.append(
-            "### Changed file context:\n"
+            "### SOURCE BRANCH FULL FILES WITH CHANGES APPLIED:\n"
             f"{changed_files_context}\n"
         )
 
@@ -563,6 +913,7 @@ class LLMClient:
         context: str,
         project_context: str,
         work_item_context: str,
+        source_files_context: str = "",
     ) -> str:
         """Trims repository context when the full prompt would exceed the budget."""
         limit = self._effective_prompt_token_limit()
@@ -575,6 +926,7 @@ class LLMClient:
             context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         if self._estimate_prompt_tokens(system_prompt, full_message) <= limit:
             return project_context
@@ -585,6 +937,7 @@ class LLMClient:
             context,
             project_context="",
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         base_tokens = self._estimate_prompt_tokens(system_prompt, base_message)
         available_tokens = limit - base_tokens
@@ -617,6 +970,7 @@ class LLMClient:
         context: str,
         project_context: str,
         work_item_context: str,
+        source_files_context: str = "",
     ) -> str:
         """Builds the user prompt, trimming only repo context if necessary."""
         project_context = self._trim_project_context_for_prompt_budget(
@@ -626,6 +980,7 @@ class LLMClient:
             context=context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         return build_user_message(
             diff,
@@ -633,6 +988,7 @@ class LLMClient:
             context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
 
     def request_context_files(self, diff: str, files_summary: list[dict],
@@ -648,7 +1004,7 @@ class LLMClient:
 
         system_prompt = (
             "You are selecting additional repository files for a code review. "
-            "Use the PR diff, changed file context, work item documentation, and "
+            "Use the PR diff, current source-branch changed file contents, work item documentation, and "
             "repository manifest to decide whether extra files are needed. "
             "Return JSON only. Do not review the code yet."
         )
@@ -727,25 +1083,56 @@ class LLMClient:
             files.append(path)
         return files
 
-    def _load_custom_prompt_text(self) -> str:
-        """Loads extra instructions from a configurable Markdown file."""
-        path = (self.config.custom_prompt_file or "").strip()
-        if not path:
-            return ""
-
-        abs_path = os.path.abspath(path)
-        if not os.path.isfile(abs_path):
-            return ""
-
+    @staticmethod
+    def _read_markdown_file(path: str) -> str:
+        """Reads a Markdown file, returning an empty string on failure."""
         try:
-            with open(abs_path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return f.read().strip()
         except Exception:
             return ""
 
+    @staticmethod
+    def _load_packaged_review_context_text() -> str:
+        """Loads the packaged example context used when no local file exists."""
+        try:
+            ref = importlib.resources.files("src.prompts").joinpath(
+                PACKAGED_REVIEW_CONTEXT_FILE,
+            )
+            return ref.read_text(encoding="utf-8").strip()
+        except (
+            FileNotFoundError,
+            ModuleNotFoundError,
+            OSError,
+            TypeError,
+            AttributeError,
+        ):
+            return ""
+
+    def _load_custom_prompt(self) -> tuple[str, str]:
+        """Loads exactly one active reviewer context file and its source label."""
+        path = (self.config.custom_prompt_file or "").strip()
+        if not path:
+            return "", ""
+
+        abs_path = os.path.abspath(path)
+        if os.path.isfile(abs_path):
+            return self._read_markdown_file(abs_path), abs_path
+
+        packaged_context = self._load_packaged_review_context_text()
+        if packaged_context:
+            return packaged_context, f"src/prompts/{PACKAGED_REVIEW_CONTEXT_FILE}"
+        return "", ""
+
+    def _load_custom_prompt_text(self) -> str:
+        """Loads the active reviewer context text."""
+        text, _source = self._load_custom_prompt()
+        return text
+
     def review(self, diff: str, files_summary: list[dict],
                context: str = "", review_scope: str = "diff_with_context",
-               project_context: str = "", work_item_context: str = "") -> str:
+               project_context: str = "", work_item_context: str = "",
+               source_files_context: str = "") -> str:
         """
         Sends the diff to the LLM and returns the review as text.
         """
@@ -753,7 +1140,7 @@ class LLMClient:
             self.config.verbosity,
             self.config.review_language,
         )
-        custom_prompt = self._load_custom_prompt_text()
+        custom_prompt, custom_prompt_source = self._load_custom_prompt()
 
         scope_guidance = get_scope_guidance(
             review_scope=review_scope,
@@ -766,13 +1153,13 @@ class LLMClient:
                 f"{base_prompt}\n\n"
                 f"{scope_guidance}\n\n"
                 "---\n"
-                "Custom user instructions (follow with priority):\n"
+                "Custom reviewer context (applies only inside the REVIEWABLE changed-line boundary):\n"
                 f"{custom_prompt}"
             )
             merged_context = (
-                f"{context}\n\n[Custom context loaded from {self.config.custom_prompt_file}]"
+                f"{context}\n\n[Review context loaded from {custom_prompt_source}]"
                 if context else
-                f"[Custom context loaded from {self.config.custom_prompt_file}]"
+                f"[Review context loaded from {custom_prompt_source}]"
             )
         else:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
@@ -785,13 +1172,15 @@ class LLMClient:
             context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
         return self._run_tracked_call("general_review", system_prompt, user_message)
 
     def review_pr_structured(self, diff: str, files_summary: list[dict],
                              context: str = "", review_scope: str = "diff_with_context",
                              project_context: str = "",
-                             work_item_context: str = "") -> list[dict]:
+                             work_item_context: str = "",
+                             source_files_context: str = "") -> list[dict]:
         """
         Sends the diff to the LLM and returns structured PR comments.
         
@@ -799,7 +1188,7 @@ class LLMClient:
             List of dicts with keys: file, line, type, severity, comment, suggestion
         """
         base_prompt = get_pr_comment_prompt(self.config.review_language)
-        custom_prompt = self._load_custom_prompt_text()
+        custom_prompt, custom_prompt_source = self._load_custom_prompt()
 
         scope_guidance = get_scope_guidance(
             review_scope=review_scope,
@@ -812,13 +1201,13 @@ class LLMClient:
                 f"{base_prompt}\n\n"
                 f"{scope_guidance}\n\n"
                 "---\n"
-                "Custom user instructions (follow with priority):\n"
+                "Custom reviewer context (applies only inside the REVIEWABLE changed-line boundary):\n"
                 f"{custom_prompt}"
             )
             merged_context = (
-                f"{context}\n\n[Custom context loaded from {self.config.custom_prompt_file}]"
+                f"{context}\n\n[Review context loaded from {custom_prompt_source}]"
                 if context else
-                f"[Custom context loaded from {self.config.custom_prompt_file}]"
+                f"[Review context loaded from {custom_prompt_source}]"
             )
         else:
             system_prompt = f"{base_prompt}\n\n{scope_guidance}"
@@ -831,6 +1220,7 @@ class LLMClient:
             context=merged_context,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
 
         raw = self._run_tracked_call(
@@ -869,28 +1259,32 @@ class LLMClient:
             if not isinstance(comments, list):
                 comments = [comments]
         except json.JSONDecodeError:
-            # Fallback: return as a general comment
-            return [{
-                "file": "",
-                "line": 0,
-                "type": "suggestion",
-                "severity": "info",
-                "comment": raw_response,
-                "suggestion": "",
-                "reference": "",
-            }]
+            return []
 
         # Validate and normalize each comment
         validated = []
         for c in comments:
+            try:
+                line = int(c.get("line", 0))
+            except (TypeError, ValueError):
+                line = 0
+            try:
+                end_line = int(c.get("end_line", 0) or 0)
+            except (TypeError, ValueError):
+                end_line = 0
             validated.append({
                 "file": str(c.get("file", "")),
-                "line": int(c.get("line", 0)),
+                "line": line,
+                "end_line": end_line,
                 "type": str(c.get("type", "suggestion")),
                 "severity": str(c.get("severity", "info")),
                 "comment": str(c.get("comment", "")),
+                "anchor_code": str(c.get("anchor_code", "")),
+                "problematic_code": str(c.get("problematic_code", "")),
                 "suggestion": str(c.get("suggestion", "")),
+                "suggestion_replacement": str(c.get("suggestion_replacement", "")),
                 "reference": str(c.get("reference", "")),
+                "evidence": str(c.get("evidence", "")),
             })
         return validated
 

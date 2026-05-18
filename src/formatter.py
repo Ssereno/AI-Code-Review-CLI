@@ -229,13 +229,13 @@ class ReviewFormatter:
 
     def format_structured_comments(self, comments: list[dict],
                                    discarded_count: int = 0) -> str:
-        """Formats LLM structured comments for terminal preview."""
+        """Formats grounded structured comments for terminal preview."""
         c = Colors
         if not comments:
             if discarded_count > 0:
                 return (
                     f"\n{c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                    f"because they were outside changed PR lines.{c.RESET}\n"
+                    f"by grounding, changed-line, or duplicate checks.{c.RESET}\n"
                 )
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
@@ -267,7 +267,7 @@ class ReviewFormatter:
         if discarded_count > 0:
             lines.append(
                 f"  {c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                f"because they were outside changed PR lines.{c.RESET}"
+                f"by grounding, changed-line, or duplicate checks.{c.RESET}"
             )
             lines.append("")
 

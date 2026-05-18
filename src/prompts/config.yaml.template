@@ -86,18 +86,23 @@ review:
   #   diff_with_context (default): reviews PR changes with unified diff,
   #     project, and work-item context
   #   diff_only: reviews only differences introduced in the PR
-  #   full_code: allows full code review of changed files
+  #   full_code: uses full changed files as context, while inline comments
+  #     still require actual PR changed-line anchors
   scope: diff_with_context
 
-  # Markdown file with custom rules/context for the prompt
-  # The content of this file is injected into LLM instructions on each review
-  # custom_prompt_file: review_prompt.md
+  # Local Markdown file with reviewer context. When this file is missing,
+  # the packaged src/prompts/review_context.example.md is used instead.
+  custom_prompt_file: review_context.local.md
 
   # Limit of diff files sent to the LLM (remaining files are omitted)
   max_diff_files: 50
 
   # Limit of diff lines per file (larger sections are truncated)
   max_diff_lines: 4500
+
+  # Maximum actionable inline comments posted/shown per review.
+  # The tool keeps the highest-severity findings when the model returns more.
+  max_comments_to_post: 20
 
   # Filter by file extensions (empty list = all files)
   # Example: [".py", ".js", ".cs", ".ts"]

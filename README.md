@@ -11,7 +11,7 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
 - **Project-aware PR Context** — Sends repository and linked work item context while restricting findings to modified PR lines
-- **Customizable Prompts** — Markdown-based review guidelines
+- **Single Reviewer Context** — One Markdown context file with local override support
 - **Usage Tracking** — Store per-PR token usage and optional cost estimates
 - **Interactive CLI** — Menu-driven selection and confirmation
 
@@ -52,7 +52,9 @@ ai-review init
 
 Creates:
 - `config.yaml` — LLM and review settings
-- `review_prompt.md` — Customizable review guidelines
+- `review_context.example.md` — Canonical example reviewer context
+- `review_context.local.md` — Local reviewer context override, ignored by git
+- `.gitignore` entry for `review_context.local.md`
 
 ### 3. Run Your First Review
 
@@ -93,6 +95,8 @@ review:
   scope: diff_with_context             # diff_with_context, diff_only, full_code
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
+  max_comments_to_post: 20
+  custom_prompt_file: review_context.local.md
   project_context:
     enabled: true
     mode: on_demand                      # on_demand, full
@@ -106,13 +110,26 @@ review:
     max_items: 20
 ```
 
-By default, repository context is loaded on demand: the prompt includes the PR
-diff, full changed-file contents, linked work item documentation, and a
-repository manifest, then the model requests any extra files it needs. Set
+By default, repository context is loaded on demand: the prompt includes explicit
+source-branch change packets, full changed-file contents as read-only context,
+linked work item documentation, and a repository manifest, then the model
+requests any extra files it needs. Inline PR comments must still be grounded in
+actual changed lines from the change packets. Set
 `review.project_context.mode: full` to send the full eligible repository
 snapshot instead. Bedrock uses a default estimated prompt budget of 180000
 tokens; override it with `llm.max_prompt_tokens` if your model supports more or
 less.
+
+Reviewer context is loaded from exactly one Markdown file. By default the CLI
+uses `review_context.local.md` when it exists, otherwise it falls back to the
+packaged `src/prompts/review_context.example.md`. Keep local team tweaks in
+`review_context.local.md`; it is gitignored so the canonical context cannot
+drift across machines.
+
+For Copilot-backed reviews, Claude Sonnet models are often strong choices for
+large PR validation, for example `llm.provider: copilot` with a Claude Sonnet
+model available to your organization. The tool still enforces the same
+source-branch grounding, duplicate checks, and comment cap regardless of model.
 
 ## Development & Testing
 

@@ -277,7 +277,7 @@ def test_get_pr_changed_files_handles_error_paths(mocker) -> None:
 
 
 def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
-    """It should build diffs using the selected review scope."""
+    """It should always build PR review diffs from target/source branch comparison."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -290,8 +290,9 @@ def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
     full_code = mocker.patch("src.tfs_client.TFSClient._build_full_code_diff_part", return_value=["FULL"])
     unified = mocker.patch("src.tfs_client.TFSClient._build_unified_diff_part", return_value=["UNIFIED"])
 
-    assert "FULL" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
-    assert full_code.called
+    assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
+    assert unified.called
+    assert not full_code.called
 
     mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -301,6 +302,7 @@ def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
             {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
         ],
     )
+    unified.reset_mock()
     assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1)
     assert unified.called
 
@@ -341,6 +343,18 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "+new" in full[4]
     assert unified[0].startswith("diff --git")
     assert get_file.call_count == 3
+    assert get_file.call_args_list[0].kwargs == {
+        "version": "feature",
+        "version_type": "branch",
+    }
+    assert get_file.call_args_list[1].kwargs == {
+        "version": "main",
+        "version_type": "branch",
+    }
+    assert get_file.call_args_list[2].kwargs == {
+        "version": "feature",
+        "version_type": "branch",
+    }
 
     mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=RuntimeError("boom"))
     fallback_full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
@@ -490,13 +504,39 @@ def test_get_changed_and_requested_file_contexts_validate_paths(mocker) -> None:
         file_max_chars=1000,
     )
 
-    assert "Changed file context" in changed_context
+    assert "Source branch full files with changes applied" in changed_context
     assert "/src/app.py" in changed_context
     assert "deleted.py" not in changed_context
     assert "Requested repository context" in requested_context
     assert "/src/helper.py" in requested_context
     assert "#### /assets/logo.png" not in requested_context
     assert "secret" in requested_context
+    assert get_file.call_count == 2
+    assert all(call.kwargs["version"] == "feature/context" for call in get_file.call_args_list)
+    assert all(call.kwargs["version_type"] == "branch" for call in get_file.call_args_list)
+
+
+def test_get_source_file_contents_fetches_latest_source_branch(mocker) -> None:
+    """It should fetch comment validation content from the current source branch."""
+    client = TFSClient(make_tfs_config())
+    get_file = mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["print('x')", RuntimeError("missing")],
+    )
+
+    contents = client.get_source_file_contents(
+        "repo-a",
+        "refs/heads/feature/current",
+        ["src/app.py", "src/app.py", "missing.py"],
+    )
+
+    assert contents == {"src/app.py": "print('x')"}
+    get_file.assert_any_call(
+        "repo-a",
+        "/src/app.py",
+        version="feature/current",
+        version_type="branch",
+    )
     assert get_file.call_count == 2
 
 
@@ -549,6 +589,84 @@ def test_get_work_item_context_fetches_linked_documentation(mocker) -> None:
     assert details_call.kwargs["api_version"] == "7.1"
 
 
+def test_work_item_context_retries_without_relations_expand(mocker) -> None:
+    """It should keep work item docs when a server rejects field plus relation expansion."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            TFSError("400 Client Error: Bad Request"),
+            {
+                "value": [
+                    {
+                        "id": 12976,
+                        "fields": {
+                            "System.Title": "Checkout validation",
+                            "System.WorkItemType": "User Story",
+                            "System.State": "Active",
+                            "System.Description": "<p>Validate checkout totals</p>",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["System.Description"],
+        work_item_ids=[12976],
+    )
+
+    assert "Work Item 12976: Checkout validation" in context
+    assert "Validate checkout totals" in context
+    first_details_call = get_mock.call_args_list[0]
+    retry_call = get_mock.call_args_list[1]
+    assert first_details_call.args[1]["$expand"] == "relations"
+    assert "$expand" not in retry_call.args[1]
+    assert retry_call.kwargs["api_version"] == "7.1"
+
+
+def test_work_item_context_falls_back_to_individual_items(mocker) -> None:
+    """It should fetch individual work items if compatible list requests all fail."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[TFSError("bad request")] * 9 + [
+            {
+                "id": 101,
+                "fields": {
+                    "System.Title": "Checkout validation",
+                    "System.WorkItemType": "User Story",
+                    "System.State": "Active",
+                    "System.Description": "<p>Validate checkout totals</p>",
+                },
+                "relations": [
+                    {
+                        "rel": "Hyperlink",
+                        "url": "https://example.invalid/spec",
+                        "attributes": {"comment": "Spec"},
+                    }
+                ],
+            },
+        ],
+    )
+
+    context = client.get_work_item_context(
+        "repo-a",
+        42,
+        fields=["System.Description"],
+        work_item_ids=[101],
+    )
+
+    assert "Work Item 101: Checkout validation" in context
+    assert "Spec: https://example.invalid/spec" in context
+    individual_call = get_mock.call_args_list[-1]
+    assert individual_call.args[0] == "wit/workitems/101"
+    assert individual_call.args[1]["$expand"] == "all"
+
+
 def test_work_item_context_always_requests_description(mocker) -> None:
     """It should include work item descriptions even with custom field settings."""
     client = TFSClient(make_tfs_config())
@@ -594,7 +712,18 @@ def test_raw_get_and_comment_endpoints(mocker) -> None:
 
     post_mock = mocker.patch("src.tfs_client.TFSClient._post", return_value={"id": 10})
     patch_mock = mocker.patch("src.tfs_client.TFSClient._patch", return_value={"id": 11})
-    get_mock = mocker.patch("src.tfs_client.TFSClient._get", return_value={"value": [{"id": 3}]})
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"value": [{"id": 3}]},
+            {"changeEntries": [
+                {
+                    "item": {"path": "/src/app.py"},
+                    "changeTrackingId": 44,
+                }
+            ]},
+        ],
+    )
 
     assert client.post_general_comment("repo-a", 1, "hello")["id"] == 10
     inline = client.post_inline_comment("repo-a", 1, "src/app.py", 7, "msg", right_file=False)
@@ -603,6 +732,8 @@ def test_raw_get_and_comment_endpoints(mocker) -> None:
     _, payload = post_mock.call_args.args[:2]
     assert payload["threadContext"]["filePath"] == "/src/app.py"
     assert payload["threadContext"]["leftFileStart"]["line"] == 7
+    assert payload["threadContext"]["leftFileEnd"]["line"] == 8
+    assert payload["pullRequestThreadContext"]["changeTrackingId"] == 44
     assert client.reply_to_thread("repo-a", 1, 5, "reply")["id"] == 10
     assert client.update_thread_status("repo-a", 1, 5, "fixed")["id"] == 11
     patch_mock.assert_called_once()
@@ -685,6 +816,39 @@ def test_plan_review_comments_skips_duplicates_and_reopens_fixed_tool_comments(m
     assert fixed_plan["resolved_reappeared"][0]["status"] == "fixed"
 
 
+def test_plan_review_comments_detects_visible_ai_marker_duplicates(mocker) -> None:
+    """It should treat existing visible #AI comments at the same line as duplicates."""
+    client = TFSClient(make_tfs_config())
+    comment = {
+        "file": "src/app.py",
+        "line": 7,
+        "type": "bug",
+        "severity": "high",
+        "comment": "New wording from the latest run",
+    }
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "value": [
+                {
+                    "id": 10,
+                    "status": 1,
+                    "threadContext": {
+                        "filePath": "/src/app.py",
+                        "rightFileStart": {"line": 7},
+                    },
+                    "comments": [{"content": "`#AI`\n\nBug: Older wording"}],
+                }
+            ]
+        },
+    )
+
+    plan = client.plan_review_comments("repo-a", 1, [comment])
+
+    assert plan["new_comments"] == []
+    assert plan["skipped_duplicates"][0]["is_tool_comment"] is True
+
+
 def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
     """It should activate the old thread and add a tagged re-check reply."""
     client = TFSClient(make_tfs_config())
@@ -713,6 +877,41 @@ def test_reopen_resolved_tool_comments_tags_recheck_reply(mocker) -> None:
     reply_body = reply.call_args.args[3]
     assert "ai-code-review-cli" in reply_body
     assert "AI Code Review re-check" in reply_body
+
+
+def test_format_review_comment_uses_visible_marker_and_safe_suggestion_blocks() -> None:
+    """It should emit TFS suggestion blocks only for matching line ranges."""
+    client = TFSClient(make_tfs_config())
+
+    valid = client._format_review_comment(
+        {
+            "file": "src/app.py",
+            "line": 7,
+            "end_line": 8,
+            "type": "bug",
+            "severity": "high",
+            "comment": "Use the safe helper",
+            "suggestion": "Replace the unsafe call",
+            "suggestion_replacement": "safe_call()",
+        }
+    )
+    mismatch = client._format_review_comment(
+        {
+            "file": "src/app.py",
+            "line": 7,
+            "end_line": 9,
+            "type": "bug",
+            "severity": "high",
+            "comment": "Use the safe helper",
+            "suggestion": "Replace both unsafe calls",
+            "suggestion_replacement": "safe_call()",
+        }
+    )
+
+    assert "`#AI`" in valid
+    assert "```suggestion\nsafe_call()\n```" in valid
+    assert "```suggestion" not in mismatch
+    assert "```" in mismatch
 
 
 def test_repository_helpers_and_status_formatting(mocker) -> None:

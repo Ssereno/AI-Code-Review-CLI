@@ -107,6 +107,7 @@ DEFAULT_WORK_ITEM_CONTEXT_FIELDS = list(WORK_ITEM_CONTEXT_FIELD_LABELS)
 TOOL_COMMENT_MARKER = "<!-- ai-code-review-cli -->"
 TOOL_COMMENT_KIND_PREFIX = "<!-- ai-code-review-kind:"
 TOOL_COMMENT_FINGERPRINT_PREFIX = "<!-- ai-code-review-fingerprint:"
+VISIBLE_TOOL_COMMENT_MARKER = "`#AI`"
 
 THREAD_STATUS_NAMES = {
     1: "active",
@@ -420,8 +421,6 @@ class TFSClient:
         )
         changes = self._get(changes_path)
 
-        review_scope = (review_scope or "diff_with_context").lower()
-
         # Build diff from the changes
         diff_parts = []
         for change in changes.get("changeEntries", []):
@@ -431,18 +430,6 @@ class TFSClient:
             original_path = change.get("originalPath") or file_path
 
             if item.get("isFolder"):
-                continue
-
-            if review_scope == "full_code":
-                diff_parts.extend(
-                    self._build_full_code_diff_part(
-                        repository=repository,
-                        file_path=file_path,
-                        change_type=change_type,
-                        source_branch=source_branch,
-                    )
-                )
-                diff_parts.append("")
                 continue
 
             diff_parts.extend(
@@ -745,10 +732,11 @@ class TFSClient:
             repository=repository,
             branch_name=branch_name,
             requested_paths=paths,
-            title="Changed file context",
+            title="Source branch full files with changes applied",
             intro=(
-                "These are the full contents of files changed by the PR. Use them "
-                "for context, but keep findings anchored to changed PR lines."
+                "These are the latest source branch contents of files changed by "
+                "the PR. Use them as read-only support context, but keep findings "
+                "anchored to actual changed PR lines."
             ),
             max_files=len(paths) if paths else 1,
             max_chars=max_chars,
@@ -784,6 +772,35 @@ class TFSClient:
             file_extensions=file_extensions,
             exclude_patterns=exclude_patterns,
         )
+
+    def get_source_file_contents(self, repository: str, branch: str,
+                                 requested_paths: list[str]) -> dict[str, str]:
+        """Fetches latest source-branch file contents keyed by normalized path."""
+        branch_name = (branch or "").replace("refs/heads/", "")
+        if not branch_name or not requested_paths:
+            return {}
+
+        contents: dict[str, str] = {}
+        seen: set[str] = set()
+        for requested_path in requested_paths:
+            normalized = self._normalize_context_path(requested_path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            file_path = str(requested_path or "").replace("\\", "/").strip()
+            if file_path and not file_path.startswith("/"):
+                file_path = f"/{file_path}"
+            try:
+                content = self._get_file_content(
+                    repository,
+                    file_path,
+                    version=branch_name,
+                    version_type="branch",
+                )
+            except Exception:
+                continue
+            contents[normalized] = content
+        return contents
 
     def _get_project_context_paths(self, repository: str, branch_name: str,
                                    file_extensions: Optional[list[str]] = None,
@@ -1016,16 +1033,14 @@ class TFSClient:
     def get_work_item_context(self, repository: str, pr_id: int,
                               max_items: int = 20,
                               max_chars: int = 100000,
-                              fields: Optional[list[str]] = None) -> str:
+                              fields: Optional[list[str]] = None,
+                              work_item_ids: Optional[list[int]] = None) -> str:
         """
         Builds read-only context from documentation fields on PR-linked work items.
         """
-        refs = self._list_pull_request_work_items(repository, pr_id)
-        ids = [
-            int(ref["id"])
-            for ref in refs
-            if str(ref.get("id", "")).isdigit()
-        ]
+        ids = work_item_ids if work_item_ids is not None else (
+            self.list_pull_request_work_item_ids(repository, pr_id)
+        )
         if not ids:
             return ""
 
@@ -1084,6 +1099,15 @@ class TFSClient:
 
         return "\n".join(parts).strip()
 
+    def list_pull_request_work_item_ids(self, repository: str, pr_id: int) -> list[int]:
+        """Lists numeric work item IDs associated with a pull request."""
+        refs = self._list_pull_request_work_items(repository, pr_id)
+        return [
+            int(ref["id"])
+            for ref in refs
+            if str(ref.get("id", "")).isdigit()
+        ]
+
     def _list_pull_request_work_items(self, repository: str, pr_id: int) -> list[dict]:
         """Lists work item references associated with a pull request."""
         path = f"git/repositories/{repository}/pullRequests/{pr_id}/workitems"
@@ -1091,26 +1115,94 @@ class TFSClient:
         return data.get("value", [])
 
     def _get_work_items(self, ids: list[int], fields: list[str]) -> list[dict]:
-        """Fetches work item details, falling back if optional fields are unavailable."""
-        params = {
-            "ids": ",".join(str(item_id) for item_id in ids),
-            "fields": ",".join(fields),
-            "$expand": "relations",
-            "errorPolicy": "Omit",
-        }
-        try:
-            data = self._get("wit/workitems", params, api_version="7.1")
-        except TFSError:
-            required_fields = [
-                "System.Title",
-                "System.WorkItemType",
-                "System.State",
-                "System.Description",
-            ]
-            params["fields"] = ",".join(required_fields)
-            data = self._get("wit/workitems", params, api_version="7.1")
+        """Fetches work item details across TFS/Azure DevOps API variants."""
+        required_fields = [
+            "System.Title",
+            "System.WorkItemType",
+            "System.State",
+            "System.Description",
+        ]
+        candidate_field_sets = [
+            fields,
+            [field for field in required_fields if field in fields],
+        ]
+        field_sets: list[list[str]] = []
+        seen_field_sets: set[tuple[str, ...]] = set()
+        for candidate_fields in candidate_field_sets:
+            key = tuple(candidate_fields)
+            if key and key not in seen_field_sets:
+                seen_field_sets.add(key)
+                field_sets.append(candidate_fields)
+        versions = ["7.1", "7.0", "6.0"]
+        errors: list[str] = []
 
-        return data.get("value", [])
+        for selected_fields in field_sets:
+            if not selected_fields:
+                continue
+            for version in versions:
+                for include_relations, include_error_policy in [
+                    (True, True),
+                    (False, True),
+                    (False, False),
+                ]:
+                    params = {
+                        "ids": ",".join(str(item_id) for item_id in ids),
+                        "fields": ",".join(selected_fields),
+                    }
+                    if include_relations:
+                        params["$expand"] = "relations"
+                    if include_error_policy:
+                        params["errorPolicy"] = "Omit"
+
+                    try:
+                        data = self._get(
+                            "wit/workitems",
+                            params,
+                            api_version=version,
+                        )
+                    except TFSError as exc:
+                        errors.append(str(exc))
+                        continue
+
+                    work_items = data.get("value", [])
+                    if work_items:
+                        return work_items
+
+        individual = self._get_work_items_individually(ids, versions, errors)
+        if individual:
+            return individual
+
+        if errors:
+            raise TFSError(
+                "Could not fetch work item details after trying compatible "
+                f"TFS/Azure DevOps request shapes. Last error: {errors[-1]}"
+            )
+        return []
+
+    def _get_work_items_individually(
+        self,
+        ids: list[int],
+        versions: list[str],
+        errors: list[str],
+    ) -> list[dict]:
+        """Fetches work items one by one as a compatibility fallback."""
+        for version in versions:
+            work_items = []
+            for item_id in ids:
+                try:
+                    data = self._get(
+                        f"wit/workitems/{item_id}",
+                        {"$expand": "all"},
+                        api_version=version,
+                    )
+                except TFSError as exc:
+                    errors.append(str(exc))
+                    continue
+                if data:
+                    work_items.append(data)
+            if work_items:
+                return work_items
+        return []
 
     def _resolve_work_item_fields(self, fields: Optional[list[str]]) -> list[str]:
         """Returns deduplicated work item fields, preserving required metadata."""
@@ -1291,7 +1383,8 @@ class TFSClient:
     def post_inline_comment(self, repository: str, pr_id: int,
                             file_path: str, line: int, comment: str,
                             status: str = "active",
-                            right_file: bool = True) -> dict:
+                            right_file: bool = True,
+                            end_line: Optional[int] = None) -> dict:
         """
         Posts an inline comment on a specific line of a PR file.
         
@@ -1312,21 +1405,28 @@ class TFSClient:
         if not file_path.startswith("/"):
             file_path = f"/{file_path}"
 
-        # Get most recent iteration
-        iterations_path = f"git/repositories/{repository}/pullrequests/{pr_id}/iterations"
-        iterations = self._get(iterations_path)
-        if not iterations.get("value"):
-            raise TFSError(f"PR #{pr_id} has no iterations.")
-        last_iteration = iterations["value"][-1]["id"]
+        last_iteration = self._get_latest_iteration_id(repository, pr_id)
+        change_tracking_id = self._get_change_tracking_id(
+            repository,
+            pr_id,
+            last_iteration,
+            file_path,
+        )
+        try:
+            end_line = int(end_line or 0)
+        except (TypeError, ValueError):
+            end_line = 0
+        if end_line <= line:
+            end_line = line + 1
 
         path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
 
         thread_context = {
             "filePath": file_path,
             "rightFileStart": {"line": line, "offset": 1} if right_file else None,
-            "rightFileEnd": {"line": line, "offset": 1} if right_file else None,
+            "rightFileEnd": {"line": end_line, "offset": 1} if right_file else None,
             "leftFileStart": {"line": line, "offset": 1} if not right_file else None,
-            "leftFileEnd": {"line": line, "offset": 1} if not right_file else None,
+            "leftFileEnd": {"line": end_line, "offset": 1} if not right_file else None,
         }
         # Remover Nones
         thread_context = {k: v for k, v in thread_context.items() if v is not None}
@@ -1346,10 +1446,46 @@ class TFSClient:
                     "firstComparingIteration": 1,
                     "secondComparingIteration": last_iteration,
                 },
-                "changeTrackingId": 0,
+                "changeTrackingId": change_tracking_id,
             },
         }
         return self._post(path, data)
+
+    def _get_latest_iteration_id(self, repository: str, pr_id: int) -> int:
+        """Returns the latest PR iteration ID."""
+        iterations_path = f"git/repositories/{repository}/pullrequests/{pr_id}/iterations"
+        iterations = self._get(iterations_path)
+        if not iterations.get("value"):
+            raise TFSError(f"PR #{pr_id} has no iterations.")
+        return int(iterations["value"][-1]["id"])
+
+    def _get_change_tracking_id(
+        self,
+        repository: str,
+        pr_id: int,
+        iteration_id: int,
+        file_path: str,
+    ) -> int:
+        """Returns the Azure DevOps changeTrackingId for a PR file."""
+        changes_path = (
+            f"git/repositories/{repository}/pullrequests/{pr_id}"
+            f"/iterations/{iteration_id}/changes"
+        )
+        changes = self._get(changes_path, {"$top": 200})
+        target_path = self._normalize_path(file_path)
+
+        for change in changes.get("changeEntries", []) or []:
+            item = change.get("item", {}) or {}
+            candidate_paths = [
+                item.get("path", ""),
+                change.get("originalPath", ""),
+            ]
+            if any(self._normalize_path(path) == target_path for path in candidate_paths):
+                change_tracking_id = change.get("changeTrackingId")
+                if change_tracking_id is not None:
+                    return int(change_tracking_id)
+
+        raise TFSError(f"Could not find changeTrackingId for {file_path}.")
 
     def reply_to_thread(self, repository: str, pr_id: int,
                         thread_id: int, comment: str) -> dict:
@@ -1464,14 +1600,18 @@ class TFSClient:
 
             file_path = c.get("file", "")
             line = c.get("line", 0)
-            comment_type = str(c.get("type", "")).lower()
-            is_problem = comment_type not in ("praise", "")
+            end_line = c.get("end_line", 0) or None
 
             try:
                 if use_inline_comments and file_path and line > 0:
                     # Inline comment
                     result = self.post_inline_comment(
-                        repository, pr_id, file_path, line, text
+                        repository,
+                        pr_id,
+                        file_path,
+                        line,
+                        text,
+                        end_line=end_line,
                     )
                 else:
                     # No inline position: post as general PR comment
@@ -1496,7 +1636,10 @@ class TFSClient:
 
     def _format_review_comment(self, comment: dict) -> str:
         """Formats and tags a structured comment for Azure DevOps Markdown."""
-        body = self._format_review_comment_body(comment)
+        body = "\n\n".join([
+            VISIBLE_TOOL_COMMENT_MARKER,
+            self._format_review_comment_body(comment),
+        ])
         return self.tag_tool_comment(
             body,
             self._comment_fingerprint(comment),
@@ -1509,23 +1652,36 @@ class TFSClient:
             "bug": "Bug",
             "security": "Security",
             "performance": "Performance",
-            "style": "Code Style",
+            "null_safety": "Bug",
+            "data_integrity": "Bug",
+            "api_contract": "Bug",
+            "error_handling": "Bug",
+            "resource": "Bug",
+            "work_item": "Bug",
             "suggestion": "Suggestion",
-            "praise": "Positive",
         }
 
-        severity = comment.get("severity", "info")
         comment_type = comment.get("type", "suggestion")
         label = type_labels.get(comment_type, comment_type.title())
 
-        parts = [f"**{label}** ({severity.upper()})"]
-        parts.append("")
-        parts.append(comment.get("comment", ""))
+        parts = [f"{label}: {comment.get('comment', '')}".strip()]
 
         suggestion = comment.get("suggestion", "")
         if suggestion:
             parts.append("")
-            parts.append(f"**Suggestion:** {suggestion}")
+            parts.append("**Suggested fix:**")
+            suggestion_block = self._format_suggestion_block(comment)
+            if suggestion_block:
+                parts.append(suggestion_block)
+            else:
+                parts.append(suggestion)
+
+                replacement = str(comment.get("suggestion_replacement", "")).strip()
+                if replacement:
+                    parts.append("")
+                    parts.append("```")
+                    parts.append(replacement)
+                    parts.append("```")
 
         reference = comment.get("reference", "")
         if reference:
@@ -1533,6 +1689,36 @@ class TFSClient:
             parts.append(f"**Reference:** {reference}")
 
         return "\n".join(parts)
+
+    def _format_suggestion_block(self, comment: dict) -> str:
+        """Formats a TFS suggestion block when the replacement line count is valid."""
+        if "suggestion_replacement" not in comment:
+            return ""
+
+        replacement = str(comment.get("suggestion_replacement", ""))
+        if replacement == "":
+            return ""
+        try:
+            line = int(comment.get("line", 0))
+            end_line = int(comment.get("end_line", 0) or 0)
+        except (TypeError, ValueError):
+            return ""
+
+        if line <= 0:
+            return ""
+        if end_line <= line:
+            end_line = line + 1
+
+        range_line_count = end_line - line
+        replacement_line_count = len(replacement.splitlines())
+        if replacement_line_count != range_line_count:
+            return ""
+
+        return "\n".join([
+            "```suggestion",
+            replacement,
+            "```",
+        ])
 
     def tag_tool_comment(self, text: str, fingerprint: str,
                          kind: str = "comment") -> str:
@@ -1543,7 +1729,7 @@ class TFSClient:
             f"{TOOL_COMMENT_FINGERPRINT_PREFIX}{fingerprint} -->",
         ]
         body = text.strip()
-        if "AI Code Review" not in body:
+        if "AI Code Review" not in body and VISIBLE_TOOL_COMMENT_MARKER not in body:
             body = (
                 f"{body}\n\n"
                 "---\n"
@@ -1600,13 +1786,17 @@ class TFSClient:
                 continue
 
             for existing_comment in thread.get("comments", []) or []:
+                raw_body = str(existing_comment.get("content", ""))
+                if VISIBLE_TOOL_COMMENT_MARKER in raw_body:
+                    return self._build_existing_comment_match(thread, raw_body)
+
                 body = self._normalize_for_match(
-                    self._strip_tool_metadata(existing_comment.get("content", ""))
+                    self._strip_tool_metadata(raw_body)
                 )
                 if current_text in body:
                     return self._build_existing_comment_match(
                         thread,
-                        str(existing_comment.get("content", "")),
+                        raw_body,
                     )
 
         return None
@@ -1616,7 +1806,10 @@ class TFSClient:
         return {
             "thread_id": thread.get("id"),
             "status_name": self._thread_status_name(thread.get("status")),
-            "is_tool_comment": TOOL_COMMENT_MARKER in body,
+            "is_tool_comment": (
+                TOOL_COMMENT_MARKER in body
+                or VISIBLE_TOOL_COMMENT_MARKER in body
+            ),
         }
 
     def _thread_matches_comment_location(self, thread: dict, comment: dict) -> bool:
@@ -1659,6 +1852,7 @@ class TFSClient:
         """Removes hidden tool metadata tags before text comparisons."""
         value = str(text or "")
         value = re.sub(r"<!--\s*ai-code-review-[^>]*-->\s*", "", value)
+        value = value.replace(VISIBLE_TOOL_COMMENT_MARKER, "")
         return value
 
     def _normalize_for_match(self, value: object) -> str:

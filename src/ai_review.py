@@ -334,7 +334,10 @@ def _review_scope_context_note(review_scope: str) -> str:
             "limited to modified PR lines."
         )
     if scope == "full_code":
-        return "Review is running in full_code mode for changed file contents."
+        return (
+            "Review is running in full_code mode; full changed files are context, "
+            "but comments remain limited to actual PR changes."
+        )
     return "Review is running in diff_only mode."
 
 
@@ -354,6 +357,241 @@ def _build_general_summary_comment(config: ReviewConfig,
         f"**Scope:** {config.review_scope}",
         f"**Ran at:** {timestamp}",
     ])
+
+
+def _comment_location(comment: dict) -> str:
+    """Formats a comment location for diagnostic output."""
+    file_path = str(comment.get("file", "") or "general")
+    line = comment.get("line", 0)
+    end_line = comment.get("end_line", 0)
+    if line and end_line and end_line > line + 1:
+        return f"{file_path}:{line}-{end_line - 1}"
+    if line:
+        return f"{file_path}:{line}"
+    return file_path
+
+
+def _append_comment_diagnostics(
+    lines: list[str],
+    title: str,
+    comments: list[dict],
+) -> None:
+    """Appends discarded or skipped comments for terminal/save diagnostics."""
+    if not comments:
+        return
+
+    lines.append("")
+    lines.append(f"### {title}")
+    lines.append(
+        "Logged for diagnosis only; these comments are not eligible for posting."
+    )
+
+    for index, comment in enumerate(comments, 1):
+        comment_type = str(comment.get("type", "suggestion")).title()
+        severity = str(comment.get("severity", "info")).upper()
+        lines.append("")
+        lines.append(
+            f"{index}. {_comment_location(comment)} - {comment_type} ({severity})"
+        )
+
+        body = str(comment.get("comment", "")).strip()
+        if body:
+            lines.append(f"   Comment: {body}")
+
+        for label, key in (
+            ("Anchor", "anchor_code"),
+            ("Problematic code", "problematic_code"),
+            ("Evidence", "evidence"),
+            ("Suggestion", "suggestion"),
+            ("Reference", "reference"),
+        ):
+            value = str(comment.get(key, "")).strip()
+            if value:
+                lines.append(f"   {label}: {value}")
+
+
+def _format_structured_review_text(
+    comments: list[dict],
+    *,
+    discarded_count: int = 0,
+    duplicate_count: int = 0,
+    resolved_reappeared_count: int = 0,
+    metadata_issues: list[str] | None = None,
+    discarded_location_comments: list[dict] | None = None,
+    discarded_grounding_comments: list[dict] | None = None,
+    discarded_changed_line_comments: list[dict] | None = None,
+    capped_comments: list[dict] | None = None,
+    duplicate_comments: list[dict] | None = None,
+) -> str:
+    """Builds the terminal/saved review with kept and diagnostic comments."""
+    lines: list[str] = ["## Structured Review"]
+    metadata_issues = metadata_issues or []
+    discarded_location_comments = discarded_location_comments or []
+    discarded_grounding_comments = discarded_grounding_comments or []
+    discarded_changed_line_comments = discarded_changed_line_comments or []
+    capped_comments = capped_comments or []
+    duplicate_comments = duplicate_comments or []
+
+    if metadata_issues:
+        lines.append("")
+        lines.append("## PR Metadata Checks")
+        for issue in metadata_issues:
+            lines.append(f"- {issue}")
+        lines.append("")
+
+    if comments:
+        plural = "s" if len(comments) != 1 else ""
+        lines.append(
+            f"{len(comments)} actionable comment{plural} passed the structured "
+            "grounding checks."
+        )
+        lines.append("")
+
+        for index, comment in enumerate(comments, 1):
+            file_path = str(comment.get("file", "") or "general")
+            line = comment.get("line", 0)
+            location = f"{file_path}:{line}" if line else file_path
+            comment_type = str(comment.get("type", "suggestion")).title()
+            severity = str(comment.get("severity", "info")).upper()
+
+            lines.append(f"### {index}. {location} - {comment_type} ({severity})")
+            body = str(comment.get("comment", "")).strip()
+            if body:
+                lines.append(body)
+
+            problematic_code = str(comment.get("problematic_code", "")).strip()
+            if problematic_code:
+                lines.append("")
+                lines.append(f"**Problematic code:** `{problematic_code}`")
+
+            suggestion = str(comment.get("suggestion", "")).strip()
+            if suggestion:
+                lines.append("")
+                lines.append(f"**Suggestion:** {suggestion}")
+
+            reference = str(comment.get("reference", "")).strip()
+            if reference:
+                lines.append("")
+                lines.append(f"**Reference:** {reference}")
+
+            lines.append("")
+    else:
+        lines.append(
+            "No actionable comments passed the structured grounding checks."
+        )
+        lines.append("")
+
+    if discarded_count or duplicate_count or resolved_reappeared_count:
+        lines.append("## Comment Checks")
+        if discarded_count:
+            lines.append(
+                f"- {discarded_count} generated comment(s) were discarded by "
+                "grounding or changed-line validation."
+            )
+        if duplicate_count:
+            lines.append(
+                f"- {duplicate_count} generated comment(s) were skipped because "
+                "matching tool comments already exist on the PR."
+            )
+        if resolved_reappeared_count:
+            lines.append(
+                f"- {resolved_reappeared_count} resolved/closed tool comment(s) "
+                "still appear in the latest structured review."
+            )
+
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Outside Changed Source Lines",
+        discarded_location_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Failed Source Evidence Checks",
+        discarded_grounding_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Failed Final Changed-Line Check",
+        discarded_changed_line_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Omitted: Lower Priority Than Comment Limit",
+        capped_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Skipped: Duplicate Existing PR Comments",
+        duplicate_comments,
+    )
+
+    return "\n".join(lines).strip()
+
+
+def _build_pr_metadata_issues(
+    pr_details: dict,
+    *,
+    linked_work_item_count: int | None = None,
+) -> list[str]:
+    """Returns PR metadata issues that should be surfaced with the review."""
+    issues: list[str] = []
+
+    if not str(pr_details.get("title", "")).strip():
+        issues.append("PR title is empty.")
+
+    if not str(pr_details.get("description", "")).strip():
+        issues.append("PR description is empty.")
+
+    merge_status = str(pr_details.get("merge_status", "") or "").strip()
+    if merge_status.lower() != "succeeded":
+        issues.append(
+            f"PR merge status is '{merge_status or 'unknown'}' instead of 'succeeded'."
+        )
+
+    if bool(pr_details.get("is_draft", False)):
+        issues.append("PR is marked as draft.")
+
+    if linked_work_item_count == 0:
+        issues.append("PR has no linked work items.")
+
+    return issues
+
+
+def _severity_rank(comment: dict) -> int:
+    """Returns a sortable severity rank for comment prioritization."""
+    ranks = {
+        "critical": 0,
+        "high": 1,
+        "medium": 2,
+        "low": 3,
+        "info": 4,
+    }
+    return ranks.get(str(comment.get("severity", "info")).lower(), 4)
+
+
+def _limit_comments_to_post(
+    comments: list[dict],
+    max_comments: int,
+) -> tuple[list[dict], list[dict]]:
+    """Keeps only the highest-impact comments up to the configured cap."""
+    if max_comments <= 0 or len(comments) <= max_comments:
+        return comments, []
+
+    indexed = list(enumerate(comments))
+    ordered = sorted(
+        indexed,
+        key=lambda item: (_severity_rank(item[1]), item[0]),
+    )
+    kept_indexes = {index for index, _ in ordered[:max_comments]}
+    kept = [
+        comment for index, comment in indexed
+        if index in kept_indexes
+    ]
+    omitted = [
+        comment for index, comment in indexed
+        if index not in kept_indexes
+    ]
+    return kept, omitted
 
 
 def _normalize_review_path(path: object) -> str:
@@ -404,6 +642,187 @@ def _changed_lines_by_file(diff: str) -> dict[str, set[int]]:
     return {path: lines for path, lines in changed_lines.items() if lines}
 
 
+def _source_changed_hunks_by_file(diff: str) -> dict[str, list[dict]]:
+    """Extracts source-branch hunk text and added line anchors from a diff."""
+    hunks: dict[str, list[dict]] = {}
+    current_file = ""
+    current_line: int | None = None
+    current_hunk: dict | None = None
+    hunk_re = re.compile(r"@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+    def flush_hunk() -> None:
+        nonlocal current_hunk
+        if current_file and current_hunk and current_hunk["added_lines"]:
+            current_hunk["text"] = "\n".join(current_hunk["source_lines"])
+            hunks.setdefault(current_file, []).append(current_hunk)
+        current_hunk = None
+
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("+++ "):
+            flush_hunk()
+            file_path = raw_line[4:].strip().split("\t", 1)[0]
+            current_file = (
+                _normalize_review_path(file_path)
+                if file_path != "/dev/null" else ""
+            )
+            current_line = None
+            continue
+
+        if raw_line.startswith("@@"):
+            flush_hunk()
+            match = hunk_re.match(raw_line)
+            if match:
+                current_line = int(match.group(1))
+            elif raw_line.startswith("@@ Change type:"):
+                current_line = 1
+            else:
+                current_line = None
+            current_hunk = {
+                "added_lines": set(),
+                "source_lines": [],
+                "line_text": {},
+                "text": "",
+            }
+            continue
+
+        if not current_file or current_line is None or current_hunk is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            code = raw_line[1:]
+            current_hunk["added_lines"].add(current_line)
+            current_hunk["source_lines"].append(code)
+            current_hunk["line_text"][current_line] = code
+            current_line += 1
+        elif raw_line.startswith(" "):
+            current_hunk["source_lines"].append(raw_line[1:])
+            current_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+    flush_hunk()
+    return hunks
+
+
+def _text_contains_evidence(text: str, evidence: str) -> bool:
+    """Returns whether evidence is grounded in source text."""
+    evidence = str(evidence or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not evidence:
+        return False
+    if evidence in text:
+        return True
+    evidence_lines = [line.strip() for line in evidence.splitlines() if line.strip()]
+    source_lines = [line.strip() for line in text.splitlines()]
+    if not evidence_lines:
+        return False
+    return all(
+        any(evidence_line == source_line for source_line in source_lines)
+        for evidence_line in evidence_lines
+    )
+
+
+def _comment_line_range(comment: dict) -> tuple[int, int]:
+    """Returns the source-branch line range targeted by a comment."""
+    try:
+        start = int(comment.get("line", 0))
+    except (TypeError, ValueError):
+        start = 0
+
+    try:
+        end = int(comment.get("end_line", 0) or 0)
+    except (TypeError, ValueError):
+        end = 0
+
+    if start <= 0:
+        return 0, 0
+    if end <= start:
+        end = start + 1
+    return start, end
+
+
+def _source_text_for_range(source_text: str, start: int, end: int) -> str:
+    """Returns source file text for a 1-based, end-exclusive line range."""
+    if start <= 0 or end <= start:
+        return ""
+    lines = str(source_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(lines[start - 1:end - 1])
+
+
+def _quoted_code_terms(*parts: str) -> list[str]:
+    """Extracts quoted/backticked code terms that a comment claims to discuss."""
+    text = "\n".join(str(part or "") for part in parts)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", text):
+        term = next(group for group in match.groups() if group is not None).strip()
+        if len(term) < 3:
+            continue
+        if not re.search(r"[A-Za-z_]", term):
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+    return terms
+
+
+def _comment_mentions_absent_source_terms(comment: dict, source_text: str) -> bool:
+    """Detects quoted code terms in the comment that are absent from source code."""
+    for term in _quoted_code_terms(
+        comment.get("comment", ""),
+        comment.get("problematic_code", ""),
+        comment.get("evidence", ""),
+    ):
+        if term not in source_text:
+            return True
+    return False
+
+
+def _comment_mentions_non_anchor_terms(comment: dict, anchor_text: str) -> bool:
+    """Detects quoted claim terms that are absent from the reviewable anchor."""
+    for term in _quoted_code_terms(
+        comment.get("comment", ""),
+        comment.get("anchor_code", ""),
+        comment.get("problematic_code", ""),
+        comment.get("evidence", ""),
+    ):
+        if term not in anchor_text:
+            return True
+    return False
+
+
+def _changed_text_for_required_lines(hunk: dict, required_lines: set[int]) -> str:
+    """Returns the exact changed source text covered by a comment range."""
+    line_text = hunk.get("line_text", {})
+    lines = []
+    for line_no in sorted(required_lines):
+        if line_no not in line_text:
+            return ""
+        lines.append(str(line_text[line_no]))
+    return "\n".join(lines)
+
+
+def _suggestion_already_applied(comment: dict, anchor_text: str, source_text: str) -> bool:
+    """Detects comments that suggest code already present in source branch."""
+    problematic_code = str(comment.get("problematic_code", "")).strip()
+    line, end_line = _comment_line_range(comment)
+    source_range = _source_text_for_range(source_text, line, end_line).strip()
+    suggestion_replacement = str(comment.get("suggestion_replacement", "")).strip()
+    if suggestion_replacement and source_range and suggestion_replacement == source_range:
+        return True
+
+    for suggested_code in _quoted_code_terms(comment.get("suggestion", "")):
+        if not suggested_code or suggested_code == problematic_code:
+            continue
+        if _text_contains_evidence(anchor_text, suggested_code):
+            return True
+        if _text_contains_evidence(source_text, suggested_code):
+            return True
+    return False
+
+
 def _filter_comments_to_changed_lines(comments: list[dict],
                                       diff: str) -> tuple[list[dict], list[dict]]:
     """Keeps problem comments only when they point to added PR diff lines."""
@@ -413,22 +832,117 @@ def _filter_comments_to_changed_lines(comments: list[dict],
 
     for comment in comments:
         comment_type = str(comment.get("type", "")).lower()
-        if comment_type == "praise":
-            kept.append(comment)
-            continue
 
         file_path = _normalize_review_path(comment.get("file", ""))
-        try:
-            line = int(comment.get("line", 0))
-        except (TypeError, ValueError):
-            line = 0
+        line, end_line = _comment_line_range(comment)
+        required_lines = set(range(line, end_line))
 
-        if file_path and line > 0 and line in changed_lines.get(file_path, set()):
+        if (
+            comment_type not in ("praise", "style", "")
+            and file_path
+            and required_lines
+            and required_lines.issubset(changed_lines.get(file_path, set()))
+        ):
             kept.append(comment)
         else:
             discarded.append(comment)
 
     return kept, discarded
+
+
+def _filter_comments_to_grounded_source_lines(
+    comments: list[dict],
+    diff: str,
+    source_file_contents: dict[str, str] | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Keeps problem comments only when grounded in source-branch changed code."""
+    source_file_contents = source_file_contents or {}
+    source_file_contents = {
+        _normalize_review_path(path): content
+        for path, content in source_file_contents.items()
+    }
+    hunks_by_file = _source_changed_hunks_by_file(diff)
+    kept: list[dict] = []
+    discarded_location: list[dict] = []
+    discarded_grounding: list[dict] = []
+
+    for comment in comments:
+        comment_type = str(comment.get("type", "")).lower()
+        if comment_type in ("praise", "style", ""):
+            discarded_location.append(comment)
+            continue
+
+        file_path = _normalize_review_path(comment.get("file", ""))
+        line, end_line = _comment_line_range(comment)
+        required_lines = set(range(line, end_line))
+
+        hunk = next(
+            (
+                item for item in hunks_by_file.get(file_path, [])
+                if required_lines.issubset(item.get("added_lines", set()))
+            ),
+            None,
+        )
+        if not file_path or not required_lines or hunk is None:
+            discarded_location.append(comment)
+            continue
+
+        evidence = str(comment.get("evidence", "")).strip()
+        anchor_code = str(comment.get("anchor_code", "")).strip()
+        problematic_code = str(comment.get("problematic_code", "")).strip()
+        anchor_text = _changed_text_for_required_lines(hunk, required_lines)
+        source_text = source_file_contents.get(file_path)
+        has_full_source_text = source_text is not None
+        if source_text is None:
+            source_text = anchor_text
+        source_range = (
+            _source_text_for_range(source_text, line, end_line)
+            if has_full_source_text else anchor_text
+        )
+
+        if not anchor_text:
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, anchor_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(anchor_text, evidence):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_range, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_text, problematic_code):
+            discarded_grounding.append(comment)
+            continue
+
+        if not _text_contains_evidence(source_text, evidence):
+            discarded_grounding.append(comment)
+            continue
+
+        if _comment_mentions_absent_source_terms(comment, source_text):
+            discarded_grounding.append(comment)
+            continue
+
+        if _comment_mentions_non_anchor_terms(comment, anchor_text):
+            discarded_grounding.append(comment)
+            continue
+
+        if _suggestion_already_applied(comment, anchor_text, source_text):
+            discarded_grounding.append(comment)
+            continue
+
+        kept.append(comment)
+
+    return kept, discarded_location, discarded_grounding
 
 
 def _join_context_sections(*sections: str) -> str:
@@ -448,36 +962,14 @@ def _build_on_demand_project_context(
     formatter: ReviewFormatter,
     repo_name: str,
     source_branch: str,
-    changed_files: list[dict],
     diff: str,
     files_summary: list[dict],
     user_context: str,
     work_item_context: str,
+    source_files_context: str,
 ) -> str:
     """Builds repository context by letting the model request files from a manifest."""
-    changed_files_context = ""
     project_manifest = ""
-
-    try:
-        changed_files_context = tfs.get_changed_files_context(
-            repo_name,
-            source_branch,
-            changed_files,
-            max_chars=config.project_context_retrieval_max_chars,
-            file_max_chars=config.project_context_retrieval_file_max_chars,
-            file_extensions=config.project_context_file_extensions,
-            exclude_patterns=config.project_context_exclude_patterns,
-        )
-    except Exception as exc:
-        print(formatter.format_warning(
-            f"Could not load changed file context; continuing with diff only: {exc}"
-        ))
-
-    if changed_files_context:
-        print(formatter.format_info(
-            f"Changed file context loaded ({len(changed_files_context):,} characters). "
-            f"{_review_scope_context_note(config.review_scope)}"
-        ))
 
     try:
         project_manifest = tfs.get_project_manifest(
@@ -493,7 +985,7 @@ def _build_on_demand_project_context(
         ))
 
     if not project_manifest:
-        return changed_files_context
+        return ""
 
     print(formatter.format_info(
         f"Repository manifest loaded ({len(project_manifest):,} characters). "
@@ -513,7 +1005,7 @@ def _build_on_demand_project_context(
             files_summary=files_summary,
             project_manifest=project_manifest,
             context=user_context,
-            changed_files_context=changed_files_context,
+            changed_files_context=source_files_context,
             work_item_context=work_item_context,
             fetched_context=fetched_context,
             max_files=remaining_files,
@@ -561,7 +1053,7 @@ def _build_on_demand_project_context(
             f"On-demand repository context loaded ({len(fetched_context):,} characters)."
         ))
 
-    return _join_context_sections(changed_files_context, fetched_context)
+    return fetched_context
 
 
 def _get_llm_usage_events(llm: LLMClient) -> list:
@@ -601,6 +1093,7 @@ def _store_pr_usage(
     dry_run: bool,
     comments_generated: int,
     usage_events: list,
+    metadata_issues: list[str] | None = None,
 ) -> None:
     """Persists token usage for a completed PR review."""
     if not config.usage_tracking_enabled or not usage_events:
@@ -618,6 +1111,7 @@ def _store_pr_usage(
             comments_generated=comments_generated,
             events=usage_events,
             pricing_config=config.usage_pricing,
+            metadata_issues=metadata_issues,
         )
         path = append_usage_record(config.usage_file, record)
         print(formatter.format_info(f"{_format_usage_summary(record)} -> {path}"))
@@ -659,6 +1153,9 @@ def _format_usage_pr_list(summaries: list[dict], usage_file: str) -> str:
             f"(input {tokens.get('prompt_tokens', 0)}, "
             f"output {tokens.get('completion_tokens', 0)}) | Cost: {cost}"
         )
+        metadata_issue_count = int(summary.get("metadata_issue_count", 0) or 0)
+        if metadata_issue_count:
+            lines.append(f"       Metadata issues: {metadata_issue_count}")
         lines.append(f"       {c.DIM}Latest: {latest}{c.RESET}")
         lines.append("")
 
@@ -736,6 +1233,11 @@ def _format_usage_details(summary: dict) -> str:
             "    Missing pricing: "
             + ", ".join(summary.get("missing_pricing", []))
         )
+
+    metadata_issues = summary.get("metadata_issues") or []
+    if metadata_issues:
+        lines.extend(["", f"{c.BOLD}  Metadata Issues{c.RESET}"])
+        lines.extend(f"    - {issue}" for issue in metadata_issues)
 
     providers = ", ".join(summary.get("providers", [])) or "unknown"
     models = ", ".join(summary.get("models", [])) or "unknown"
@@ -958,17 +1460,37 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         ))
 
     use_contextual_review = review_scope == "diff_with_context"
+    load_changed_file_context = review_scope in ("diff_with_context", "full_code")
 
     work_item_context = ""
+    linked_work_item_ids: list[int] | None = None
     if use_contextual_review and config.work_item_context_enabled:
         print(formatter.format_progress("Getting documentation from linked work items"))
         try:
+            linked_work_item_ids = tfs.list_pull_request_work_item_ids(
+                repo_name,
+                pr_id,
+            )
+            if not isinstance(linked_work_item_ids, list):
+                linked_work_item_ids = None
+        except TFSError as exc:
+            linked_work_item_ids = None
+            print(formatter.format_warning(
+                f"Could not inspect linked work items for metadata checks: {exc}"
+            ))
+
+        try:
+            work_item_kwargs = {
+                "max_items": config.work_item_context_max_items,
+                "max_chars": config.work_item_context_max_chars,
+                "fields": config.work_item_context_fields,
+            }
+            if linked_work_item_ids is not None:
+                work_item_kwargs["work_item_ids"] = linked_work_item_ids
             work_item_context = tfs.get_work_item_context(
                 repo_name,
                 pr_id,
-                max_items=config.work_item_context_max_items,
-                max_chars=config.work_item_context_max_chars,
-                fields=config.work_item_context_fields,
+                **work_item_kwargs,
             )
         except TFSError as exc:
             print(formatter.format_warning(
@@ -979,6 +1501,42 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         if work_item_context:
             print(formatter.format_info(
                 f"Linked work item documentation loaded ({len(work_item_context):,} characters). "
+                f"{_review_scope_context_note(config.review_scope)}"
+            ))
+
+    metadata_issues = _build_pr_metadata_issues(
+        pr_details,
+        linked_work_item_count=(
+            len(linked_work_item_ids)
+            if linked_work_item_ids is not None else None
+        ),
+    )
+    for issue in metadata_issues:
+        print(formatter.format_warning(f"PR metadata: {issue}"))
+
+    source_files_context = ""
+    if load_changed_file_context and config.project_context_enabled:
+        print(formatter.format_progress(
+            "Getting full source-branch contents for changed files"
+        ))
+        try:
+            source_files_context = tfs.get_changed_files_context(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                pr_details.get("changed_files", []),
+                max_chars=config.project_context_retrieval_max_chars,
+                file_max_chars=config.project_context_retrieval_file_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not load source-branch changed file contents; continuing with diff only: {exc}"
+            ))
+
+        if source_files_context:
+            print(formatter.format_info(
+                f"Source-branch changed file contents loaded ({len(source_files_context):,} characters). "
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
 
@@ -1027,11 +1585,11 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 formatter=formatter,
                 repo_name=repo_name,
                 source_branch=pr_details.get("source_branch", ""),
-                changed_files=pr_details.get("changed_files", []),
                 diff=diff_truncated,
                 files_summary=files_summary,
                 user_context=getattr(args, "context", ""),
                 work_item_context=work_item_context,
+                source_files_context=source_files_context,
             )
     except LLMError as exc:
         print(formatter.format_error(str(exc)))
@@ -1043,17 +1601,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     start_time = time.time()
 
     try:
-        # Get general review as text
-        review_text = llm.review(
-            diff=diff_truncated,
-            files_summary=files_summary,
-            context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
-            project_context=project_context,
-            work_item_context=work_item_context,
-        )
-
-        # Get structured comments to post
         structured_comments = llm.review_pr_structured(
             diff=diff_truncated,
             files_summary=files_summary,
@@ -1061,19 +1608,58 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             review_scope=config.review_scope,
             project_context=project_context,
             work_item_context=work_item_context,
+            source_files_context=source_files_context,
         )
     except LLMError as exc:
         progress.stop()
         print(formatter.format_error(str(exc)))
         return 1
 
-    structured_comments, discarded_comments = _filter_comments_to_changed_lines(
-        structured_comments,
-        diff_truncated,
+    source_file_contents = {}
+    comment_paths = [
+        comment.get("file", "")
+        for comment in structured_comments
+        if comment.get("file")
+    ]
+    if comment_paths:
+        try:
+            source_file_contents = tfs.get_source_file_contents(
+                repo_name,
+                pr_details.get("source_branch", ""),
+                comment_paths,
+            )
+            if not isinstance(source_file_contents, dict):
+                source_file_contents = {}
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not verify source-branch file contents; using diff anchors only: {exc}"
+            ))
+
+    structured_comments, discarded_comments, discarded_ungrounded = (
+        _filter_comments_to_grounded_source_lines(
+            structured_comments,
+            diff_truncated,
+            source_file_contents,
+        )
     )
     if discarded_comments:
         print(formatter.format_info(
-            f"Discarded {len(discarded_comments)} comment(s) outside changed PR lines."
+            f"Discarded {len(discarded_comments)} comment(s) outside changed source-branch lines."
+        ))
+    if discarded_ungrounded:
+        print(formatter.format_info(
+            f"Discarded {len(discarded_ungrounded)} comment(s) without source-branch evidence."
+        ))
+
+    # Preserve the old location-only filter as a final guard in case future
+    # changes bypass the evidence gate.
+    structured_comments, extra_discarded_comments = _filter_comments_to_changed_lines(
+        structured_comments,
+        diff_truncated,
+    )
+    if extra_discarded_comments:
+        print(formatter.format_info(
+            f"Discarded {len(extra_discarded_comments)} comment(s) outside changed PR lines."
         ))
 
     existing_threads = []
@@ -1101,6 +1687,35 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             "still appear in the latest review."
         ))
 
+    structured_comments, capped_comments = _limit_comments_to_post(
+        structured_comments,
+        config.max_comments_to_post,
+    )
+    if capped_comments:
+        print(formatter.format_info(
+            f"Limited review output to the top {config.max_comments_to_post} "
+            f"comment(s); omitted {len(capped_comments)} lower-priority comment(s)."
+        ))
+
+    total_discarded_comments = (
+        len(discarded_comments)
+        + len(discarded_ungrounded)
+        + len(extra_discarded_comments)
+        + len(capped_comments)
+    )
+    review_text = _format_structured_review_text(
+        structured_comments,
+        discarded_count=total_discarded_comments,
+        duplicate_count=len(skipped_duplicates),
+        resolved_reappeared_count=len(resolved_reappeared),
+        metadata_issues=metadata_issues,
+        discarded_location_comments=discarded_comments,
+        discarded_grounding_comments=discarded_ungrounded,
+        discarded_changed_line_comments=extra_discarded_comments,
+        capped_comments=capped_comments,
+        duplicate_comments=skipped_duplicates,
+    )
+
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
 
@@ -1112,6 +1727,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         dry_run=dry_run,
         comments_generated=len(structured_comments),
         usage_events=_get_llm_usage_events(llm),
+        metadata_issues=metadata_issues,
     )
 
     # --- Show general review ---
@@ -1120,7 +1736,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # --- Show structured comments preview ---
     print(formatter.format_structured_comments(
         structured_comments,
-        discarded_count=len(discarded_comments),
+        discarded_count=total_discarded_comments + len(skipped_duplicates),
     ))
 
     output_file = config.output_file or getattr(args, "output", "")
@@ -1531,17 +2147,44 @@ def _show_config(config: ReviewConfig) -> None:
 # ---------------------------------------------------------------------------
 # Init command
 # ---------------------------------------------------------------------------
+def _ensure_local_context_gitignored(cwd: str, c: Colors) -> None:
+    """Ensures the generated local reviewer context is ignored by git."""
+    gitignore_dest = os.path.join(cwd, ".gitignore")
+    ignore_entry = "review_context.local.md"
+
+    try:
+        existing = ""
+        if os.path.exists(gitignore_dest):
+            with open(gitignore_dest, "r", encoding="utf-8") as fh:
+                existing = fh.read()
+            if any(line.strip() == ignore_entry for line in existing.splitlines()):
+                return
+
+        with open(gitignore_dest, "a", encoding="utf-8") as fh:
+            if existing and not existing.endswith(("\n", "\r")):
+                fh.write("\n")
+            fh.write(f"{ignore_entry}\n")
+
+        print(f"{c.GREEN}✅ .gitignore updated with:{c.RESET} {ignore_entry}")
+    except OSError as exc:
+        print(
+            f"{c.YELLOW}Warning: could not update .gitignore for "
+            f"{ignore_entry}: {exc}{c.RESET}"
+        )
+
+
 def cmd_init() -> int:
-    """Copies a config.yaml template and review_prompt.md to the current working directory.
+    """Copies config.yaml and reviewer context files to the current directory.
 
-    Creates a ``config.yaml`` file pre-populated with all available options
-    and inline documentation, and a ``review_prompt.md`` file with default
-    review style rules. If either file already exists in the current directory
-    the user is prompted for confirmation before overwriting.
+    Creates a ``config.yaml`` file pre-populated with all available options,
+    a kept ``review_context.example.md`` file, and a user-editable
+    ``review_context.local.md`` file. The local context file is added to
+    ``.gitignore``. Existing files are preserved unless the user confirms
+    overwrite.
 
-    Both files are bundled with the package at ``src/prompts/`` and are
-    resolved at runtime via :mod:`importlib.resources`, so they work
-    regardless of how the package was installed.
+    The templates are bundled with the package at ``src/prompts/`` and are
+    resolved at runtime via :mod:`importlib.resources`, so they work regardless
+    of how the package was installed.
 
     Returns:
         int: Exit code. ``0`` on success or user cancellation, ``1`` on error.
@@ -1551,8 +2194,10 @@ def cmd_init() -> int:
 
             $ ai-review init
             ✅ config.yaml created at: /home/user/my-project/config.yaml
-            ✅ review_prompt.md created at: /home/user/my-project/review_prompt.md
-               Edit them to add your credentials, preferences and review rules.
+            ✅ review_context.example.md created at: /home/user/my-project/review_context.example.md
+            ✅ review_context.local.md created at: /home/user/my-project/review_context.local.md
+            ✅ .gitignore updated with: review_context.local.md
+               Edit config.yaml and review_context.local.md for local settings.
     """
     cwd = os.getcwd()
     c = Colors()
@@ -1576,29 +2221,30 @@ def cmd_init() -> int:
     with open(config_dest, "w", encoding="utf-8") as fh:
         fh.write(config_content)
 
-    # --- review_prompt.md ---
-    prompt_dest = os.path.join(cwd, "review_prompt.md")
-    if os.path.exists(prompt_dest):
-        print(f"{c.YELLOW}review_prompt.md already exists in the current directory.{c.RESET}")
-        answer = input("Overwrite? [y/N] ").strip().lower()
-        if answer != "y":
-            print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
-            print("   Skipped review_prompt.md (kept existing).")
-            return 0
-
     try:
-        ref = importlib.resources.files("src.prompts").joinpath("review_prompt.md.template")
+        ref = importlib.resources.files("src.prompts").joinpath("review_context.example.md")
         prompt_content = ref.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError) as exc:
-        print(f"{c.RED}Error: could not locate review_prompt template: {exc}{c.RESET}")
+        print(f"{c.RED}Error: could not locate review context example: {exc}{c.RESET}")
         return 1
 
-    with open(prompt_dest, "w", encoding="utf-8") as fh:
-        fh.write(prompt_content)
-
     print(f"{c.GREEN}✅ config.yaml created at:{c.RESET} {config_dest}")
-    print(f"{c.GREEN}✅ review_prompt.md created at:{c.RESET} {prompt_dest}")
-    print("   Edit them to add your credentials, preferences and review rules.")
+    for filename in ("review_context.example.md", "review_context.local.md"):
+        prompt_dest = os.path.join(cwd, filename)
+        if os.path.exists(prompt_dest):
+            print(f"{c.YELLOW}{filename} already exists in the current directory.{c.RESET}")
+            answer = input("Overwrite? [y/N] ").strip().lower()
+            if answer != "y":
+                print(f"   Skipped {filename} (kept existing).")
+                continue
+
+        with open(prompt_dest, "w", encoding="utf-8") as fh:
+            fh.write(prompt_content)
+
+        print(f"{c.GREEN}✅ {filename} created at:{c.RESET} {prompt_dest}")
+
+    _ensure_local_context_gitignored(cwd, c)
+    print("   Edit config.yaml and review_context.local.md for local settings.")
     return 0
 
 
