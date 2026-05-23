@@ -519,24 +519,6 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     """Returns additional instructions based on the review scope."""
     scope = (review_scope or "diff_with_context").lower()
 
-    if scope == "full_code":
-        if language == "en":
-            return (
-                "Review scope: full_code. Full changed-file contents may be provided as read-only "
-                "support context, but inline PR comments must still target actual source-branch "
-                "changed lines from the branch comparison. Do not treat unchanged full-file lines "
-                "as reviewable code. For every problem, provide file and line (>0) for a "
-                "REVIEWABLE changed line, or return [] if there are no actionable defects."
-            )
-        return (
-            "Escopo de review: full_code. O conteúdo completo dos ficheiros alterados pode ser "
-            "fornecido como contexto read-only, mas comentários inline do PR devem continuar a "
-            "apontar para linhas realmente alteradas da source branch na comparação entre branches. "
-            "Não trates linhas inalteradas do ficheiro completo como código reviewable. Para cada "
-            "problema, fornece file e line (>0) para uma linha REVIEWABLE alterada, ou retorna [] "
-            "se não houver defeitos acionáveis."
-        )
-
     if scope == "diff_with_context":
         if structured:
             if language == "en":

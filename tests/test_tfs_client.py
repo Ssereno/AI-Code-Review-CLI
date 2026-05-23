@@ -276,93 +276,6 @@ def test_get_pr_changed_files_handles_error_paths(mocker) -> None:
     assert client._get_pr_changed_files("repo-a", 1) == [{"path": "/file.py", "change_type": "edit", "original_path": "/old.py"}]
 
 
-def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
-    """It should always build PR review diffs from target/source branch comparison."""
-    client = TFSClient(make_tfs_config())
-    mocker.patch(
-        "src.tfs_client.TFSClient._get",
-        side_effect=[
-            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
-            {"value": [{"id": 2}]},
-            {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
-        ],
-    )
-    full_code = mocker.patch("src.tfs_client.TFSClient._build_full_code_diff_part", return_value=["FULL"])
-    unified = mocker.patch("src.tfs_client.TFSClient._build_unified_diff_part", return_value=["UNIFIED"])
-
-    assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
-    assert unified.called
-    assert not full_code.called
-
-    mocker.patch(
-        "src.tfs_client.TFSClient._get",
-        side_effect=[
-            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
-            {"value": [{"id": 2}]},
-            {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
-        ],
-    )
-    unified.reset_mock()
-    assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1)
-    assert unified.called
-
-
-def test_get_pull_request_diff_raises_for_missing_iterations_or_changes(mocker) -> None:
-    """It should raise when the PR has no iterations or no files."""
-    client = TFSClient(make_tfs_config())
-    mocker.patch(
-        "src.tfs_client.TFSClient._get",
-        side_effect=[
-            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
-            {"value": []},
-        ],
-    )
-    with pytest.raises(TFSError, match="has no iterations"):
-        client.get_pull_request_diff("repo-a", 1)
-
-    mocker.patch(
-        "src.tfs_client.TFSClient._get",
-        side_effect=[
-            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
-            {"value": [{"id": 1}]},
-            {"changeEntries": []},
-        ],
-    )
-    with pytest.raises(TFSError, match="contains no file changes"):
-        client.get_pull_request_diff("repo-a", 1)
-
-
-def test_build_diff_parts_and_file_content(mocker) -> None:
-    """It should build full-code and unified diff payloads from file content."""
-    client = TFSClient(make_tfs_config())
-    get_file = mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=["new\ncontent", "old", "new"])
-
-    full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
-    unified = client._build_unified_diff_part("repo-a", "/a.py", "/a.py", "edit", "refs/heads/feature", "refs/heads/main")
-
-    assert "+new" in full[4]
-    assert unified[0].startswith("diff --git")
-    assert get_file.call_count == 3
-    assert get_file.call_args_list[0].kwargs == {
-        "version": "feature",
-        "version_type": "branch",
-    }
-    assert get_file.call_args_list[1].kwargs == {
-        "version": "main",
-        "version_type": "branch",
-    }
-    assert get_file.call_args_list[2].kwargs == {
-        "version": "feature",
-        "version_type": "branch",
-    }
-
-    mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=RuntimeError("boom"))
-    fallback_full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
-    no_text = client._build_unified_diff_part("repo-a", "/a.py", "/a.py", "edit", "refs/heads/feature", "refs/heads/main")
-    assert "Content not available" in fallback_full[-1]
-    assert "No textual differences detected" in no_text[-1]
-
-
 def test_get_project_context_fetches_source_branch_files(mocker) -> None:
     """It should build repository context from the PR source branch."""
     client = TFSClient(make_tfs_config())
@@ -945,3 +858,69 @@ def test_repository_helpers_and_status_formatting(mocker) -> None:
     assert client.get_repository_id("repo-a") == "1"
     with pytest.raises(TFSError, match="not found"):
         client.get_repository_id("missing")
+
+
+# ==============================================================
+# obter_dados_pr — new method tests
+# ==============================================================
+
+def test_obter_dados_pr_happy_path(mocker) -> None:
+    """It should return (target_ref, source_ref) on a valid API response."""
+    client = TFSClient(make_tfs_config(tfs_repository="my-repo"))
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "targetRefName": "refs/heads/main",
+            "sourceRefName": "refs/heads/feature/my-branch",
+        },
+    )
+
+    target_ref, source_ref = client.obter_dados_pr(42)
+
+    assert target_ref == "origin/main"
+    assert source_ref == "origin/feature/my-branch"
+
+
+def test_obter_dados_pr_missing_target_ref_raises(mocker) -> None:
+    """It should raise TFSError when targetRefName is absent from the response."""
+    client = TFSClient(make_tfs_config(tfs_repository="my-repo"))
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "sourceRefName": "refs/heads/feature/x",
+        },
+    )
+
+    with pytest.raises(TFSError, match="targetRefName"):
+        client.obter_dados_pr(42)
+
+
+def test_obter_dados_pr_missing_source_ref_raises(mocker) -> None:
+    """It should raise TFSError when sourceRefName is absent from the response."""
+    client = TFSClient(make_tfs_config(tfs_repository="my-repo"))
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "targetRefName": "refs/heads/main",
+        },
+    )
+
+    with pytest.raises(TFSError, match="sourceRefName"):
+        client.obter_dados_pr(42)
+
+
+def test_obter_dados_pr_normalises_nested_target_branch(mocker) -> None:
+    """It should strip refs/heads/ and prefix origin/ for nested branch names."""
+    client = TFSClient(make_tfs_config(tfs_repository="my-repo"))
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "targetRefName": "refs/heads/release/v2",
+            "sourceRefName": "refs/heads/feature/my-pr",
+        },
+    )
+
+    target_ref, source_ref = client.obter_dados_pr(7)
+
+    assert target_ref == "origin/release/v2"
+    assert source_ref == "origin/feature/my-pr"

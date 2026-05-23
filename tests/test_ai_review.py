@@ -92,7 +92,7 @@ def test_build_parser_parses_pr_review_options() -> None:
         "--dry-run",
         "--quick",
         "--review-scope",
-        "full_code",
+        "diff_only",
         "--max-diff-files",
         "3",
         "--output",
@@ -103,7 +103,7 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.pr_id == 42
     assert args.dry_run is True
     assert args.verbosity == "quick"
-    assert args.review_scope == "full_code"
+    assert args.review_scope == "diff_only"
     assert args.max_diff_files == 3
     assert args.output == "review.md"
 
@@ -242,7 +242,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         "+    value = 2\n"
         "     other = value\n"
     )
-    tfs.get_pull_request_diff.return_value = diff
+    tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
     tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
     tfs.get_project_manifest.return_value = "PROJECT MANIFEST"
@@ -275,12 +275,16 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     git_utils.limit_diff_files.return_value = (diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
     git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.get_pr_diff.return_value = diff
+    git_utils.filter_diff_noise.return_value = diff
+    git_utils.get_current_branch.return_value = "main"
 
     markdown_formatter = MagicMock()
     markdown_formatter.format_header.return_value = "HEADER"
     markdown_formatter.format_footer.return_value = "FOOTER"
 
     mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
@@ -446,7 +450,7 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
         "changed_files": [{"path": "/a.py", "change_type": "edit"}],
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
-    tfs.get_pull_request_diff.return_value = diff
+    tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
     tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
     tfs.get_project_manifest.return_value = ""
@@ -480,9 +484,13 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     git_utils.limit_diff_files.return_value = (diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
     git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.get_pr_diff.return_value = diff
+    git_utils.filter_diff_noise.return_value = diff
+    git_utils.get_current_branch.return_value = "main"
 
     progress = MagicMock()
     mocker.patch("src.ai_review.ProgressIndicator", return_value=progress)
+    mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
     mocker.patch("src.ai_review._select_comments_to_post", return_value=llm.review_pr_structured.return_value)
@@ -530,7 +538,7 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
         "     other = value\n"
     )
     filtered_diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -1,3 +1,4 @@\n+    value = 2"
-    tfs.get_pull_request_diff.return_value = diff
+    tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
 
     llm = MagicMock()
     llm.review_pr_structured.return_value = []
@@ -546,8 +554,12 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     git_utils.limit_diff_files.return_value = (filtered_diff, False, 0)
     git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
     git_utils.truncate_diff.return_value = (filtered_diff, False)
+    git_utils.get_pr_diff.return_value = diff
+    git_utils.filter_diff_noise.return_value = diff
+    git_utils.get_current_branch.return_value = "main"
 
     mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
@@ -573,11 +585,9 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
 def test_review_scope_context_note_matches_scope() -> None:
     """It should describe context behavior according to the active scope."""
     contextual = ai_review._review_scope_context_note("diff_with_context")
-    full_code = ai_review._review_scope_context_note("full_code")
     diff_only = ai_review._review_scope_context_note("diff_only")
 
     assert "modified PR lines" in contextual
-    assert "full_code mode" in full_code
     assert "diff_only mode" in diff_only
 
 

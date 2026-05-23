@@ -84,11 +84,12 @@ class ReviewConfig:
     tfs_verify_ssl: bool = True              # Verify TLS certificates
     tfs_ca_bundle: str = ""                 # Path to corporate CA bundle (.pem)
     tfs_repository: str = ""                # Default repository (empty = all)
+    tfs_local_repo_path: str = ""           # Local clone path of the reviewed repo (empty = cwd)
 
     # --- Review -------------------------------------------------------
     review_language: str = "pt"             # Review language (pt/en)
     verbosity: str = "detailed"             # "quick" | "detailed" | "security"
-    review_scope: str = "diff_with_context"  # "diff_only" | "diff_with_context" | "full_code"
+    review_scope: str = "diff_with_context"  # "diff_only" | "diff_with_context"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
     max_comments_to_post: int = 20          # Max actionable inline comments per review
@@ -140,6 +141,10 @@ class ReviewConfig:
         "Microsoft.VSTS.TCM.ReproSteps",
         "Microsoft.VSTS.TCM.SystemInfo",
     ])
+
+    # --- RAG Context --------------------------------------------------
+    rag_enabled: bool = True                 # Enable RAG context retrieval
+    rag_max_chars: int = 40000               # Max characters for RAG context
 
     # --- PR Review ----------------------------------------------------
     auto_post_comments: bool = False        # Post comments automatically
@@ -260,6 +265,7 @@ class ReviewConfig:
             "tfs_verify_ssl": ("tfs", "verify_ssl"),
             "tfs_ca_bundle": ("tfs", "ca_bundle"),
             "tfs_repository": ("tfs", "repository"),
+            "tfs_local_repo_path": ("tfs", "local_repo_path"),
             # Review
             "review_language": ("review", "language"),
             "verbosity": ("review", "verbosity"),
@@ -284,6 +290,8 @@ class ReviewConfig:
             "work_item_context_max_items": ("review", "work_item_context", "max_items"),
             "work_item_context_max_chars": ("review", "work_item_context", "max_chars"),
             "work_item_context_fields": ("review", "work_item_context", "fields"),
+            "rag_enabled": ("review", "rag", "enabled"),
+            "rag_max_chars": ("review", "rag", "max_chars"),
             # PR
             "auto_post_comments": ("pr", "auto_post_comments"),
             "dry_run": ("pr", "dry_run"),
@@ -377,10 +385,10 @@ class ReviewConfig:
                 "Use 'quick', 'detailed' or 'security'."
             )
 
-        if self.review_scope not in ("diff_only", "diff_with_context", "full_code"):
+        if self.review_scope not in ("diff_only", "diff_with_context"):
             issues.append(
                 f"Invalid review scope: '{self.review_scope}'. "
-                "Use 'diff_only', 'diff_with_context' or 'full_code'."
+                "Use 'diff_only' or 'diff_with_context'."
             )
 
         if self.max_diff_files <= 0:

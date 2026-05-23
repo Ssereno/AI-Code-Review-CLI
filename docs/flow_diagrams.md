@@ -1,4 +1,6 @@
-# Main Application Flow
+# Execution Flow Diagrams
+
+## Main PR Review Flow
 
 ```mermaid
 flowchart TD
@@ -16,56 +18,65 @@ flowchart TD
   I -->|list-prs| G
 
   F --> J["⚙️ Load and validate config"]
-  J --> K["🔗 Initialize TFS client"]
+  J --> K["🔗 Initialize TFS + Git clients\n(repo_path = current directory)"]
   K --> L{PR ID provided?}
   L -->|No| M["🔍 Fetch active PRs and select one"]
   L -->|Yes| N["✅ Use provided PR ID"]
-  M --> O["📄 Get PR details"]
+  M --> O["📄 Get PR details from TFS API\n(source_branch, target_branch, changed_files)"]
   N --> O
-  O --> P["🔀 Get PR diff or full changed-file context"]
-  P --> Q["🎯 Filter by allowed file extensions"]
-  Q --> R["✂️ Keep additions only"]
-  R --> S["📦 Limit files with max_diff_files"]
-  S --> T["📋 Build changed-files summary"]
-  T --> U["✂️ Truncate each file with max_diff_lines"]
-  U --> V["🤖 Run AI general review"]
-  V --> W["💬 Run AI structured comment generation"]
-  W --> X["👀 Preview review and suggested comments"]
-  X --> Y{Dry-run enabled?}
-  Y -->|Yes| Z["🛑 Stop after preview"]
-  Y -->|No| AA{Auto-post enabled?}
-  AA -->|Yes| AB["📤 Post all review comments"]
-  AA -->|No| AC["✅ Select comments to post"]
-  AC --> AB
-  AB --> AD["📝 Post general PR summary"]
-  AD --> AE{Output file configured?}
-  AE -->|Yes| AF["💾 Save formatted review output"]
-  AE -->|No| AG["✨ Finish"]
-  AF --> AG
-
-  G --> AH["🔍 Fetch PR list with filters"]
-  AH --> AI["📊 Display PR list"]
+  O --> P["🔑 Get target_ref and source_ref\nvia TFS API → obter_dados_pr()"]
+  P --> Q["📡 git fetch origin/source_branch"]
+  Q --> R["🔀 Get PR diff\ngit diff origin/target...origin/source"]
+  R --> S{Diff empty?}
+  S -->|Yes| Z1["⚠️ No code changes — stop"]
+  S -->|No| T["🧹 Filter noise\n(binary files, lock files)"]
+  T --> U{File extensions filter?}
+  U -->|Yes| V["📂 Keep only allowed extensions"]
+  U -->|No| W{Review scope?}
+  V --> W
+  W -->|diff_only| X["✂️ Keep additions only\n(remove context and deletions)"]
+  W -->|diff_with_context| Y["📦 Limit files — max_diff_files"]
+  X --> Y
+  Y --> AA["✂️ Truncate per file — max_diff_lines"]
+  AA --> BB{RAG enabled?}
+  BB -->|No| CC["🤖 Build LLM prompt\n(diff + changed files + work items\n+ project context + RAG context)"]
+  BB -->|Yes| DD["🔍 Verify: local branch == PR target branch"]
+  DD -->|Mismatch| Z2["🚫 Block review\ngit checkout target_branch required"]
+  DD -->|Match| EE["🧠 Load RAG context\ngit grep → extract snippets ±10 lines"]
+  EE --> CC
+  CC --> FF["💬 Call LLM — structured review"]
+  FF --> GG["✅ Validate comments\n(grounding, duplicates, severity cap)"]
+  GG --> HH["👀 Preview in terminal"]
+  HH --> II{Dry-run?}
+  II -->|Yes| Z3["🛑 Stop after preview"]
+  II -->|No| JJ{Auto-post?}
+  JJ -->|Yes| KK["📤 Post all comments"]
+  JJ -->|No| LL["🗂️ Select comments to post"]
+  LL --> KK
+  KK --> MM["📝 Post general PR summary"]
+  MM --> NN{Output file configured?}
+  NN -->|Yes| OO["💾 Save formatted review output"]
+  NN -->|No| PP["✨ Finish"]
+  OO --> PP
 ```
 
-# TFS/Azure DevOps Integration
+## TFS / Azure DevOps Integration
 
 ```mermaid
 flowchart TD
   A["🔗 TFS Connection"] --> B["🔑 Authenticate with PAT"]
   B --> C["✅ Connection established"]
   C --> D{Operation}
-  
-  D -->|List PRs| E["🔍 Query PR list"]
-  D -->|Get PR Details| F["📄 Fetch PR metadata"]
-  D -->|Get Diff| G["🔀 Get PR changes"]
-  D -->|Post Comment| H["📝 Create comment"]
-  
-  E --> I["📊 Return PR list<br/>with metadata"]
-  F --> J["📋 Return PR details<br/>title, author, status"]
-  G --> K["🔀 Return diff<br/>with line numbers"]
-  H --> L["✅ Comment posted<br/>to PR thread"]
-  
-  I --> M["💾 Cache for display"]
-  J --> M
-  K --> M
+
+  D -->|list_pull_requests| E["🔍 GET pullRequests\n(filters: author, branch, repo)"]
+  D -->|get_pull_request_details| F["📄 GET pullRequests/id\n→ source_branch, target_branch,\n  changed_files, commits"]
+  D -->|obter_dados_pr| G["GET pullRequests/id\n→ targetRefName, sourceRefName\n  formatted as origin/{branch}"]
+  D -->|get_changed_files_context| H["📂 GET items per file\nfrom source branch"]
+  D -->|post_review_comments| I["📝 POST threads\nper file + line"]
+
+  E --> J["📊 Return PR list with metadata"]
+  F --> K["📋 Return PR details"]
+  G --> L["🔀 Return (target_ref, source_ref)\nused for git diff"]
+  H --> M["📄 Return file contents\nfor LLM context"]
+  I --> N["✅ Comments posted to PR"]
 ```

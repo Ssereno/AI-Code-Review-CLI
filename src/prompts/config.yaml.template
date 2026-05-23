@@ -31,7 +31,7 @@ llm:
   max_prompt_tokens: 0
 
   # Temperature (0.0 = deterministic, 1.0 = creative)
-  temperature: 0.3
+  temperature: 0.0
 
 # ---------------------------------------------------------------------------
 # Provider credentials — fill in the block for your chosen provider
@@ -86,8 +86,6 @@ review:
   #   diff_with_context (default): reviews PR changes with unified diff,
   #     project, and work-item context
   #   diff_only: reviews only differences introduced in the PR
-  #   full_code: uses full changed files as context, while inline comments
-  #     still require actual PR changed-line anchors
   scope: diff_with_context
 
   # Local Markdown file with reviewer context. When this file is missing,
@@ -163,6 +161,15 @@ review:
       - Microsoft.VSTS.Common.AcceptanceCriteria
       - Microsoft.VSTS.TCM.ReproSteps
       - Microsoft.VSTS.TCM.SystemInfo
+
+  # RAG context: enriches the review with related code snippets found via
+  # git-grep in the local repository.
+  # IMPORTANT: the local repository must be checked out on the PR target
+  # branch. If the local branch differs from the PR target, the review is
+  # blocked to prevent contaminated context.
+  rag:
+    enabled: true
+    max_chars: 40000
 
 # ---------------------------------------------------------------------------
 # Pull Request Review Configuration

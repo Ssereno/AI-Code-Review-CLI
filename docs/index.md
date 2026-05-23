@@ -2,6 +2,21 @@
 
 Automated code review tool using Artificial Intelligence for Pull Requests in Azure DevOps/TFS.
 
+## Local Repository Requirement
+
+> **The CLI must be run from inside the local clone of the repository being reviewed.**
+
+The PR diff is computed using `git fetch` and a three-dot diff against the remote branches. RAG context is built via `git grep` on the local working tree. Both operations require an accessible local git repository.
+
+When `review.rag.enabled: true` the local branch **must match the PR target branch**. The tool verifies this before loading RAG context and blocks the review if there is a mismatch.
+
+```bash
+# PR: feature/my-feature → development
+cd /path/to/my-repo
+git checkout development     # must match the PR target branch
+ai-review pr-review 42
+```
+
 ## Installation
 
 Install the CLI from pypi.org
@@ -14,23 +29,6 @@ Initialize configuration by generating templates:
 
 ```bash
 ai-review init
-```
-
-**Output:**
-```
-config.yaml created at: /home/user/my-project/config.yaml
-review_context.example.md created at: /home/user/my-project/review_context.example.md
-review_context.local.md created at: /home/user/my-project/review_context.local.md
-.gitignore updated with: review_context.local.md
-
-Edit config.yaml and review_context.local.md for local settings.
-```
-
-If files already exist, confirmation is requested:
-
-```
-config.yaml already exists in the current directory.
-Overwrite? [y/N]
 ```
 
 ## Quick Start

@@ -175,7 +175,7 @@ tfs:
 review:
   language: en
   verbosity: quick
-  scope: full_code
+  scope: diff_only
   max_diff_files: 12
   max_diff_lines: 456
   max_comments_to_post: 9
@@ -253,7 +253,7 @@ usage:
     assert config.tfs_repository == "repo-a"
     assert config.review_language == "en"
     assert config.verbosity == "quick"
-    assert config.review_scope == "full_code"
+    assert config.review_scope == "diff_only"
     assert config.max_diff_files == 12
     assert config.max_diff_lines == 456
     assert config.max_comments_to_post == 9

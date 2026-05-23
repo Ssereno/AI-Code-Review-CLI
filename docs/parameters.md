@@ -86,6 +86,9 @@ review:
       - Microsoft.VSTS.Common.AcceptanceCriteria
       - Microsoft.VSTS.TCM.ReproSteps
       - Microsoft.VSTS.TCM.SystemInfo
+  rag:
+    enabled: true
+    max_chars: 40000
 
 pr:
   auto_post_comments: false
@@ -153,6 +156,7 @@ Bedrock credential modes:
 | `tfs.verify_ssl` | `true` | Whether TLS certificates should be verified. |
 | `tfs.ca_bundle` | empty | Optional path to a corporate CA bundle. |
 | `tfs.repository` | empty | Default repository filter. Empty means show PRs from all repositories. |
+| `local_repo_path`| empty | If you run the tool outside your local repository you need to specify the path. |
 
 ## Review Parameters
 
@@ -160,7 +164,7 @@ Bedrock credential modes:
 |---|---:|---|
 | `review.language` | `pt` | Review language. Valid values: `pt`, `en`. |
 | `review.verbosity` | `detailed` | Review style. Valid values: `quick`, `detailed`, `security`. |
-| `review.scope` | `diff_with_context` | Review/validation scope. Valid values: `diff_with_context`, `diff_only`, `full_code`. |
+| `review.scope` | `diff_with_context` | Review/validation scope. Valid values: `diff_with_context`, `diff_only`. |
 | `review.custom_prompt_file` | `review_context.local.md` | One active Markdown reviewer context file. If the configured file is missing, the packaged `src/prompts/review_context.example.md` is used instead. Explicit custom paths continue to work when that file exists. |
 | `review.max_diff_files` | `50` | Maximum changed files sent to the LLM. Must be greater than `0`. |
 | `review.max_diff_lines` | `2000` | Maximum diff lines per file. Must be greater than `0`. |
@@ -184,7 +188,6 @@ creates `review_context.example.md` as the kept example and
 |---|---|
 | `diff_with_context` | Default. Reviews PR changes through source-branch change packets, with full changed files, work item docs, and repository context as read-only support. Findings and inline comments must still point to actual modified PR lines. |
 | `diff_only` | Reviews only added PR lines. Context and deleted lines are removed before calling the LLM. Project and work item context are not loaded. |
-| `full_code` | Loads full changed-file contents as read-only support context, but PR inline comments still require actual branch-diff changed-line anchors. Project and work item context are not loaded. |
 
 ## Project Context Parameters
 
@@ -209,6 +212,43 @@ The default on-demand flow loads project structure before the first context
 request LLM call. The model receives the manifest and can request specific
 files; requested paths are validated against eligible repository files before
 content is fetched.
+
+## RAG Context Parameters
+
+`review.rag` controls keyword-based context retrieval from the local repository.
+When enabled, the CLI runs `git grep` to find code snippets related to the
+identifiers changed in the PR diff and appends them to the LLM prompt as
+read-only context.
+
+> **Local branch requirement.** The local repository must be checked out on the
+> PR **target branch**. If the local branch differs, the review is blocked with
+> an error message and a `git checkout <target>` instruction.
+
+| Parameter | Values / Default | Description |
+|---|---:|---|
+| `review.rag.enabled` | `true` | Enables RAG context loading. When `false`, no local git operations are performed and no branch check is enforced. |
+| `review.rag.max_chars` | `40000` | Maximum characters of RAG context appended to the prompt. Snippets are truncated once this limit is reached. |
+
+### How RAG context is built
+
+1. **Extract identifiers** — function names, class names, and file basenames are parsed from the PR diff with regex
+2. **Search** — `git grep -l -i <identifier>` finds files containing those names
+3. **Extract snippets** — `git grep -n` gets line numbers; ±10 lines around each match are read from disk
+4. **Truncate** — results are concatenated and capped at `review.rag.max_chars`
+
+### Recommended enhanced stack (Local & Open Source)
+
+The current implementation uses `git grep` (zero extra dependencies). For teams
+wanting semantic similarity search instead of keyword matching, the recommended
+local stack is:
+
+| Component | Library | Notes |
+|---|---|---|
+| **Vector database** | [ChromaDB](https://www.trychroma.com/) | In-memory or local SQLite — no server needed; `pip install chromadb` |
+| **Embeddings** | [sentence-transformers](https://www.sbert.net/) | Local CPU inference — no API calls or costs; `pip install sentence-transformers` |
+
+This keeps the CLI lightweight and self-contained for teams that cannot use
+paid embedding APIs.
 
 ## Linked Work Item Documentation
 
@@ -296,21 +336,6 @@ Inspect stored usage interactively:
 ai-review usage
 ai-review usage --usage-file .ai-review-usage.jsonl
 ```
-
-## Validation Rules
-
-The config validator reports issues for:
-
-- Unknown `llm.provider`.
-- Missing required provider credentials or Bedrock region.
-- Invalid `review.verbosity` or `review.scope`.
-- Non-positive `review.max_diff_files` or `review.max_diff_lines`.
-- Non-positive `review.max_comments_to_post`.
-- Negative `llm.max_prompt_tokens`.
-- Invalid `review.project_context.mode`.
-- Negative full-mode project context limits.
-- Non-positive on-demand project context limits.
-- Non-positive work item context limits.
 
 ## Common Issues
 

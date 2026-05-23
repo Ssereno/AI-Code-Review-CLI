@@ -11,9 +11,47 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
 - **Project-aware PR Context** — Sends repository and linked work item context while restricting findings to modified PR lines
+- **RAG Context** — Enriches the review with related code snippets found via `git grep` in the local repository
 - **Single Reviewer Context** — One Markdown context file with local override support
 - **Usage Tracking** — Store per-PR token usage and optional cost estimates
 - **Interactive CLI** — Menu-driven selection and confirmation
+
+## Local Repository Requirement
+
+> **The CLI must be run from inside the local clone of the repository being reviewed.**
+
+The PR diff is fetched from Azure DevOps/TFS, but several features depend on the local git state:
+
+| Feature | Local dependency |
+|---|---|
+| PR diff | `git fetch` + three-dot diff against `origin/<branch>` |
+| RAG context | `git grep` on the working tree |
+| Branch validation | `git branch --show-current` |
+
+### Branch requirement when RAG is enabled
+
+When `review.rag.enabled: true`, the local repository **must be checked out on the PR target branch** (e.g. `development`). If the local branch differs from the target, the review is blocked:
+
+```
+Local branch mismatch: you are on 'main' but this PR targets 'development'.
+RAG context would be built from the wrong branch, which may corrupt the review.
+Please run:  git checkout development
+```
+
+**Example:**
+```bash
+# PR: merge 'feature/my-feature' → 'development'
+cd /path/to/my-repo          # must be inside the repo
+git checkout development     # must match PR target branch
+ai-review pr-review 42
+```
+
+To skip the branch check entirely, disable RAG:
+```yaml
+review:
+  rag:
+    enabled: false
+```
 
 ## Installation & Quick Start
 
@@ -92,11 +130,14 @@ tfs:
 review:
   language: pt
   verbosity: detailed                  # or: quick, security
-  scope: diff_with_context             # diff_with_context, diff_only, full_code
+  scope: diff_with_context             # diff_with_context, diff_only
   file_extensions_filter: [".cs", ".ts", ".py"]
   max_diff_files: 50
   max_comments_to_post: 20
   custom_prompt_file: review_context.local.md
+  rag:
+    enabled: true                      # requires local branch == PR target
+    max_chars: 40000
   project_context:
     enabled: true
     mode: on_demand                      # on_demand, full
@@ -143,10 +184,58 @@ src/
   tfs_client.py       # Azure DevOps integration
   git_utils.py        # Git diff processing
   formatter.py        # Output formatting (terminal, markdown, JSON)
+  rag_engine.py       # RAG context via git grep
 
 tests/
   test_*.py           # Unit and integration tests
 ```
+
+## RAG Context
+
+### Current Implementation
+
+The RAG engine enriches the LLM prompt with related code snippets found in the local repository:
+
+1. **Extract identifiers** — function and class names are parsed from the PR diff
+2. **Search** — `git grep` finds files containing those identifiers
+3. **Extract snippets** — ±10 lines around each match are included as read-only context
+
+All operations run locally with no extra dependencies. The quality of RAG context depends entirely on the local repository state, which is why the **local branch must match the PR target branch**.
+
+### Recommended Stack for Enhanced RAG (Local & Open Source)
+
+For teams wanting semantic similarity instead of keyword search, the recommended local stack is:
+
+| Component | Library | Reason |
+|---|---|---|
+| **Vector database** | [ChromaDB](https://www.trychroma.com/) | Runs in-memory or persists to a local SQLite file — no server needed, `pip install chromadb` |
+| **Embeddings** | [sentence-transformers](https://www.sbert.net/) | Generates vectors locally on CPU — no API calls, no cost |
+
+Example integration pattern:
+
+```python
+from sentence_transformers import SentenceTransformer
+import chromadb
+
+model = SentenceTransformer("all-MiniLM-L6-v2")   # ~80 MB, CPU-friendly
+client = chromadb.Client()                          # in-memory
+collection = client.create_collection("repo-index")
+
+# Index
+collection.add(
+    documents=[snippet_text],
+    embeddings=model.encode([snippet_text]).tolist(),
+    ids=["file:line"],
+)
+
+# Query
+results = collection.query(
+    query_embeddings=model.encode([query]).tolist(),
+    n_results=5,
+)
+```
+
+This stack keeps the CLI lightweight (`pip install`) and requires no external services or paid APIs.
 
 ### Run Tests
 

@@ -84,6 +84,7 @@ from src.config import ReviewConfig, VALID_PROVIDERS
 from src.git_utils import GitUtils, GitError
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
+from src.rag_engine import obter_contexto_rag
 from src.usage_tracker import (
     append_usage_record,
     build_pr_usage_record,
@@ -94,7 +95,7 @@ from src.usage_tracker import (
 from src import __version__ as VERSION
 
 
-REVIEW_SCOPE_CHOICES = ["diff_only", "diff_with_context", "full_code"]
+REVIEW_SCOPE_CHOICES = ["diff_only", "diff_with_context"]
 
 
 def _get_spinner_frames() -> list[str]:
@@ -263,7 +264,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         "--review-scope", default=None,
         choices=REVIEW_SCOPE_CHOICES,
         help=(
-            "Review scope: diff_with_context (default), diff_only, or full_code"
+            "Review scope: diff_with_context (default) or diff_only"
         )
     )
     group_review.add_argument(
@@ -332,11 +333,6 @@ def _review_scope_context_note(review_scope: str) -> str:
         return (
             "Context will be used for understanding only; review comments remain "
             "limited to modified PR lines."
-        )
-    if scope == "full_code":
-        return (
-            "Review is running in full_code mode; full changed files are context, "
-            "but comments remain limited to actual PR changes."
         )
     return "Review is running in diff_only mode."
 
@@ -786,7 +782,6 @@ def _comment_mentions_non_anchor_terms(comment: dict, anchor_text: str) -> bool:
         comment.get("comment", ""),
         comment.get("anchor_code", ""),
         comment.get("problematic_code", ""),
-        comment.get("evidence", ""),
     ):
         if term not in anchor_text:
             return True
@@ -904,6 +899,10 @@ def _filter_comments_to_grounded_source_lines(
             discarded_grounding.append(comment)
             continue
 
+        if not evidence:
+            discarded_grounding.append(comment)
+            continue
+
         if not _text_contains_evidence(anchor_text, anchor_code):
             discarded_grounding.append(comment)
             continue
@@ -912,19 +911,11 @@ def _filter_comments_to_grounded_source_lines(
             discarded_grounding.append(comment)
             continue
 
-        if not _text_contains_evidence(anchor_text, evidence):
-            discarded_grounding.append(comment)
-            continue
-
         if not _text_contains_evidence(source_range, problematic_code):
             discarded_grounding.append(comment)
             continue
 
         if not _text_contains_evidence(source_text, problematic_code):
-            discarded_grounding.append(comment)
-            continue
-
-        if not _text_contains_evidence(source_text, evidence):
             discarded_grounding.append(comment)
             continue
 
@@ -1381,16 +1372,26 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # Show PR details
     print(formatter.format_pr_details(pr_details))
 
-    # --- Get PR diff ---
+    # --- Get PR diff via git local ---
     print(formatter.format_progress("Getting Pull Request diff"))
 
+    _local_repo = (config.tfs_local_repo_path or "").strip() or os.getcwd()
+    git_utils_pr = GitUtils(repo_path=_local_repo, pat=config.tfs_pat)
+
     try:
-        diff = tfs.get_pull_request_diff(
-            repo_name,
-            pr_id,
-            review_scope=config.review_scope,
-        )
+        target_ref, source_ref = tfs.obter_dados_pr(pr_id)
     except TFSError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    try:
+        git_utils_pr.fetch_merge_commit(source_ref)
+    except GitError as exc:
+        print(formatter.format_warning(f"Could not fetch source branch: {exc}"))
+
+    try:
+        diff = git_utils_pr.get_pr_diff(target_ref, source_ref)
+    except GitError as exc:
         print(formatter.format_error(str(exc)))
         return 1
 
@@ -1411,8 +1412,13 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_info("🔍 DRY-RUN mode: comments will NOT be posted"))
 
     # Get diff files summary
-    git_utils = GitUtils.__new__(GitUtils)
-    git_utils.repo_path = os.getcwd()
+    git_utils = git_utils_pr
+
+    # --- Noise filter (binary, lock files, oversized sections) ---
+    diff = git_utils_pr.filter_diff_noise(diff, config.max_diff_lines)
+    if not diff.strip():
+        print(formatter.format_warning("After filtering noise (binary/lock files), the diff is empty."))
+        return 0
 
     # Filter extensions before limiting/truncating the diff sent to the LLM
     if config.file_extensions_filter:
@@ -1460,7 +1466,41 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         ))
 
     use_contextual_review = review_scope == "diff_with_context"
-    load_changed_file_context = review_scope in ("diff_with_context", "full_code")
+    load_changed_file_context = review_scope == "diff_with_context"
+
+    # --- RAG context ---
+    rag_context = ""
+    if config.rag_enabled and diff_truncated.strip():
+        # Verify local branch matches the PR target branch to avoid RAG context contamination.
+        _target_branch = target_ref.removeprefix("origin/")
+        try:
+            _local_branch = git_utils_pr.get_current_branch()
+        except GitError as exc:
+            print(formatter.format_error(
+                f"Cannot determine local branch: {exc}\n"
+                "Ensure the local repository is accessible and try again."
+            ))
+            return 1
+
+        if _local_branch != _target_branch:
+            print(formatter.format_error(
+                f"Local branch mismatch: you are on '{_local_branch}' "
+                f"but this PR targets '{_target_branch}'.\n"
+                f"RAG context would be built from the wrong branch, which may corrupt the review.\n"
+                f"Please run:  git checkout {_target_branch}"
+            ))
+            return 1
+
+        print(formatter.format_progress("Loading RAG context from local repository"))
+        rag_context = obter_contexto_rag(
+            diff_truncated,
+            repo_path=git_utils.repo_path,
+            max_chars=config.rag_max_chars,
+        )
+        if rag_context:
+            print(formatter.format_info(
+                f"RAG context loaded ({len(rag_context):,} characters)."
+            ))
 
     work_item_context = ""
     linked_work_item_ids: list[int] | None = None
@@ -1604,7 +1644,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         structured_comments = llm.review_pr_structured(
             diff=diff_truncated,
             files_summary=files_summary,
-            context=getattr(args, "context", ""),
+            context="\n\n".join(filter(None, [getattr(args, "context", ""), rag_context])),
             review_scope=config.review_scope,
             project_context=project_context,
             work_item_context=work_item_context,
