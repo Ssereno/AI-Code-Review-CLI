@@ -59,24 +59,3 @@ flowchart TD
   NN -->|No| PP["✨ Finish"]
   OO --> PP
 ```
-
-## TFS / Azure DevOps Integration
-
-```mermaid
-flowchart TD
-  A["🔗 TFS Connection"] --> B["🔑 Authenticate with PAT"]
-  B --> C["✅ Connection established"]
-  C --> D{Operation}
-
-  D -->|list_pull_requests| E["🔍 GET pullRequests\n(filters: author, branch, repo)"]
-  D -->|get_pull_request_details| F["📄 GET pullRequests/id\n→ source_branch, target_branch,\n  changed_files, commits"]
-  D -->|obter_dados_pr| G["GET pullRequests/id\n→ targetRefName, sourceRefName\n  formatted as origin/{branch}"]
-  D -->|get_changed_files_context| H["📂 GET items per file\nfrom source branch"]
-  D -->|post_review_comments| I["📝 POST threads\nper file + line"]
-
-  E --> J["📊 Return PR list with metadata"]
-  F --> K["📋 Return PR details"]
-  G --> L["🔀 Return (target_ref, source_ref)\nused for git diff"]
-  H --> M["📄 Return file contents\nfor LLM context"]
-  I --> N["✅ Comments posted to PR"]
-```
