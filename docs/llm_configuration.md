@@ -130,16 +130,16 @@ ollama:
 ```
 
 **Setup:**
-1. Instala [Ollama](https://ollama.ai)
-2. Baixa um modelo: `ollama pull llama3`
-3. Inicia o servidor: `ollama serve`
-4. Testa a conexão: `curl http://localhost:11434/api/tags`
+1. Install Ollama: https://ollama.ai
+2. Pull a model: `ollama pull llama3`
+3. Start the server: `ollama serve`
+4. Test the connection: `curl http://localhost:11434/api/tags`
 
-**Modelos disponíveis:**
-- `llama3` — Modelo geral poderoso
-- `mistral` — Rápido e leve
-- `deepseek-coder` — Especializado em código
-- `neural-chat` — Bom para conversação
+**Available models:**
+- `llama3` — powerful general-purpose model
+- `mistral` — fast and lightweight
+- `deepseek-coder` — specialized for code
+- `neural-chat` — good for conversational use
 
 ### GitHub Copilot
 
@@ -154,18 +154,17 @@ copilot:
   api_key: ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-**Como obter Token:**
-1. Acede a [github.com/settings/tokens](https://github.com/settings/tokens)
-2. **Generate new token (classic)**
-3. Seleciona scope `codespace` ou `gist`
-4. Copia e guarda
+**How to get a token:**
+1. Go to https://github.com/settings/tokens
+2. Click **Generate new token (classic)**
+3. Select scopes such as `codespace` or `gist`
+4. Copy and store the token securely
 
 ### AWS Bedrock
 
-Suporta múltiplas formas de autenticação. Escolhe a que se adequa:
+Supports multiple authentication methods. Choose the one that fits:
 
-#### Opção 1: Bedrock API Key (Longo termo)
-
+#### Option 1: Bedrock API Key (long-term)
 ```yaml
 llm:
   provider: bedrock
@@ -173,10 +172,10 @@ llm:
 
 bedrock:
   region: eu-north-1
-  access_key_id: ABSK...   # Apenas access_key
+  access_key_id: ABSK...   # Access key only
 ```
 
-#### Opção 2: IAM Credentials
+#### Option 2: IAM Credentials
 
 ```yaml
 llm:
@@ -187,10 +186,10 @@ bedrock:
   region: us-east-1
   access_key_id: AKIA...
   secret_access_key: wJalr...
-  # session_token: ...   # Opcional para credenciais STS temporárias
+  # session_token: ...   # Optional for temporary STS credentials
 ```
 
-#### Opção 3: AWS SSO / Named Profile
+#### Option 3: AWS SSO / Named Profile
 
 ```yaml
 bedrock:
@@ -198,27 +197,27 @@ bedrock:
   profile: my-sso-profile
 ```
 
-#### Opção 4: Default Credential Chain
+#### Option 4: Default Credential Chain
 
 ```yaml
 bedrock:
   region: us-east-1
-  # Usa variáveis de ambiente, instance role, etc.
+  # Uses environment variables, instance role, etc.
 ```
 
 
 
 ## Troubleshooting
 
-### Erro de Autenticação com Bedrock
+### Bedrock authentication error
 
-- Confirma `bedrock.region` — deve corresponder à região do modelo
-- Confirma `llm.model` — ARN válido do Bedrock
-- **API Key longo termo**: apenas `access_key_id` (sem `secret_access_key`)
-- **IAM credentials**: ambos `access_key_id` + `secret_access_key`
-- **Profile/SSO**: define `bedrock.profile`
-- Se nada, usa **credential chain** (env vars, instance role, etc.)
+- Confirm `bedrock.region` — it must match the model's region
+- Confirm `llm.model` — a valid Bedrock ARN
+- **Long-term API Key**: only `access_key_id` is required (no `secret_access_key`)
+- **IAM credentials**: provide both `access_key_id` and `secret_access_key`
+- **Profile/SSO**: set `bedrock.profile`
+- If nothing works, fall back to the credential chain (env vars, instance role, etc.)
 
-### Erro de Rate Limit
+### Rate limit error
 
-Reduz `max_tokens` ou adiciona delay entre requisições na configuração.
+Lower `max_tokens` or add a delay between requests in the configuration.

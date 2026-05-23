@@ -16,12 +16,6 @@ Creates:
 - `config.yaml`
 - `review_context.example.md`
 - `review_context.local.md`
-- `.gitignore` entry for `review_context.local.md`
-
-`review_context.local.md` is the default local override and should be ignored by
-git. When it is missing, the CLI falls back to the packaged
-`src/prompts/review_context.example.md`. Existing files are preserved unless you
-confirm overwrite.
 
 ## pr-review - Pull Request Review
 
@@ -85,23 +79,19 @@ ai-review pr-review 42 --auto-post
 ```
 
 #### Review Scope
-
-Escolhe o escopo da revisão:
+Choose the review scope:
 
 ```bash
 # PR changes with project and work item context (default)
 ai-review pr-review 42 --review-scope diff_with_context
 
-# Apenas as mudanças no diff
+# Only the changes present in the diff
 ai-review pr-review 42 --review-scope diff_only
-
-# Ficheiros completos como contexto; comentários só nas linhas alteradas
-ai-review pr-review 42 --review-scope full_code
 ```
 
-#### Verbosidade
+#### Verbosity
 
-Define o estilo de revisão:
+Choose the review style:
 
 ```bash
 ai-review pr-review 42 --quick
@@ -109,9 +99,9 @@ ai-review pr-review 42 --detailed
 ai-review pr-review 42 --security
 ```
 
-### Escolher Modelo e Provider
+### Choose model and provider
 
-#### Por CLI
+#### Via CLI
 
 ```bash
 ai-review pr-review 42 --provider openai --model gpt-4o
@@ -119,27 +109,27 @@ ai-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20
 ai-review pr-review 42 -p gemini -m gemini-2.0-flash
 ```
 
-### Limites de Diff
+### Diff limits
 
-#### Override do ficheiro máximo
+#### Override maximum files
 
 ```bash
 # Envia apenas os primeiros 20 ficheiros ao LLM
 ai-review pr-review 42 --max-diff-files 20
 ```
 
-Override da opção `review.max_diff_files` no config.yaml.
+Overrides the `review.max_diff_files` option in `config.yaml`.
 
-#### Adicionar Contexto
+#### Add context
 
 ```bash
 ai-review pr-review 42 --context "This is a hotfix for urgent production bug"
 ai-review pr-review 42 -c "Refactor project structure, no logic changes"
 ```
 
-### Output e Formatação
+### Output and formatting
 
-#### Formato de Output
+#### Output format
 
 ```bash
 ai-review pr-review 42 --format terminal
@@ -147,7 +137,7 @@ ai-review pr-review 42 --format markdown
 ai-review pr-review 42 --format json
 ```
 
-#### Guardar em Ficheiro
+#### Save to file
 
 ```bash
 ai-review pr-review 42 --output review.md
@@ -155,26 +145,26 @@ ai-review pr-review 42 --output review.json --format json
 ai-review pr-review 42 -o ./reports/pr-42.txt
 ```
 
-#### Sem Cores (output limpo)
+#### No colors (clean output)
 
 ```bash
 ai-review pr-review 42 --no-color
 ```
 
-### Ficheiro de Configuração
+### Configuration file
 
-#### Usar configuração customizada
+#### Use a custom configuration
 
 ```bash
 ai-review pr-review 42 --config ~/configs/ai-review.yaml
 ai-review pr-review 42 --config /etc/ai-review/prod.yaml
 ```
 
-A ferramenta procura `config.yaml` no **diretório atual** por padrão.
+The tool looks for `config.yaml` in the current directory by default.
 
-### Exemplos Combinados
+### Combined examples
 
-#### Reviewear com segurança
+#### Security-focused review
 
 ```bash
 ai-review pr-review 42 \
@@ -184,7 +174,7 @@ ai-review pr-review 42 \
   --output security-review.md
 ```
 
-#### Review rápido com Claude via Bedrock
+#### Quick review using Claude via Bedrock
 
 ```bash
 ai-review pr-review 42 \
@@ -194,7 +184,7 @@ ai-review pr-review 42 \
   --auto-post
 ```
 
-#### Listar e revisar PRs específicos
+#### List and review specific PRs
 
 ```bash
 ai-review pr-review \
@@ -204,17 +194,17 @@ ai-review pr-review \
 ```
 
 
-## list-prs - Listar Pull Requests
+## list-prs - List Pull Requests
 
-Lista PRs com filtros.
+Lists PRs with filters.
 
-### Listar todos os PRs ativos
+### List all active PRs
 
 ```bash
 ai-review list-prs
 ```
 
-### Listar com status específico
+### List by status
 
 ```bash
 ai-review list-prs --status active
@@ -223,21 +213,21 @@ ai-review list-prs --status abandoned
 ai-review list-prs --status all
 ```
 
-### Filtrar por autor
+### Filter by author
 
 ```bash
 ai-review list-prs --author "John Smith"
 ai-review list-prs --author "Jane"
 ```
 
-### Filtrar por repositório
+### Filter by repository
 
 ```bash
 ai-review list-prs --repo-name backend
 ai-review list-prs -r frontend
 ```
 
-### Combinar filtros
+### Combine filters
 
 ```bash
 ai-review list-prs --repo-name backend --author "DevOps" --status active
@@ -253,7 +243,7 @@ ai-review --help
 ai-review -h
 ```
 
-### Mostrar ajuda de comando específico
+### Show help for a specific command
 
 ```bash
 ai-review pr-review --help
@@ -261,35 +251,36 @@ ai-review list-prs --help
 ai-review init --help
 ```
 
-## Opções de `pr-review`
 
-| Flag | Valores | Descrição |
-|------|--------|-----------|
-| `pr_id` | número | ID do PR a revisar |
-| `--repo-name`, `-r` | texto | Filtrar por repositório |
-| `--author` | texto | Filtrar por autor |
-| `--target-branch` | texto | Filtrar por branch de destino |
-| `--dry-run` | — | Não postar comentários |
-| `--auto-post` | — | Postar sem confirmação |
-| `--quick` | — | Revisão concisa |
-| `--detailed` | — | Revisão detalhada (padrão) |
-| `--security` | — | Revisão focada em segurança |
-| `--review-scope` | `diff_with_context`, `diff_only`, `full_code` | Escopo da revisão |
-| `--max-diff-files` | número | Máximo de ficheiros |
-| `--context`, `-c` | texto | Contexto adicional |
-| `--format` | `terminal`, `markdown`, `json` | Formato de output |
-| `--output`, `-o` | caminho | Guardar resultado em ficheiro |
-| `--no-color` | — | Desabilitar cores |
-| `--provider`, `-p` | texto | Provider LLM |
-| `--model`, `-m` | texto | Modelo LLM |
+## Options for `pr-review`
 
-## Opções de `list-prs`
+| Flag | Values | Description |
+|------|--------|-------------|
+| `pr_id` | number | PR ID to review |
+| `--repo-name`, `-r` | text | Filter by repository |
+| `--author` | text | Filter by author |
+| `--target-branch` | text | Filter by target branch |
+| `--dry-run` | — | Do not post comments |
+| `--auto-post` | — | Post without confirmation |
+| `--quick` | — | Short review |
+| `--detailed` | — | Detailed review (default) |
+| `--security` | — | Security-focused review |
+| `--review-scope` | `diff_with_context`, `diff_only` | Review scope |
+| `--max-diff-files` | number | Maximum number of files |
+| `--context`, `-c` | text | Additional context |
+| `--format` | `terminal`, `markdown`, `json` | Output format |
+| `--output`, `-o` | path | Save results to file |
+| `--no-color` | — | Disable colors |
+| `--provider`, `-p` | text | LLM provider |
+| `--model`, `-m` | text | LLM model |
 
-| Flag | Valores | Descrição |
-|------|--------|-----------|
-| `--repo-name`, `-r` | texto | Filtrar por repositório |
-| `--author` | texto | Filtrar por autor |
-| `--status` | `active`, `completed`, `abandoned`, `all` | Status do PR |
+## Options for `list-prs`
+
+| Flag | Values | Description |
+|------|--------|-------------|
+| `--repo-name`, `-r` | text | Filter by repository |
+| `--author` | text | Filter by author |
+| `--status` | `active`, `completed`, `abandoned`, `all` | PR status |
 
 
 ## usage - Check token usage and cost
@@ -326,9 +317,10 @@ list number or PR ID, it displays:
 | `--no-color` | — | Disable colors |
 
 
-## Configuração por Ficheiro
 
-Embora muitas opções sejam disponíveis via CLI, a configuração padrão vem de `config.yaml`:
+## Configuration from file
+
+Although many options are available via the CLI, defaults come from `config.yaml`:
 
 ```yaml
 llm:
@@ -353,33 +345,33 @@ pr:
   dry_run: false
 ```
 
-**Prioridade:**
-1. CLI flags (alta prioridade)
-2. Ficheiro `config.yaml` (padrão)
-3. Valores hardcoded (fallback)
+**Priority:**
+1. CLI flags (high priority)
+2. Config file `config.yaml` (default)
+3. Hardcoded values (fallback)
 
-## Exemplos de Fluxo Completo
+## Full flow examples
 
-### Scenario 1: Review rápido antes de merge
+### Scenario 1: Quick review before merge
 
 ```bash
-# Listar PRs
+# List PRs
 ai-review list-prs --status active
 
-# Revisar um PR com dry-run
+# Review a PR with dry-run
 ai-review pr-review 123 --quick --dry-run
 
-# Se OK, fazer review real
+# If OK, post the real review
 ai-review pr-review 123 --quick --auto-post
 ```
 
 ### Scenario 2: Security audit
 
 ```bash
-# Review focado em segurança, com ficheiros completos apenas como contexto
+# Security-focused review with full context
 ai-review pr-review 456 \
   --security \
-  --review-scope full_code \
+  --review-scope diff_with_context \
   --format json \
   --output security-audit.json
 ```

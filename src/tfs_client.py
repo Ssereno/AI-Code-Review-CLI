@@ -14,7 +14,6 @@ Works with both on-premises TFS and Azure DevOps Services.
 """
 
 import base64
-import difflib
 import fnmatch
 import hashlib
 import html
@@ -130,6 +129,8 @@ class TFSClient:
         self.collection = config.tfs_collection
         self.project = config.tfs_project
         self.pat = config.tfs_pat
+
+        self.repository = config.tfs_repository
 
         if not all([self.base_url, self.project, self.pat]):
             raise TFSError(
@@ -387,148 +388,41 @@ class TFSClient:
             })
         return files
 
-    def get_pull_request_diff(self, repository: str, pr_id: int,
-                              review_scope: str = "diff_with_context") -> str:
+    def obter_dados_pr(self, pr_id: int) -> tuple[str, str]:
         """
-        Gets the diff of a specific Pull Request.
-        
+        Retrieves target and source branch references for a Pull Request.
+
+        Uses the PR source branch (not the server-side merge commit) because
+        Azure DevOps simulated merge commits are not fetchable via git upload-pack.
+
         Args:
-            repository: Repository name.
             pr_id: Pull Request ID.
-            
+
         Returns:
-            Diff as text.
+            Tuple of (target_ref, source_ref) where both are formatted
+            as 'origin/<branch>'.
+
+        Raises:
+            TFSError: If required fields are missing from the API response.
         """
-        # Get PR details
-        path = f"git/repositories/{repository}/pullrequests/{pr_id}"
-        pr_data = self._get(path)
+        path = f"git/repositories/{self.repository}/pullRequests/{pr_id}"
+        data = self._get(path, api_version="7.1")
 
-        source_branch = pr_data["sourceRefName"]
-        target_branch = pr_data["targetRefName"]
-
-        # Get PR iterations
-        iterations_path = f"git/repositories/{repository}/pullrequests/{pr_id}/iterations"
-        iterations = self._get(iterations_path)
-
-        if not iterations.get("value"):
-            raise TFSError(f"PR #{pr_id} has no iterations/changes.")
-
-        # Get changes from the last iteration
-        last_iteration = iterations["value"][-1]["id"]
-        changes_path = (
-            f"git/repositories/{repository}/pullrequests/{pr_id}"
-            f"/iterations/{last_iteration}/changes"
-        )
-        changes = self._get(changes_path)
-
-        # Build diff from the changes
-        diff_parts = []
-        for change in changes.get("changeEntries", []):
-            item = change.get("item", {})
-            change_type = change.get("changeType", "unknown")
-            file_path = item.get("path", "unknown")
-            original_path = change.get("originalPath") or file_path
-
-            if item.get("isFolder"):
-                continue
-
-            diff_parts.extend(
-                self._build_unified_diff_part(
-                    repository=repository,
-                    file_path=file_path,
-                    original_path=original_path,
-                    change_type=change_type,
-                    source_branch=source_branch,
-                    target_branch=target_branch,
-                )
+        target_ref_raw = data.get("targetRefName")
+        if not target_ref_raw:
+            raise TFSError(
+                f"PR #{pr_id}: 'targetRefName' field is missing from the API response."
             )
-            diff_parts.append("")
+        target_ref = target_ref_raw.replace("refs/heads/", "origin/")
 
-        if not diff_parts:
-            raise TFSError(f"PR #{pr_id} contains no file changes.")
+        source_ref_raw = data.get("sourceRefName")
+        if not source_ref_raw:
+            raise TFSError(
+                f"PR #{pr_id}: 'sourceRefName' field is missing from the API response."
+            )
+        source_ref = source_ref_raw.replace("refs/heads/", "origin/")
 
-        return "\n".join(diff_parts)
-
-    def _build_full_code_diff_part(self, repository: str, file_path: str,
-                                   change_type: str, source_branch: str) -> list[str]:
-        """Builds a full_code-style payload with the complete content of the new version."""
-        parts = [
-            f"diff --git a{file_path} b{file_path}",
-            f"--- a{file_path}",
-            f"+++ b{file_path}",
-            f"@@ Change type: {change_type} @@",
-        ]
-
-        if change_type in ("edit", "add", "rename"):
-            try:
-                content = self._get_file_content(
-                    repository,
-                    file_path,
-                    version=source_branch.replace("refs/heads/", ""),
-                    version_type="branch",
-                )
-                if content:
-                    for line in content.split("\n"):
-                        parts.append(f"+{line}")
-            except Exception:
-                parts.append(f"+[Content not available for {file_path}]")
-
-        return parts
-
-    def _build_unified_diff_part(self, repository: str, file_path: str,
-                                 original_path: str, change_type: str,
-                                 source_branch: str, target_branch: str) -> list[str]:
-        """Builds a unified diff with only changed lines for diff_only."""
-        old_lines: list[str] = []
-        new_lines: list[str] = []
-
-        source_ref = source_branch.replace("refs/heads/", "")
-        target_ref = target_branch.replace("refs/heads/", "")
-
-        if change_type in ("edit", "rename", "delete"):
-            try:
-                old_content = self._get_file_content(
-                    repository,
-                    original_path,
-                    version=target_ref,
-                    version_type="branch",
-                )
-                old_lines = old_content.splitlines()
-            except Exception:
-                old_lines = []
-
-        if change_type in ("edit", "rename", "add"):
-            try:
-                new_content = self._get_file_content(
-                    repository,
-                    file_path,
-                    version=source_ref,
-                    version_type="branch",
-                )
-                new_lines = new_content.splitlines()
-            except Exception:
-                new_lines = []
-
-        diff = list(difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile=f"a{original_path}",
-            tofile=f"b{file_path}",
-            lineterm="",
-            n=3,
-        ))
-
-        if not diff:
-            return [
-                f"diff --git a{original_path} b{file_path}",
-                f"--- a{original_path}",
-                f"+++ b{file_path}",
-                "@@ No textual differences detected (possible binary/metadata change) @@",
-            ]
-
-        # difflib does not include the "diff --git" header — always add it
-        # so that filter_diff_by_extensions and _split_diff_sections work correctly.
-        return [f"diff --git a{original_path} b{file_path}"] + diff
+        return target_ref, source_ref
 
     def _get_raw(self, path: str, params: Optional[dict] = None,
                api_version: Optional[str] = None) -> str:

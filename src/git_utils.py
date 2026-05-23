@@ -10,6 +10,7 @@ Responsible for capturing Git diffs in different scenarios:
 Works with any Git repository, including TFS/Azure DevOps.
 """
 
+import base64
 import subprocess
 import os
 from typing import Optional
@@ -23,14 +24,22 @@ class GitError(Exception):
 class GitUtils:
     """Utility class for Git operations."""
 
-    def __init__(self, repo_path: Optional[str] = None):
+    def __init__(self, repo_path: Optional[str] = None, pat: str = ""):
         """
         Initializes the Git utility.
-        
+
         Args:
             repo_path: Path to the repository. If None, uses the current directory.
+            pat: Optional Personal Access Token for authenticated git operations
+                (e.g. Azure DevOps). When provided, network commands inject
+                ``http.extraHeader`` so no interactive credential prompt blocks
+                the subprocess.
         """
         self.repo_path = repo_path or os.getcwd()
+        self._http_auth_header: str = ""
+        if pat:
+            encoded = base64.b64encode(f":{pat}".encode()).decode()
+            self._http_auth_header = f"Authorization: Basic {encoded}"
         self._validate_repo()
 
     # ------------------------------------------------------------------
@@ -66,6 +75,7 @@ class GitUtils:
                 cmd,
                 cwd=self.repo_path,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -485,3 +495,103 @@ class GitUtils:
             })
 
         return files
+
+    # ------------------------------------------------------------------
+    # PR-specific git operations
+    # ------------------------------------------------------------------
+    def fetch_merge_commit(self, source_ref: str) -> None:
+        """
+        Fetches the PR source branch from the remote origin.
+
+        Azure DevOps simulated merge commits are not fetchable by SHA via
+        upload-pack, so this method fetches the source branch ref instead.
+
+        Args:
+            source_ref: Source branch reference, e.g. 'origin/feature/my-branch'
+                or 'feature/my-branch'. The 'origin/' prefix is stripped before
+                passing to git fetch.
+        """
+        branch = source_ref
+        if branch.startswith("origin/"):
+            branch = branch[len("origin/"):]
+        if self._http_auth_header:
+            self._run_git(
+                "-c", f"http.extraHeader={self._http_auth_header}",
+                "fetch", "origin", branch, "--quiet",
+            )
+        else:
+            self._run_git("fetch", "origin", branch, "--quiet")
+
+    def get_pr_diff(self, target_branch: str, source_ref: str) -> str:
+        """
+        Returns the unified diff introduced by a PR using three-dot notation.
+
+        Three-dot notation (``origin/target...origin/source``) diffs only the
+        commits introduced by the source branch relative to the common ancestor,
+        matching what Azure DevOps shows in the PR files tab.
+
+        Args:
+            target_branch: Target branch reference (e.g. 'origin/main' or 'main').
+            source_ref: Source branch reference (e.g. 'origin/feature/x' or 'feature/x').
+
+        Returns:
+            Raw unified diff output string.
+        """
+        target = target_branch
+        if target.startswith("origin/"):
+            target = target[len("origin/"):]
+        source = source_ref
+        if source.startswith("origin/"):
+            source = source[len("origin/"):]
+        ref = f"origin/{target}...origin/{source}"
+        return self._run_git("diff", ref, "--no-color", check=False)
+
+    def filter_diff_noise(self, diff: str, max_lines_per_file: int = 2000) -> str:
+        """
+        Removes noisy sections from a diff: binary files, lock files, and
+        oversized sections.
+
+        Args:
+            diff: The raw diff string.
+            max_lines_per_file: Maximum lines allowed per file section.
+
+        Returns:
+            Filtered diff string. Returns empty string if all sections are filtered.
+        """
+        _LOCK_FILENAMES = {
+            "poetry.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "Pipfile.lock",
+        }
+
+        sections, has_file_sections = self._split_diff_sections(diff)
+        if not has_file_sections:
+            return diff
+
+        kept: list[str] = []
+        for section in sections:
+            # Extract filename from the first diff --git line
+            filename = ""
+            for line in section:
+                if line.startswith("diff --git") and " b/" in line:
+                    filename = line.split(" b/")[-1]
+                    break
+
+            basename = filename.split("/")[-1] if filename else ""
+
+            # Skip binary files
+            if any("Binary files" in line for line in section):
+                continue
+
+            # Skip lock files
+            if basename in _LOCK_FILENAMES or basename.endswith(".lock"):
+                continue
+
+            # Skip oversized sections
+            if len(section) > max_lines_per_file:
+                continue
+
+            kept.append("\n".join(section))
+
+        return "\n".join(kept)

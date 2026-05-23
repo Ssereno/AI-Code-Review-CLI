@@ -15,6 +15,7 @@ def make_git_utils(repo_path: str = "repo") -> GitUtils:
     """Build a GitUtils instance without running repository validation."""
     instance = GitUtils.__new__(GitUtils)
     instance.repo_path = repo_path
+    instance._http_auth_header = ""
     return instance
 
 
@@ -235,3 +236,154 @@ def test_truncate_diff_without_sections_and_summary(sample_diff: str) -> None:
         {"file": "src/app.py", "additions": 2, "deletions": 1},
         {"file": "docs/readme.md", "additions": 2, "deletions": 1},
     ]
+
+
+# ==============================================================
+# PR-specific git operations — new method tests
+# ==============================================================
+
+def test_fetch_merge_commit_calls_git_with_correct_args(mocker) -> None:
+    """It should strip 'origin/' and call git fetch origin <branch> --quiet."""
+    instance = make_git_utils()
+    run_mock = mocker.patch.object(instance, "_run_git", return_value="")
+
+    instance.fetch_merge_commit("origin/feature/my-branch")
+
+    run_mock.assert_called_once_with("fetch", "origin", "feature/my-branch", "--quiet")
+
+
+def test_fetch_merge_commit_without_origin_prefix(mocker) -> None:
+    """It should pass the branch name unchanged when it has no 'origin/' prefix."""
+    instance = make_git_utils()
+    run_mock = mocker.patch.object(instance, "_run_git", return_value="")
+
+    instance.fetch_merge_commit("feature/my-branch")
+
+    run_mock.assert_called_once_with("fetch", "origin", "feature/my-branch", "--quiet")
+
+
+def test_get_pr_diff_uses_three_dot_syntax(mocker) -> None:
+    """It should pass origin/<target>...origin/<source> to git diff."""
+    instance = make_git_utils()
+    run_mock = mocker.patch.object(instance, "_run_git", return_value="diff output")
+
+    result = instance.get_pr_diff("origin/main", "origin/feature/x")
+
+    run_mock.assert_called_once_with("diff", "origin/main...origin/feature/x", "--no-color", check=False)
+    assert result == "diff output"
+
+
+def test_get_pr_diff_normalises_branch_without_origin_prefix(mocker) -> None:
+    """It should prepend origin/ to both branches when they lack it."""
+    instance = make_git_utils()
+    run_mock = mocker.patch.object(instance, "_run_git", return_value="diff output")
+
+    instance.get_pr_diff("main", "feature/x")
+
+    run_mock.assert_called_once_with("diff", "origin/main...origin/feature/x", "--no-color", check=False)
+
+
+def test_get_pr_diff_does_not_double_prefix_origin(mocker) -> None:
+    """It should NOT produce origin/origin/... when inputs already have the prefix."""
+    instance = make_git_utils()
+    run_mock = mocker.patch.object(instance, "_run_git", return_value="")
+
+    instance.get_pr_diff("origin/main", "origin/feature/my-branch")
+
+    call_args = run_mock.call_args.args
+    ref_arg = call_args[1]
+    assert ref_arg == "origin/main...origin/feature/my-branch"
+    assert "origin/origin/" not in ref_arg
+
+
+def test_filter_diff_noise_keeps_normal_py_section() -> None:
+    """Normal .py sections should survive filtering."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+    ])
+
+    result = instance.filter_diff_noise(diff)
+
+    assert "src/app.py" in result
+    assert "+new" in result
+
+
+def test_filter_diff_noise_removes_binary_section() -> None:
+    """Sections containing 'Binary files' should be dropped."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/assets/logo.png b/assets/logo.png",
+        "index 000..abc 100644",
+        "Binary files a/assets/logo.png and b/assets/logo.png differ",
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1 +1 @@",
+        "+new",
+    ])
+
+    result = instance.filter_diff_noise(diff)
+
+    assert "logo.png" not in result
+    assert "src/app.py" in result
+
+
+def test_filter_diff_noise_removes_lock_file_section() -> None:
+    """poetry.lock and other lock files should be dropped."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/poetry.lock b/poetry.lock",
+        "--- a/poetry.lock",
+        "+++ b/poetry.lock",
+        "@@ -1 +1 @@",
+        "+updated",
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1 +1 @@",
+        "+new",
+    ])
+
+    result = instance.filter_diff_noise(diff)
+
+    assert "poetry.lock" not in result
+    assert "src/app.py" in result
+
+
+def test_filter_diff_noise_removes_oversized_section() -> None:
+    """Sections exceeding max_lines_per_file should be dropped."""
+    instance = make_git_utils()
+    big_section = ["diff --git a/generated.py b/generated.py"] + [f"+line{i}" for i in range(15)]
+    small_section = [
+        "diff --git a/src/app.py b/src/app.py",
+        "+new",
+    ]
+    diff = "\n".join(big_section + small_section)
+
+    result = instance.filter_diff_noise(diff, max_lines_per_file=10)
+
+    assert "generated.py" not in result
+    assert "src/app.py" in result
+
+
+@pytest.mark.parametrize("lock_name", ["package-lock.json", "yarn.lock", "Pipfile.lock", "custom.lock"])
+def test_filter_diff_noise_removes_various_lock_files(lock_name: str) -> None:
+    """All recognised lock file names (and *.lock) should be filtered out."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        f"diff --git a/{lock_name} b/{lock_name}",
+        f"--- a/{lock_name}",
+        f"+++ b/{lock_name}",
+        "@@ -1 +1 @@",
+        "+updated",
+    ])
+
+    result = instance.filter_diff_noise(diff)
+
+    assert lock_name not in result

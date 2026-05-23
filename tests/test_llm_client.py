@@ -115,7 +115,6 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
 
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
-    assert "full_code" in get_scope_guidance("full_code", "en")
     assert "selected on-demand repository files" in contextual_guidance
     assert "surrounding unchanged context" in contextual_guidance
     assert "context-only or deleted line" in contextual_guidance
