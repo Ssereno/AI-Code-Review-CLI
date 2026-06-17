@@ -363,7 +363,7 @@ class TFSClient:
         link_max_chars: int = 25000,
     ) -> str:
         """Builds read-only requirements context from the PR description and supported spec links."""
-        repository = str((pr.get("repository") or {}).get("name", "")).strip()
+        repository = self._pull_request_repository_name(pr)
         pr_id = str(pr.get("id", pr.get("pullRequestId", ""))).strip()
         title = self._field_text(pr.get("title", "")).strip()
         description = self._field_text(pr.get("description", "")).strip()
@@ -444,6 +444,16 @@ class TFSClient:
             return ""
 
         return "\n".join(parts).strip()
+
+    @staticmethod
+    def _pull_request_repository_name(pr: dict) -> str:
+        """Extracts a repository name from the PR shapes returned by TFS."""
+        repository = pr.get("repository")
+        if isinstance(repository, dict):
+            return str(repository.get("name", "") or "").strip()
+        if isinstance(repository, str):
+            return repository.strip()
+        return ""
 
     def _extract_pr_description_links(self, description: str) -> list[dict]:
         """Extracts link targets from markdown, HTML, and raw URL text."""

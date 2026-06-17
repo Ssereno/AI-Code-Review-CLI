@@ -662,6 +662,23 @@ def test_get_pull_request_description_context_fetches_supported_wiki_links(mocke
     assert get_mock.call_args.kwargs["api_version"] == "7.1-preview.1"
 
 
+def test_get_pull_request_description_context_accepts_string_repository() -> None:
+    """It should support parsed PR summaries where repository is already a name."""
+    client = TFSClient(make_tfs_config())
+
+    context = client.get_pull_request_description_context(
+        {
+            "id": 42,
+            "title": "Checkout validation",
+            "description": "Follow the checkout spec.",
+            "repository": "repo-a",
+        }
+    )
+
+    assert "Repository: repo-a" in context
+    assert "Follow the checkout spec." in context
+
+
 def test_raw_get_and_comment_endpoints(mocker) -> None:
     """It should expose raw file content and build comment payloads correctly."""
     client = TFSClient(make_tfs_config())
