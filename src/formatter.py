@@ -235,7 +235,7 @@ class ReviewFormatter:
             if discarded_count > 0:
                 return (
                     f"\n{c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                    f"by grounding, changed-line, or duplicate checks.{c.RESET}\n"
+                    f"by grounding, quality, changed-line, or duplicate checks.{c.RESET}\n"
                 )
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
@@ -267,7 +267,7 @@ class ReviewFormatter:
         if discarded_count > 0:
             lines.append(
                 f"  {c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                f"by grounding, changed-line, or duplicate checks.{c.RESET}"
+                f"by grounding, quality, changed-line, or duplicate checks.{c.RESET}"
             )
             lines.append("")
 

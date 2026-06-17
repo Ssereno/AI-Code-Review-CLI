@@ -514,13 +514,16 @@ class GitUtils:
         branch = source_ref
         if branch.startswith("origin/"):
             branch = branch[len("origin/"):]
+        if branch.startswith("refs/heads/"):
+            branch = branch[len("refs/heads/"):]
+        refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
         if self._http_auth_header:
             self._run_git(
                 "-c", f"http.extraHeader={self._http_auth_header}",
-                "fetch", "origin", branch, "--quiet",
+                "fetch", "origin", refspec, "--quiet",
             )
         else:
-            self._run_git("fetch", "origin", branch, "--quiet")
+            self._run_git("fetch", "origin", refspec, "--quiet")
 
     def get_pr_diff(self, target_branch: str, source_ref: str) -> str:
         """

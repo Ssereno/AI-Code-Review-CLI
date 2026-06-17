@@ -85,6 +85,7 @@ class ReviewConfig:
     tfs_ca_bundle: str = ""                 # Path to corporate CA bundle (.pem)
     tfs_repository: str = ""                # Default repository (empty = all)
     tfs_local_repo_path: str = ""           # Local clone path of the reviewed repo (empty = cwd)
+    tfs_local_clone_root: str = ".ai-review/repos"  # Managed clone cache root
 
     # --- Review -------------------------------------------------------
     review_language: str = "pt"             # Review language (pt/en)
@@ -141,6 +142,10 @@ class ReviewConfig:
         "Microsoft.VSTS.TCM.ReproSteps",
         "Microsoft.VSTS.TCM.SystemInfo",
     ])
+    pr_description_context_enabled: bool = True  # Include PR description and linked specs as context
+    pr_description_context_max_chars: int = 60000
+    pr_description_context_max_links: int = 10
+    pr_description_context_link_max_chars: int = 25000
 
     # --- RAG Context --------------------------------------------------
     rag_enabled: bool = True                 # Enable RAG context retrieval
@@ -266,6 +271,7 @@ class ReviewConfig:
             "tfs_ca_bundle": ("tfs", "ca_bundle"),
             "tfs_repository": ("tfs", "repository"),
             "tfs_local_repo_path": ("tfs", "local_repo_path"),
+            "tfs_local_clone_root": ("tfs", "local_clone_root"),
             # Review
             "review_language": ("review", "language"),
             "verbosity": ("review", "verbosity"),
@@ -290,6 +296,10 @@ class ReviewConfig:
             "work_item_context_max_items": ("review", "work_item_context", "max_items"),
             "work_item_context_max_chars": ("review", "work_item_context", "max_chars"),
             "work_item_context_fields": ("review", "work_item_context", "fields"),
+            "pr_description_context_enabled": ("review", "pr_description_context", "enabled"),
+            "pr_description_context_max_chars": ("review", "pr_description_context", "max_chars"),
+            "pr_description_context_max_links": ("review", "pr_description_context", "max_links"),
+            "pr_description_context_link_max_chars": ("review", "pr_description_context", "link_max_chars"),
             "rag_enabled": ("review", "rag", "enabled"),
             "rag_max_chars": ("review", "rag", "max_chars"),
             # PR
@@ -472,6 +482,24 @@ class ReviewConfig:
         if self.work_item_context_max_chars <= 0:
             issues.append(
                 f"Invalid work_item_context.max_chars: '{self.work_item_context_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.pr_description_context_max_chars <= 0:
+            issues.append(
+                f"Invalid pr_description_context.max_chars: '{self.pr_description_context_max_chars}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.pr_description_context_max_links <= 0:
+            issues.append(
+                f"Invalid pr_description_context.max_links: '{self.pr_description_context_max_links}'. "
+                "Use an integer greater than 0."
+            )
+
+        if self.pr_description_context_link_max_chars <= 0:
+            issues.append(
+                f"Invalid pr_description_context.link_max_chars: '{self.pr_description_context_link_max_chars}'. "
                 "Use an integer greater than 0."
             )
 

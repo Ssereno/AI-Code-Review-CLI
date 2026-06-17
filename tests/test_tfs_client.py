@@ -617,6 +617,51 @@ def test_work_item_context_always_requests_description(mocker) -> None:
     assert "Regional checkout spec" in context
 
 
+def test_get_pull_request_description_context_fetches_supported_wiki_links(mocker) -> None:
+    """It should fetch supported wiki links and skip unsupported PR description links."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={
+            "path": "/Spec/Checkout",
+            "content": "<p>Use tax rules.</p><p>Validate totals.</p>",
+        },
+    )
+
+    pr = {
+        "id": 42,
+        "title": "Checkout validation",
+        "description": (
+            "<p>See the docs.</p>"
+            "<a href=\"https://dev.azure.com/org/ProjectX/_wiki/wikis/TeamWiki?pagePath=/Spec/Checkout\">Spec</a> "
+            "[Figma](https://figma.com/file/abc123)"
+        ),
+        "repository": {"name": "repo-a"},
+    }
+
+    context = client.get_pull_request_description_context(
+        pr,
+        max_links=5,
+        max_chars=5000,
+        link_max_chars=2000,
+    )
+
+    assert "Pull request description and linked specs" in context
+    assert "Checkout validation" in context
+    assert "See the docs." in context
+    assert "Linked spec: Spec" in context
+    assert "Use tax rules." in context
+    assert "Validate totals." in context
+    assert "Skipped links" in context
+    assert "figma.com" in context
+    get_mock.assert_called_once()
+    path, params = get_mock.call_args.args[:2]
+    assert path == "wiki/wikis/TeamWiki/pages"
+    assert params["path"] == "/Spec/Checkout"
+    assert params["includeContent"] == "true"
+    assert get_mock.call_args.kwargs["api_version"] == "7.1-preview.1"
+
+
 def test_raw_get_and_comment_endpoints(mocker) -> None:
     """It should expose raw file content and build comment payloads correctly."""
     client = TFSClient(make_tfs_config())

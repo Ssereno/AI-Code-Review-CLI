@@ -42,6 +42,7 @@ Version: see pyproject.toml
 import argparse
 import datetime
 import importlib.resources
+import json
 import os
 import re
 import sys
@@ -82,6 +83,7 @@ PROJECT_ROOT = _ensure_project_root_on_path(__file__)
 
 from src.config import ReviewConfig, VALID_PROVIDERS
 from src.git_utils import GitUtils, GitError
+from src.local_repo import LocalRepoContext, LocalRepoError, LocalRepoManager
 from src.llm_client import LLMClient, LLMError
 from src.formatter import ReviewFormatter, Colors, save_output
 from src.rag_engine import obter_contexto_rag
@@ -395,6 +397,7 @@ def _append_comment_diagnostics(
             lines.append(f"   Comment: {body}")
 
         for label, key in (
+            ("Reason", "discard_reason"),
             ("Anchor", "anchor_code"),
             ("Problematic code", "problematic_code"),
             ("Evidence", "evidence"),
@@ -416,6 +419,8 @@ def _format_structured_review_text(
     discarded_location_comments: list[dict] | None = None,
     discarded_grounding_comments: list[dict] | None = None,
     discarded_changed_line_comments: list[dict] | None = None,
+    discarded_quality_comments: list[dict] | None = None,
+    duplicate_generated_comments: list[dict] | None = None,
     capped_comments: list[dict] | None = None,
     duplicate_comments: list[dict] | None = None,
 ) -> str:
@@ -425,6 +430,8 @@ def _format_structured_review_text(
     discarded_location_comments = discarded_location_comments or []
     discarded_grounding_comments = discarded_grounding_comments or []
     discarded_changed_line_comments = discarded_changed_line_comments or []
+    discarded_quality_comments = discarded_quality_comments or []
+    duplicate_generated_comments = duplicate_generated_comments or []
     capped_comments = capped_comments or []
     duplicate_comments = duplicate_comments or []
 
@@ -482,7 +489,7 @@ def _format_structured_review_text(
         if discarded_count:
             lines.append(
                 f"- {discarded_count} generated comment(s) were discarded by "
-                "grounding or changed-line validation."
+                "grounding, quality, or changed-line validation."
             )
         if duplicate_count:
             lines.append(
@@ -509,6 +516,16 @@ def _format_structured_review_text(
         lines,
         "Discarded: Failed Final Changed-Line Check",
         discarded_changed_line_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Failed Quality Checks",
+        discarded_quality_comments,
+    )
+    _append_comment_diagnostics(
+        lines,
+        "Discarded: Duplicate Generated Comments",
+        duplicate_generated_comments,
     )
     _append_comment_diagnostics(
         lines,
@@ -563,6 +580,135 @@ def _severity_rank(comment: dict) -> int:
         "info": 4,
     }
     return ranks.get(str(comment.get("severity", "info")).lower(), 4)
+
+
+def _comment_quality_issue(comment: dict) -> str:
+    """Returns why a grounded comment is still too weak to post, or empty."""
+    allowed_types = {
+        "bug",
+        "security",
+        "performance",
+        "null_safety",
+        "data_integrity",
+        "api_contract",
+        "error_handling",
+        "resource",
+        "work_item",
+        "suggestion",
+    }
+    allowed_severities = {"critical", "high", "medium", "low", "info"}
+    comment_type = str(comment.get("type", "")).strip().lower()
+    severity = str(comment.get("severity", "")).strip().lower()
+    body = str(comment.get("comment", "")).strip()
+    normalized_body = re.sub(r"\s+", " ", body.lower()).strip(" .:;!-")
+
+    if comment_type not in allowed_types:
+        return f"unsupported issue type '{comment_type or 'missing'}'"
+    if severity not in allowed_severities:
+        return f"unsupported severity '{severity or 'missing'}'"
+    if len(body) < 12:
+        return "comment is too short to explain an actionable problem"
+    if not re.search(r"[A-Za-zÀ-ÿ]{4,}", body):
+        return "comment does not contain a meaningful problem statement"
+
+    vague_comments = {
+        "possible issue",
+        "potential issue",
+        "possible bug",
+        "potential bug",
+        "issue here",
+        "bug here",
+        "problem here",
+        "fix this",
+        "check this",
+        "review this",
+        "needs improvement",
+        "improve this",
+        "bad code",
+        "not good",
+    }
+    if normalized_body in vague_comments:
+        return "comment is too vague to be actionable"
+
+    if comment_type == "suggestion" and not str(comment.get("suggestion", "")).strip():
+        return "suggestion comment has no concrete suggested fix"
+
+    return ""
+
+
+def _filter_comments_to_quality(comments: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Keeps grounded comments only when they are actionable enough to post."""
+    kept: list[dict] = []
+    discarded: list[dict] = []
+    for comment in comments:
+        issue = _comment_quality_issue(comment)
+        if issue:
+            enriched = dict(comment)
+            enriched["discard_reason"] = issue
+            discarded.append(enriched)
+        else:
+            kept.append(comment)
+    return kept, discarded
+
+
+def _normalize_dedupe_text(value: object) -> str:
+    """Returns a stable text key for generated-comment duplicate checks."""
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _generated_comment_key(comment: dict) -> tuple:
+    """Builds a conservative key for duplicate model findings in one run."""
+    line, end_line = _comment_line_range(comment)
+    code_anchor = (
+        _normalize_dedupe_text(comment.get("problematic_code"))
+        or _normalize_dedupe_text(comment.get("anchor_code"))
+        or _normalize_dedupe_text(comment.get("evidence"))
+    )
+    return (
+        _normalize_review_path(comment.get("file", "")),
+        line,
+        end_line,
+        str(comment.get("type", "")).strip().lower(),
+        code_anchor,
+    )
+
+
+def _better_duplicate_comment(candidate: dict, current: dict) -> bool:
+    """Prefers higher severity, then richer text, for generated duplicates."""
+    candidate_rank = _severity_rank(candidate)
+    current_rank = _severity_rank(current)
+    if candidate_rank != current_rank:
+        return candidate_rank < current_rank
+    return len(str(candidate.get("comment", ""))) > len(str(current.get("comment", "")))
+
+
+def _deduplicate_generated_comments(comments: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Removes repeated findings produced by a single model response."""
+    kept_by_key: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    duplicates: list[dict] = []
+
+    for index, comment in enumerate(comments):
+        key = _generated_comment_key(comment)
+        if not key[-1]:
+            key = (*key, index)
+            order.append(key)
+            kept_by_key[key] = comment
+            continue
+
+        existing = kept_by_key.get(key)
+        if existing is None:
+            kept_by_key[key] = comment
+            order.append(key)
+            continue
+
+        duplicate = dict(existing if _better_duplicate_comment(comment, existing) else comment)
+        duplicate["discard_reason"] = "duplicate generated finding for the same changed line"
+        duplicates.append(duplicate)
+        if _better_duplicate_comment(comment, existing):
+            kept_by_key[key] = comment
+
+    return [kept_by_key[key] for key in order if key in kept_by_key], duplicates
 
 
 def _limit_comments_to_post(
@@ -799,6 +945,34 @@ def _changed_text_for_required_lines(hunk: dict, required_lines: set[int]) -> st
     return "\n".join(lines)
 
 
+def _repair_comment_grounding_fields(comment: dict, anchor_text: str) -> dict:
+    """Fills missing exact-code fields when evidence already matches the anchor."""
+    repaired = dict(comment)
+    exact_fields = [
+        str(repaired.get("evidence", "")).strip(),
+        str(repaired.get("anchor_code", "")).strip(),
+        str(repaired.get("problematic_code", "")).strip(),
+    ]
+    replacement = next(
+        (
+            value for value in exact_fields
+            if value and _text_contains_evidence(anchor_text, value)
+        ),
+        "",
+    )
+    if not replacement:
+        return repaired
+
+    if replacement and not str(repaired.get("anchor_code", "")).strip():
+        repaired["anchor_code"] = replacement
+    if replacement and not str(repaired.get("problematic_code", "")).strip():
+        repaired["problematic_code"] = replacement
+    if replacement and not str(repaired.get("evidence", "")).strip():
+        repaired["evidence"] = replacement
+
+    return repaired
+
+
 def _suggestion_already_applied(comment: dict, anchor_text: str, source_text: str) -> bool:
     """Detects comments that suggest code already present in source branch."""
     problematic_code = str(comment.get("problematic_code", "")).strip()
@@ -899,9 +1073,14 @@ def _filter_comments_to_grounded_source_lines(
             discarded_grounding.append(comment)
             continue
 
+        comment = _repair_comment_grounding_fields(comment, anchor_text)
         if not evidence:
-            discarded_grounding.append(comment)
-            continue
+            evidence = str(comment.get("evidence", "")).strip()
+            if not evidence:
+                discarded_grounding.append(comment)
+                continue
+        anchor_code = str(comment.get("anchor_code", "")).strip()
+        problematic_code = str(comment.get("problematic_code", "")).strip()
 
         if not _text_contains_evidence(anchor_text, anchor_code):
             discarded_grounding.append(comment)
@@ -951,6 +1130,8 @@ def _build_on_demand_project_context(
     tfs,
     config: ReviewConfig,
     formatter: ReviewFormatter,
+    local_context: LocalRepoContext | None,
+    pr_description_context: str,
     repo_name: str,
     source_branch: str,
     diff: str,
@@ -963,23 +1144,26 @@ def _build_on_demand_project_context(
     project_manifest = ""
 
     try:
-        project_manifest = tfs.get_project_manifest(
-            repo_name,
-            source_branch,
-            max_chars=config.project_context_manifest_max_chars,
-            file_extensions=config.project_context_file_extensions,
-            exclude_patterns=config.project_context_exclude_patterns,
-        )
+        if local_context is not None:
+            project_manifest = local_context.map_repo_json(repo_name, source_branch)
+        else:
+            project_manifest = tfs.get_project_manifest(
+                repo_name,
+                source_branch,
+                max_chars=config.project_context_manifest_max_chars,
+                file_extensions=config.project_context_file_extensions,
+                exclude_patterns=config.project_context_exclude_patterns,
+            )
     except Exception as exc:
         print(formatter.format_warning(
-            f"Could not load repository manifest; continuing without on-demand context: {exc}"
+            f"Could not load repository structure; continuing without on-demand context: {exc}"
         ))
 
     if not project_manifest:
         return ""
 
     print(formatter.format_info(
-        f"Repository manifest loaded ({len(project_manifest):,} characters). "
+        f"Repository structure loaded ({len(project_manifest):,} characters). "
         "The model can request additional files from it."
     ))
 
@@ -999,6 +1183,7 @@ def _build_on_demand_project_context(
             changed_files_context=source_files_context,
             work_item_context=work_item_context,
             fetched_context=fetched_context,
+            pr_description_context=pr_description_context,
             max_files=remaining_files,
         )
         if not isinstance(requested_paths, list):
@@ -1020,16 +1205,25 @@ def _build_on_demand_project_context(
         ))
 
         try:
-            round_context = tfs.get_project_files_context(
-                repo_name,
-                source_branch,
-                new_paths,
-                max_files=remaining_files,
-                max_chars=remaining_chars,
-                file_max_chars=config.project_context_retrieval_file_max_chars,
-                file_extensions=config.project_context_file_extensions,
-                exclude_patterns=config.project_context_exclude_patterns,
-            )
+            if local_context is not None:
+                round_context = local_context.get_files_context(
+                    source_branch,
+                    new_paths,
+                    max_files=remaining_files,
+                    max_chars=remaining_chars,
+                    file_max_chars=config.project_context_retrieval_file_max_chars,
+                )
+            else:
+                round_context = tfs.get_project_files_context(
+                    repo_name,
+                    source_branch,
+                    new_paths,
+                    max_files=remaining_files,
+                    max_chars=remaining_chars,
+                    file_max_chars=config.project_context_retrieval_file_max_chars,
+                    file_extensions=config.project_context_file_extensions,
+                    exclude_patterns=config.project_context_exclude_patterns,
+                )
         except Exception as exc:
             print(formatter.format_warning(
                 f"Could not fetch requested repository context; continuing: {exc}"
@@ -1051,6 +1245,14 @@ def _get_llm_usage_events(llm: LLMClient) -> list:
     """Returns usage events from an LLM client, ignoring test doubles."""
     events = getattr(llm, "usage_events", [])
     return events if isinstance(events, list) else []
+
+
+def _get_repository_metadata(tfs, repo_name: str) -> dict:
+    """Returns repository metadata from Azure DevOps/TFS list output."""
+    for repo in tfs.list_repositories():
+        if str(repo.get("name", "")).lower() == str(repo_name or "").lower():
+            return repo
+    return {"name": repo_name, "id": "", "url": ""}
 
 
 def _format_usage_summary(record: dict) -> str:
@@ -1375,8 +1577,37 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # --- Get PR diff via git local ---
     print(formatter.format_progress("Getting Pull Request diff"))
 
-    _local_repo = (config.tfs_local_repo_path or "").strip() or os.getcwd()
-    git_utils_pr = GitUtils(repo_path=_local_repo, pat=config.tfs_pat)
+    repo_metadata = {"name": repo_name, "id": "", "url": ""}
+    if not (config.tfs_local_repo_path or "").strip():
+        try:
+            repo_metadata = _get_repository_metadata(tfs, repo_name)
+        except TFSError as exc:
+            print(formatter.format_error(
+                f"Could not resolve repository clone metadata: {exc}"
+            ))
+            return 1
+
+    try:
+        local_resolution = LocalRepoManager(config).ensure_repo_available(
+            repository_name=repo_name,
+            repository_id=str(repo_metadata.get("id", "")),
+            clone_url=str(repo_metadata.get("url", "")),
+        )
+    except LocalRepoError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    if local_resolution.cloned:
+        print(formatter.format_info(
+            f"Cloned repository into managed cache: {local_resolution.path}"
+        ))
+    elif local_resolution.managed:
+        print(formatter.format_info(
+            f"Using managed repository cache: {local_resolution.path}"
+        ))
+
+    git_utils_pr = GitUtils(repo_path=local_resolution.path, pat=config.tfs_pat)
+    local_context = LocalRepoContext(local_resolution.path, config)
 
     try:
         target_ref, source_ref = tfs.obter_dados_pr(pr_id)
@@ -1385,9 +1616,18 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         return 1
 
     try:
+        git_utils_pr.fetch_merge_commit(target_ref)
         git_utils_pr.fetch_merge_commit(source_ref)
     except GitError as exc:
-        print(formatter.format_warning(f"Could not fetch source branch: {exc}"))
+        print(formatter.format_warning(f"Could not fetch PR branches: {exc}"))
+
+    if local_resolution.managed:
+        try:
+            local_context.checkout_target_for_managed_cache(target_ref)
+        except LocalRepoError as exc:
+            print(formatter.format_warning(
+                f"Could not align managed clone to target branch for local context: {exc}"
+            ))
 
     try:
         diff = git_utils_pr.get_pr_diff(target_ref, source_ref)
@@ -1544,6 +1784,31 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 f"{_review_scope_context_note(config.review_scope)}"
             ))
 
+    pr_description_context = ""
+    if config.pr_description_context_enabled:
+        print(formatter.format_progress(
+            "Getting pull request description and linked spec context"
+        ))
+        try:
+            pr_description_context = tfs.get_pull_request_description_context(
+                pr_details,
+                max_links=config.pr_description_context_max_links,
+                max_chars=config.pr_description_context_max_chars,
+                link_max_chars=config.pr_description_context_link_max_chars,
+            )
+        except TFSError as exc:
+            print(formatter.format_warning(
+                f"Could not load PR description/spec context; continuing without it: {exc}"
+            ))
+
+        if pr_description_context:
+            print(formatter.format_info(
+                f"PR description/spec context loaded ({len(pr_description_context):,} characters). "
+                f"{_review_scope_context_note(config.review_scope)}"
+            ))
+        if not isinstance(pr_description_context, str):
+            pr_description_context = ""
+
     metadata_issues = _build_pr_metadata_issues(
         pr_details,
         linked_work_item_count=(
@@ -1560,16 +1825,13 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             "Getting full source-branch contents for changed files"
         ))
         try:
-            source_files_context = tfs.get_changed_files_context(
-                repo_name,
+            source_files_context = local_context.get_changed_files_context(
                 pr_details.get("source_branch", ""),
                 pr_details.get("changed_files", []),
                 max_chars=config.project_context_retrieval_max_chars,
                 file_max_chars=config.project_context_retrieval_file_max_chars,
-                file_extensions=config.project_context_file_extensions,
-                exclude_patterns=config.project_context_exclude_patterns,
             )
-        except TFSError as exc:
+        except LocalRepoError as exc:
             print(formatter.format_warning(
                 f"Could not load source-branch changed file contents; continuing with diff only: {exc}"
             ))
@@ -1589,15 +1851,27 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     ):
         print(formatter.format_progress("Getting full repository context from source branch"))
         try:
-            project_context = tfs.get_project_context(
+            repo_map = json.loads(local_context.map_repo_json(
                 repo_name,
                 pr_details.get("source_branch", ""),
-                max_files=config.project_context_max_files,
-                max_chars=config.project_context_max_chars,
-                file_extensions=config.project_context_file_extensions,
-                exclude_patterns=config.project_context_exclude_patterns,
+            ))
+            project_context = local_context.get_files_context(
+                pr_details.get("source_branch", ""),
+                [
+                    item.get("path", "")
+                    for item in repo_map.get("files", [])
+                ],
+                title="Full repository context",
+                intro=(
+                    "Use this repository snapshot only to understand existing architecture, "
+                    "contracts, dependencies, and call sites. The review target remains "
+                    "the PR diff only."
+                ),
+                max_files=config.project_context_max_files or 1000000,
+                max_chars=config.project_context_max_chars or 1000000000,
+                file_max_chars=config.project_context_retrieval_file_max_chars,
             )
-        except TFSError as exc:
+        except (LocalRepoError, ValueError) as exc:
             print(formatter.format_warning(
                 f"Could not load full repository context; continuing with PR diff only: {exc}"
             ))
@@ -1623,6 +1897,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 tfs=tfs,
                 config=config,
                 formatter=formatter,
+                local_context=local_context,
+                pr_description_context=pr_description_context,
                 repo_name=repo_name,
                 source_branch=pr_details.get("source_branch", ""),
                 diff=diff_truncated,
@@ -1649,6 +1925,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
     except LLMError as exc:
         progress.stop()
@@ -1663,14 +1940,13 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     ]
     if comment_paths:
         try:
-            source_file_contents = tfs.get_source_file_contents(
-                repo_name,
+            source_file_contents = local_context.get_source_file_contents(
                 pr_details.get("source_branch", ""),
                 comment_paths,
             )
             if not isinstance(source_file_contents, dict):
                 source_file_contents = {}
-        except TFSError as exc:
+        except LocalRepoError as exc:
             print(formatter.format_warning(
                 f"Could not verify source-branch file contents; using diff anchors only: {exc}"
             ))
@@ -1700,6 +1976,22 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     if extra_discarded_comments:
         print(formatter.format_info(
             f"Discarded {len(extra_discarded_comments)} comment(s) outside changed PR lines."
+        ))
+
+    structured_comments, discarded_quality_comments = _filter_comments_to_quality(
+        structured_comments
+    )
+    if discarded_quality_comments:
+        print(formatter.format_info(
+            f"Discarded {len(discarded_quality_comments)} vague or non-actionable comment(s)."
+        ))
+
+    structured_comments, duplicate_generated_comments = _deduplicate_generated_comments(
+        structured_comments
+    )
+    if duplicate_generated_comments:
+        print(formatter.format_info(
+            f"Discarded {len(duplicate_generated_comments)} duplicate generated comment(s)."
         ))
 
     existing_threads = []
@@ -1741,6 +2033,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         len(discarded_comments)
         + len(discarded_ungrounded)
         + len(extra_discarded_comments)
+        + len(discarded_quality_comments)
+        + len(duplicate_generated_comments)
         + len(capped_comments)
     )
     review_text = _format_structured_review_text(
@@ -1752,6 +2046,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         discarded_location_comments=discarded_comments,
         discarded_grounding_comments=discarded_ungrounded,
         discarded_changed_line_comments=extra_discarded_comments,
+        discarded_quality_comments=discarded_quality_comments,
+        duplicate_generated_comments=duplicate_generated_comments,
         capped_comments=capped_comments,
         duplicate_comments=skipped_duplicates,
     )

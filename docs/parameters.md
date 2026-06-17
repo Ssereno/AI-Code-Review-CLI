@@ -156,7 +156,26 @@ Bedrock credential modes:
 | `tfs.verify_ssl` | `true` | Whether TLS certificates should be verified. |
 | `tfs.ca_bundle` | empty | Optional path to a corporate CA bundle. |
 | `tfs.repository` | empty | Default repository filter. Empty means show PRs from all repositories. |
-| `local_repo_path`| empty | If you run the tool outside your local repository you need to specify the path. |
+| `tfs.local_repo_path`| empty | Optional explicit local clone path. When set, this path is used instead of the managed clone cache. |
+| `tfs.local_clone_root` | `.ai-review/repos` | Project-owned folder for managed repository clones when `local_repo_path` is empty. |
+
+When `tfs.local_repo_path` is empty, the CLI resolves the Azure DevOps/TFS
+repository clone URL, creates or reuses a clone under `tfs.local_clone_root`,
+fetches the PR source and target refs, and computes the PR diff locally. The
+managed clone folder is assumed to be owned by this tool.
+
+## PR Description / Spec Context Parameters
+
+`review.pr_description_context` controls whether the CLI extracts PR description text and supported linked spec pages to use as read-only requirements context.
+
+| Parameter | Values / Default | Description |
+|---|---:|---|
+| `review.pr_description_context.enabled` | `true` | Enables PR description/spec context loading. |
+| `review.pr_description_context.max_chars` | `60000` | Maximum characters included across the PR description and fetched spec pages. |
+| `review.pr_description_context.max_links` | `10` | Maximum supported spec links fetched from the PR description. |
+| `review.pr_description_context.link_max_chars` | `25000` | Maximum characters included from each fetched spec page. |
+
+This context is read-only and is used only to detect contradictions with changed PR lines. It is not a checklist that the PR must fully implement.
 
 ## Review Parameters
 
@@ -175,7 +194,7 @@ Bedrock credential modes:
 
 `diff_with_context` is the default. It validates only modified PR lines while
 giving the model read-only context from per-hunk change packets, full changed-file
-contents, linked work item documentation, and on-demand repository files. Only
+contents, linked work item documentation, PR description/spec links, and on-demand repository files. Only
 lines marked as reviewable in the source-branch change packets can become inline
 comments.
 
@@ -183,6 +202,8 @@ The reviewer context is intentionally single-file at runtime. `ai-review init`
 creates `review_context.example.md` as the kept example and
 `review_context.local.md` as the local override, then adds that local file to
 `.gitignore`. The LLM never concatenates multiple Markdown context files.
+The packaged example includes the default changed-line boundary, minimum comment
+bar, and severity bar used to keep comments meaningful for smaller models.
 
 | Scope | Behavior |
 |---|---|
@@ -197,7 +218,7 @@ This context is read-only and is never a review target by itself.
 | Parameter | Values / Default | Description |
 |---|---:|---|
 | `review.project_context.enabled` | `true` | Enables repository context loading. |
-| `review.project_context.mode` | `on_demand` | `on_demand` sends changed files plus a manifest, then lets the model request extra files. `full` sends the full eligible repository snapshot. |
+| `review.project_context.mode` | `on_demand` | `on_demand` sends changed files plus local repository structure JSON, then lets the model request extra files. `full` sends the full eligible repository snapshot. |
 | `review.project_context.max_files` | `0` | Full mode only. Maximum eligible repository files. `0` means no file-count limit. |
 | `review.project_context.max_chars` | `0` | Full mode only. Maximum repository-context characters. `0` means no character limit before prompt-budget trimming. |
 | `review.project_context.manifest_max_chars` | `60000` | On-demand mode. Maximum characters used for the repository file manifest. |
@@ -208,10 +229,10 @@ This context is read-only and is never a review target by itself.
 | `review.project_context.file_extensions` | `[]` | Allowlist for repository context files. Empty means common text/code files. |
 | `review.project_context.exclude_patterns` | built-in list | Paths or glob-like patterns excluded from repository context. |
 
-The default on-demand flow loads project structure before the first context
-request LLM call. The model receives the manifest and can request specific
-files; requested paths are validated against eligible repository files before
-content is fetched.
+The default on-demand flow maps the local cloned repository before the first
+context request LLM call. The model receives JSON describing eligible files and
+directories, then can request specific files. Requested paths are validated
+against eligible repository files before content is fetched from the local clone.
 
 ## RAG Context Parameters
 
@@ -220,9 +241,9 @@ When enabled, the CLI runs `git grep` to find code snippets related to the
 identifiers changed in the PR diff and appends them to the LLM prompt as
 read-only context.
 
-> **Local branch requirement.** The local repository must be checked out on the
-> PR **target branch**. If the local branch differs, the review is blocked with
-> an error message and a `git checkout <target>` instruction.
+> **Local branch requirement.** Explicit `tfs.local_repo_path` repositories must
+> be checked out on the PR **target branch**. Managed clones are aligned to the
+> target branch automatically before local RAG context is loaded.
 
 | Parameter | Values / Default | Description |
 |---|---:|---|

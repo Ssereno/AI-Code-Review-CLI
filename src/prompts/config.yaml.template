@@ -71,6 +71,8 @@ tfs:
   verify_ssl: true
   # ca_bundle: C:/certs/corporate-root-ca.pem   # optional corporate CA
   # repository:                                  # optional default repo filter
+  # local_repo_path:                             # optional explicit local clone
+  local_clone_root: .ai-review/repos             # managed clone cache when local_repo_path is empty
 
 # ---------------------------------------------------------------------------
 # Review Preferences
@@ -161,6 +163,14 @@ review:
       - Microsoft.VSTS.Common.AcceptanceCriteria
       - Microsoft.VSTS.TCM.ReproSteps
       - Microsoft.VSTS.TCM.SystemInfo
+
+  # PR description/spec context extracted from the PR description and linked
+  # TFS/Azure DevOps wiki pages. This is read-only requirements context.
+  pr_description_context:
+    enabled: true
+    max_chars: 60000
+    max_links: 10
+    link_max_chars: 25000
 
   # RAG context: enriches the review with related code snippets found via
   # git-grep in the local repository.

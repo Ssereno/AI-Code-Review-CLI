@@ -243,10 +243,11 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         "     other = value\n"
     )
     tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
+    tfs.list_repositories.return_value = [
+        {"name": "repo-a", "id": "repo-id", "url": "https://example/repo-a"}
+    ]
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
-    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
-    tfs.get_project_manifest.return_value = "PROJECT MANIFEST"
-    tfs.get_project_files_context.return_value = "REQUESTED PROJECT CONTEXT"
+    tfs.get_pull_request_description_context.return_value = "PR DESCRIPTION CONTEXT"
 
     llm = MagicMock()
     llm.request_context_files.side_effect = [["src/helper.py"], []]
@@ -263,7 +264,6 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         }
     ]
     llm.review_pr_structured.return_value = structured_comments
-    tfs.get_source_file_contents.return_value = {"a.py": "class Example:\n    value = 2\n    other = value"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -279,6 +279,14 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     git_utils.filter_diff_noise.return_value = diff
     git_utils.get_current_branch.return_value = "main"
 
+    local_context = MagicMock()
+    local_context.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    local_context.map_repo_json.return_value = "PROJECT STRUCTURE JSON"
+    local_context.get_files_context.return_value = "REQUESTED PROJECT CONTEXT"
+    local_context.get_source_file_contents.return_value = {
+        "a.py": "class Example:\n    value = 2\n    other = value"
+    }
+
     markdown_formatter = MagicMock()
     markdown_formatter.format_header.return_value = "HEADER"
     markdown_formatter.format_footer.return_value = "FOOTER"
@@ -287,6 +295,14 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    manager = mocker.patch("src.ai_review.LocalRepoManager")
+    manager.return_value.ensure_repo_available.return_value = SimpleNamespace(
+        path="C:/repo-a",
+        cloned=False,
+        updated=True,
+        managed=True,
+    )
+    mocker.patch("src.ai_review.LocalRepoContext", return_value=local_context)
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
     mocker.patch("src.tfs_client.TFSError", new=Exception)
     save_output = mocker.patch("src.ai_review.save_output")
@@ -314,28 +330,37 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
         max_chars=review_config.work_item_context_max_chars,
         fields=review_config.work_item_context_fields,
     )
+    tfs.get_pull_request_description_context.assert_called_once_with(
+        tfs.get_pull_request_details.return_value,
+        max_links=review_config.pr_description_context_max_links,
+        max_chars=review_config.pr_description_context_max_chars,
+        link_max_chars=review_config.pr_description_context_link_max_chars,
+    )
     tfs.get_project_context.assert_not_called()
-    tfs.get_changed_files_context.assert_called_once_with(
-        "repo-a",
+    manager.return_value.ensure_repo_available.assert_called_once_with(
+        repository_name="repo-a",
+        repository_id="repo-id",
+        clone_url="https://example/repo-a",
+    )
+    local_context.get_changed_files_context.assert_called_once_with(
         "feature/test",
         [{"path": "/a.py", "change_type": "edit"}],
         max_chars=review_config.project_context_retrieval_max_chars,
         file_max_chars=review_config.project_context_retrieval_file_max_chars,
-        file_extensions=review_config.project_context_file_extensions,
-        exclude_patterns=review_config.project_context_exclude_patterns,
     )
-    tfs.get_project_manifest.assert_called_once()
-    tfs.get_project_files_context.assert_called_once()
-    tfs.get_source_file_contents.assert_called_once_with(
-        "repo-a",
+    local_context.map_repo_json.assert_called_once_with("repo-a", "feature/test")
+    local_context.get_files_context.assert_called_once()
+    local_context.get_source_file_contents.assert_called_once_with(
         "feature/test",
         ["a.py"],
     )
     assert llm.request_context_files.call_count == 2
+    assert llm.request_context_files.call_args_list[0].kwargs["pr_description_context"] == "PR DESCRIPTION CONTEXT"
     llm.review.assert_not_called()
     assert llm.review_pr_structured.call_args.kwargs["source_files_context"] == "CHANGED FILE CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
+    assert llm.review_pr_structured.call_args.kwargs["pr_description_context"] == "PR DESCRIPTION CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
     print_mock.assert_any_call("REVIEW")
@@ -451,9 +476,10 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     }
     diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+print('x')"
     tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
+    tfs.list_repositories.return_value = [
+        {"name": "repo-a", "id": "repo-id", "url": "https://example/repo-a"}
+    ]
     tfs.get_work_item_context.return_value = "WORK ITEM CONTEXT"
-    tfs.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
-    tfs.get_project_manifest.return_value = ""
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
@@ -471,7 +497,6 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
         }
     ]
     llm.review_pr_structured.return_value = structured_comments
-    tfs.get_source_file_contents.return_value = {"a.py": "print('x')"}
     tfs.plan_review_comments.return_value = {
         "new_comments": structured_comments,
         "skipped_duplicates": [],
@@ -488,11 +513,24 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     git_utils.filter_diff_noise.return_value = diff
     git_utils.get_current_branch.return_value = "main"
 
+    local_context = MagicMock()
+    local_context.get_changed_files_context.return_value = "CHANGED FILE CONTEXT"
+    local_context.map_repo_json.return_value = ""
+    local_context.get_source_file_contents.return_value = {"a.py": "print('x')"}
+
     progress = MagicMock()
     mocker.patch("src.ai_review.ProgressIndicator", return_value=progress)
     mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    manager = mocker.patch("src.ai_review.LocalRepoManager")
+    manager.return_value.ensure_repo_available.return_value = SimpleNamespace(
+        path="C:/repo-a",
+        cloned=False,
+        updated=True,
+        managed=True,
+    )
+    mocker.patch("src.ai_review.LocalRepoContext", return_value=local_context)
     mocker.patch("src.ai_review._select_comments_to_post", return_value=llm.review_pr_structured.return_value)
     mocker.patch("src.ai_review._save_pr_review_output")
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
@@ -539,6 +577,9 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     )
     filtered_diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -1,3 +1,4 @@\n+    value = 2"
     tfs.obter_dados_pr.return_value = ("origin/main", "origin/feature/test")
+    tfs.list_repositories.return_value = [
+        {"name": "repo-a", "id": "repo-id", "url": "https://example/repo-a"}
+    ]
 
     llm = MagicMock()
     llm.review_pr_structured.return_value = []
@@ -558,10 +599,20 @@ def test_run_pr_review_workflow_diff_only_skips_extra_context(mocker, review_con
     git_utils.filter_diff_noise.return_value = diff
     git_utils.get_current_branch.return_value = "main"
 
+    local_context = MagicMock()
+
     mocker.patch("src.ai_review.ProgressIndicator")
     mocker.patch("src.ai_review.obter_contexto_rag", return_value="")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    manager = mocker.patch("src.ai_review.LocalRepoManager")
+    manager.return_value.ensure_repo_available.return_value = SimpleNamespace(
+        path="C:/repo-a",
+        cloned=False,
+        updated=True,
+        managed=True,
+    )
+    mocker.patch("src.ai_review.LocalRepoContext", return_value=local_context)
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
     mocker.patch("src.tfs_client.TFSError", new=Exception)
     mocker.patch("builtins.print")
@@ -624,6 +675,75 @@ def test_limit_comments_to_post_keeps_highest_severity() -> None:
 
     assert kept == [comments[1], comments[2]]
     assert omitted == [comments[0]]
+
+
+def test_filter_comments_to_quality_discards_vague_grounded_comments() -> None:
+    """It should keep concrete findings and diagnose vague model output."""
+    comments = [
+        {
+            "type": "bug",
+            "severity": "medium",
+            "comment": "Missing null check before dereferencing customer.",
+        },
+        {
+            "type": "bug",
+            "severity": "medium",
+            "comment": "possible issue",
+        },
+        {
+            "type": "suggestion",
+            "severity": "low",
+            "comment": "Use a helper here.",
+            "suggestion": "",
+        },
+    ]
+
+    kept, discarded = ai_review._filter_comments_to_quality(comments)
+
+    assert kept == [comments[0]]
+    assert [item["discard_reason"] for item in discarded] == [
+        "comment is too vague to be actionable",
+        "suggestion comment has no concrete suggested fix",
+    ]
+
+
+def test_deduplicate_generated_comments_keeps_best_duplicate() -> None:
+    """It should collapse repeated model findings before PR duplicate checks."""
+    comments = [
+        {
+            "file": "src/app.py",
+            "line": 10,
+            "end_line": 0,
+            "type": "bug",
+            "severity": "medium",
+            "comment": "Short duplicate.",
+            "problematic_code": "call_service()",
+        },
+        {
+            "file": "src/app.py",
+            "line": 10,
+            "end_line": 11,
+            "type": "bug",
+            "severity": "high",
+            "comment": "call_service() can raise here and should be guarded.",
+            "problematic_code": "call_service()",
+        },
+        {
+            "file": "src/other.py",
+            "line": 3,
+            "type": "bug",
+            "severity": "low",
+            "comment": "Different finding.",
+            "problematic_code": "other_call()",
+        },
+    ]
+
+    kept, duplicates = ai_review._deduplicate_generated_comments(comments)
+
+    assert kept == [comments[1], comments[2]]
+    assert len(duplicates) == 1
+    assert duplicates[0]["comment"] == "Short duplicate."
+    assert duplicates[0]["discard_reason"] == "duplicate generated finding for the same changed line"
 
 
 def test_filter_comments_to_changed_lines_discards_context_comments(sample_diff: str) -> None:
@@ -691,9 +811,62 @@ def test_filter_comments_to_grounded_source_lines_requires_evidence(sample_diff:
         )
     )
 
-    assert kept == [comments[0]]
+    assert kept[0] == comments[0]
+    assert kept[1]["evidence"] == "print('extra')"
     assert discarded_location == [comments[1], comments[4]]
-    assert discarded_grounding == [comments[2], comments[3]]
+    assert discarded_grounding == [comments[2]]
+
+
+def test_filter_comments_repairs_missing_grounding_fields_when_evidence_matches(sample_diff: str) -> None:
+    """It should rescue small-model comments that include exact evidence but miss duplicate fields."""
+    comment = {
+        "file": "src/app.py",
+        "line": 2,
+        "type": "bug",
+        "comment": "changed",
+        "anchor_code": "",
+        "problematic_code": "",
+        "evidence": "print('new')",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert discarded_location == []
+    assert discarded_grounding == []
+    assert kept[0]["anchor_code"] == "print('new')"
+    assert kept[0]["problematic_code"] == "print('new')"
+    assert kept[0]["evidence"] == "print('new')"
+
+
+def test_filter_comments_does_not_repair_comments_without_any_exact_quote(sample_diff: str) -> None:
+    """It should still discard vague comments that provide no changed-line quote."""
+    comment = {
+        "file": "src/app.py",
+        "line": 2,
+        "type": "bug",
+        "comment": "possible issue",
+        "anchor_code": "",
+        "problematic_code": "",
+        "evidence": "",
+    }
+
+    kept, discarded_location, discarded_grounding = (
+        ai_review._filter_comments_to_grounded_source_lines(
+            [comment],
+            sample_diff,
+            {"src/app.py": "import os\nprint('new')\nprint('extra')"},
+        )
+    )
+
+    assert kept == []
+    assert discarded_location == []
+    assert discarded_grounding == [comment]
 
 
 def test_filter_comments_to_grounded_source_lines_checks_latest_source_file(sample_diff: str) -> None:
@@ -841,6 +1014,25 @@ def test_format_structured_review_text_includes_discarded_comment_details() -> N
     assert "src/app.py:42" in rendered
     assert "This was not grounded on the changed line." in rendered
     assert "Use the changed-line anchor." in rendered
+
+
+def test_format_structured_review_text_includes_quality_discard_reason() -> None:
+    """It should explain why a grounded comment failed quality checks."""
+    rendered = ai_review._format_structured_review_text(
+        [],
+        discarded_count=1,
+        discarded_quality_comments=[{
+            "file": "src/app.py",
+            "line": 7,
+            "type": "bug",
+            "severity": "medium",
+            "comment": "possible issue",
+            "discard_reason": "comment is too vague to be actionable",
+        }],
+    )
+
+    assert "Discarded: Failed Quality Checks" in rendered
+    assert "Reason: comment is too vague to be actionable" in rendered
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:

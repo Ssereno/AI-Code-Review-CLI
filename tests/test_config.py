@@ -172,6 +172,7 @@ tfs:
   verify_ssl: false
   ca_bundle: ~/ca.pem
   repository: repo-a
+  local_clone_root: .cache/ai-review/repos
 review:
   language: en
   verbosity: quick
@@ -206,6 +207,11 @@ review:
     fields:
       - System.Description
       - Custom.Documentation
+  pr_description_context:
+    enabled: false
+    max_chars: 54321
+    max_links: 4
+    link_max_chars: 2222
 pr:
   auto_post_comments: true
   dry_run: true
@@ -251,6 +257,7 @@ usage:
     assert config.tfs_verify_ssl is False
     assert config.tfs_ca_bundle == "~/ca.pem"
     assert config.tfs_repository == "repo-a"
+    assert config.tfs_local_clone_root == ".cache/ai-review/repos"
     assert config.review_language == "en"
     assert config.verbosity == "quick"
     assert config.review_scope == "diff_only"
@@ -274,6 +281,10 @@ usage:
     assert config.work_item_context_max_items == 7
     assert config.work_item_context_max_chars == 12345
     assert config.work_item_context_fields == ["System.Description", "Custom.Documentation"]
+    assert config.pr_description_context_enabled is False
+    assert config.pr_description_context_max_chars == 54321
+    assert config.pr_description_context_max_links == 4
+    assert config.pr_description_context_link_max_chars == 2222
     assert config.auto_post_comments is True
     assert config.dry_run is True
     assert config.pr_comment_mode == "general"
@@ -335,6 +346,9 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
         project_context_retrieval_file_max_chars=0,
         work_item_context_max_items=0,
         work_item_context_max_chars=0,
+        pr_description_context_max_chars=0,
+        pr_description_context_max_links=0,
+        pr_description_context_link_max_chars=0,
     )
 
     issues = config.validate()
@@ -355,6 +369,9 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     assert any("Invalid project_context.retrieval_file_max_chars" in issue for issue in issues)
     assert any("Invalid work_item_context.max_items" in issue for issue in issues)
     assert any("Invalid work_item_context.max_chars" in issue for issue in issues)
+    assert any("Invalid pr_description_context.max_chars" in issue for issue in issues)
+    assert any("Invalid pr_description_context.max_links" in issue for issue in issues)
+    assert any("Invalid pr_description_context.link_max_chars" in issue for issue in issues)
 
 
 def test_validate_accepts_valid_bedrock_credentials(review_config_factory) -> None:

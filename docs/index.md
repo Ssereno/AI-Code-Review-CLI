@@ -2,18 +2,22 @@
 
 Automated code review tool using Artificial Intelligence for Pull Requests in Azure DevOps/TFS.
 
-## Local Repository Requirement
+## Local Repository Handling
 
-> **The CLI must be run from inside the local clone of the repository being reviewed.**
+The CLI can run outside the repository being reviewed. When `tfs.local_repo_path`
+is empty, it resolves the Azure DevOps/TFS clone URL and creates or reuses a
+managed clone under `.ai-review/repos`.
 
-The PR diff is computed using `git fetch` and a three-dot diff against the remote branches. RAG context is built via `git grep` on the local working tree. Both operations require an accessible local git repository.
+The PR diff is computed locally using `git fetch` and a three-dot diff against
+the remote target/source branches. Repository structure and requested file
+context are also read from the local clone.
 
-When `review.rag.enabled: true` the local branch **must match the PR target branch**. The tool verifies this before loading RAG context and blocks the review if there is a mismatch.
+When `review.rag.enabled: true`, managed clones are aligned to the PR target
+branch automatically. If you set `tfs.local_repo_path` explicitly, that local
+repository must already be checked out on the PR target branch.
 
 ```bash
 # PR: feature/my-feature → development
-cd /path/to/my-repo
-git checkout development     # must match the PR target branch
 ai-review pr-review 42
 ```
 

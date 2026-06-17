@@ -16,6 +16,8 @@ from src.llm_client import (
     build_change_review_packets,
     build_source_branch_review_anchors,
     build_user_message,
+    get_structured_review_quality_bar,
+    get_structured_review_contract,
     get_pr_comment_prompt,
     get_scope_guidance,
     get_system_prompt,
@@ -112,6 +114,8 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
     contextual_guidance = get_scope_guidance("diff_with_context", "en", structured=True)
+    validation_contract = get_structured_review_contract("en")
+    quality_bar = get_structured_review_quality_bar("en")
 
     assert "experienced code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
@@ -120,11 +124,20 @@ def test_prompt_helpers_select_expected_language_and_scope() -> None:
     assert "context-only or deleted line" in contextual_guidance
     assert "SOURCE BRANCH CODE TO VALIDATE" in contextual_guidance
     assert "REVIEWABLE" in contextual_guidance
+    assert "supporting context" in contextual_guidance
     assert "Return []" in contextual_guidance
     assert "context and deletions were removed" not in contextual_guidance
     assert "Do not return praise" in get_pr_comment_prompt("en")
     assert "anchor_code" in get_pr_comment_prompt("en")
     assert "suggestion_replacement" in get_pr_comment_prompt("en")
+    assert "First identify the REVIEWABLE lines" in validation_contract
+    assert "If unsure, return []" in validation_contract
+    assert "One defect = one comment" in validation_contract
+    assert "Minimum bar for comments" in quality_bar
+    assert "what breaks" in quality_bar
+    assert "Severity: critical" in quality_bar
+    assert "Do not use high/critical for cleanup or style" in quality_bar
+    assert "PR description/spec links" in contextual_guidance
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
 
@@ -144,6 +157,7 @@ def test_build_user_message_includes_files_and_context() -> None:
         context="Please focus on safety.",
         project_context="Existing helper: src/helpers.py",
         work_item_context="Acceptance Criteria: totals include tax",
+        pr_description_context="Spec: do not allow negative totals",
         source_files_context="\n".join([
             "#### /src/app.py",
             "````text",
@@ -164,12 +178,16 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "Existing helper" in message
     assert "Linked work item documentation" in message
     assert "totals include tax" in message
+    assert "Pull request description and linked specs" in message
+    assert "negative totals" in message
     assert "SOURCE BRANCH CODE TO VALIDATE" in message
     assert "TARGET BRANCH BASELINE" in message
     assert "src/app.py:1 | print('x')" in message
     assert "1 [REVIEWABLE] print('x')" in message
     assert "Review target" in message
     assert "Review only the REVIEWABLE source-branch changed lines" in message
+    assert "Suggestions may reference other code only when needed" in message
+    assert "Final validation checklist" in message
     assert "```diff" in message
 
 
@@ -227,7 +245,7 @@ def test_build_source_branch_review_anchors_lists_only_added_lines() -> None:
 
 def test_prompt_budget_trims_repository_context() -> None:
     """It should trim only repository context when a prompt budget is configured."""
-    client = LLMClient(make_llm_config(max_prompt_tokens=500))
+    client = LLMClient(make_llm_config(max_prompt_tokens=1000))
     message = client._build_user_message_with_prompt_budget(
         system_prompt="system",
         diff="+print('x')",
@@ -261,14 +279,17 @@ def test_request_context_files_parses_json_and_tracks_usage(mocker) -> None:
     files = client.request_context_files(
         diff="+call_helper()",
         files_summary=[{"file": "src/app.py", "additions": 1, "deletions": 0}],
-        project_manifest="- /src/helper.py\n- /src/model.py",
+        project_manifest='{"files":[{"path":"src/helper.py"},{"path":"src/model.py"}]}',
         changed_files_context="src/app.py content",
         work_item_context="Requirement",
+        pr_description_context="Spec: helper must validate inputs",
         max_files=5,
     )
 
     assert files == ["src/helper.py", "src/model.py"]
     assert openai.called
+    assert "Repository structure JSON" in openai.call_args.args[1]
+    assert "Pull request description and linked specs" in openai.call_args.args[1]
     assert client.usage_events[0].operation == "context_request"
 
 
@@ -376,6 +397,29 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     }]
 
 
+def test_review_pr_structured_includes_validation_contract_and_quality_bar(mocker) -> None:
+    """It should send prevention-first instructions with structured reviews."""
+    client = LLMClient(make_llm_config(llm_provider="openai"))
+    openai = mocker.patch(
+        "src.llm_client.LLMClient._call_openai",
+        return_value="[]",
+    )
+
+    client.review_pr_structured(
+        "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+call()",
+        [{"file": "a.py", "additions": 1, "deletions": 0}],
+        pr_description_context="Spec: do not call remote services in the hot path",
+    )
+
+    system_prompt = openai.call_args.args[0]
+    assert "Structured validation contract" in system_prompt
+    assert "Minimum bar for comments" in system_prompt
+    assert "Each comment must explain" in system_prompt
+    assert "If unsure, return []" in system_prompt
+    assert "call remote services" in openai.call_args.args[1]
+    assert "Pull request description and linked specs" in openai.call_args.args[1]
+
+
 def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
     """It should parse code fences, single objects and invalid fallback payloads."""
     client = LLMClient(make_llm_config())
@@ -385,6 +429,15 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     single = client._parse_structured_comments(
         '{"file": "a.py", "line": 2, "type": "style", "severity": "low", "comment": "y"}'
     )
+    prose_single = client._parse_structured_comments(
+        'Here is the JSON:\n{"file": "b.py", "line": 4, "type": "bug", "comment": "z"}'
+    )
+    wrapped = client._parse_structured_comments(
+        '{"summary":"done","comments":[{"file":"c.py","line":6,"type":"bug","comment":"wrapped"}]}'
+    )
+    wrapped_findings = client._parse_structured_comments(
+        '{"findings":[{"file":"d.py","line":8,"type":"security","comment":"wrapped finding"}]}'
+    )
     fallback = client._parse_structured_comments("not json at all")
 
     assert fenced[0]["file"] == "a.py"
@@ -392,7 +445,25 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
     assert fenced[0]["problematic_code"] == ""
     assert fenced[0]["evidence"] == ""
     assert single[0]["line"] == 2
+    assert prose_single[0]["file"] == "b.py"
+    assert prose_single[0]["line"] == 4
+    assert wrapped[0]["file"] == "c.py"
+    assert wrapped[0]["line"] == 6
+    assert wrapped_findings[0]["file"] == "d.py"
+    assert wrapped_findings[0]["type"] == "security"
     assert fallback == []
+
+
+def test_parse_structured_comments_normalizes_common_type_and_severity_variants() -> None:
+    """It should normalize model wording drift for downstream prioritization."""
+    client = LLMClient(make_llm_config())
+
+    comments = client._parse_structured_comments(
+        '[{"file":"a.py","line":1,"type":"null safety","severity":"Major","comment":"Missing null check."}]'
+    )
+
+    assert comments[0]["type"] == "null_safety"
+    assert comments[0]["severity"] == "high"
 
 
 def test_call_openai_builds_expected_payload_and_validates_configuration(mocker) -> None:

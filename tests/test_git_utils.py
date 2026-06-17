@@ -243,23 +243,33 @@ def test_truncate_diff_without_sections_and_summary(sample_diff: str) -> None:
 # ==============================================================
 
 def test_fetch_merge_commit_calls_git_with_correct_args(mocker) -> None:
-    """It should strip 'origin/' and call git fetch origin <branch> --quiet."""
+    """It should strip 'origin/' and update the matching remote-tracking ref."""
     instance = make_git_utils()
     run_mock = mocker.patch.object(instance, "_run_git", return_value="")
 
     instance.fetch_merge_commit("origin/feature/my-branch")
 
-    run_mock.assert_called_once_with("fetch", "origin", "feature/my-branch", "--quiet")
+    run_mock.assert_called_once_with(
+        "fetch",
+        "origin",
+        "+refs/heads/feature/my-branch:refs/remotes/origin/feature/my-branch",
+        "--quiet",
+    )
 
 
 def test_fetch_merge_commit_without_origin_prefix(mocker) -> None:
-    """It should pass the branch name unchanged when it has no 'origin/' prefix."""
+    """It should fetch unprefixed branch names into origin/<branch>."""
     instance = make_git_utils()
     run_mock = mocker.patch.object(instance, "_run_git", return_value="")
 
     instance.fetch_merge_commit("feature/my-branch")
 
-    run_mock.assert_called_once_with("fetch", "origin", "feature/my-branch", "--quiet")
+    run_mock.assert_called_once_with(
+        "fetch",
+        "origin",
+        "+refs/heads/feature/my-branch:refs/remotes/origin/feature/my-branch",
+        "--quiet",
+    )
 
 
 def test_get_pr_diff_uses_three_dot_syntax(mocker) -> None:

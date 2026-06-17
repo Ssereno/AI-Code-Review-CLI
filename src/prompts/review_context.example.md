@@ -14,6 +14,7 @@
 - Do not use deleted lines, target branch baseline lines, unchanged context, work item text, or repository context as the quoted evidence.
 - If the source branch already contains the requested fix, do not comment.
 - Return no comment instead of a general or weakly grounded comment.
+- PR description and linked spec pages are read-only requirements context. Use them to detect contradictions with `REVIEWABLE` changed lines, not to require the PR to implement every spec item.
 
 ## Comment Style
 
@@ -22,6 +23,22 @@
 - Prefer concrete fix suggestions.
 - Focus on defects that can be fixed on the changed line.
 - Do not emit style-only, naming-only, formatting-only, or broad refactor comments.
+- Every comment must explain what breaks, why the `REVIEWABLE` line causes it, and the concrete fix.
+
+## Minimum Bar
+
+- Comment only on defects that can cause wrong behavior, security exposure, data loss or corruption, API or contract breakage, resource leaks, concurrency bugs, clearly harmful performance, or direct work-item noncompliance.
+- Do not comment on style, naming, formatting, organization, missing tests, low-value logging, or design preferences unless the `REVIEWABLE` line creates a concrete defect.
+- If the issue would be a nice-to-have rather than a defect, omit it.
+- If a spec link is present but the PR does not violate it, do not comment just because the spec has extra requirements the PR does not cover.
+
+## Severity Bar
+
+- `critical`: likely exploit, secret exposure, data loss, corruption, or outage.
+- `high`: likely runtime bug, security risk, broken authorization, or broken required behavior.
+- `medium`: real edge case, contract, data integrity, reliability, or resource issue.
+- `low`: minor but still actionable defect.
+- Do not use `high` or `critical` for cleanup, style, naming, formatting, or broad refactor feedback.
 
 ## Review Rules
 

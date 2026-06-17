@@ -19,6 +19,7 @@ import hashlib
 import html
 import os
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 from typing import Optional
 
 from .config import ReviewConfig
@@ -353,6 +354,331 @@ class TFSClient:
         pr_summary["commits"] = commits
         pr_summary["changed_files"] = changed_files
         return pr_summary
+
+    def get_pull_request_description_context(
+        self,
+        pr: dict,
+        max_links: int = 10,
+        max_chars: int = 60000,
+        link_max_chars: int = 25000,
+    ) -> str:
+        """Builds read-only requirements context from the PR description and supported spec links."""
+        repository = str((pr.get("repository") or {}).get("name", "")).strip()
+        pr_id = str(pr.get("id", pr.get("pullRequestId", ""))).strip()
+        title = self._field_text(pr.get("title", "")).strip()
+        description = self._field_text(pr.get("description", "")).strip()
+        raw_description = str(pr.get("description", "") or "")
+
+        parts = ["### Pull request description and linked specs"]
+        if repository:
+            parts.append(f"Repository: {repository}")
+        if pr_id:
+            parts.append(f"Pull request: #{pr_id}")
+        if title:
+            parts.append(f"Title: {title}")
+        parts.append("")
+        parts.append(
+            "Use this requirements context only to detect contradictions with "
+            "REVIEWABLE changed lines. Do not require the PR to implement every "
+            "item in the spec; only flag changes that go against it."
+        )
+        parts.append("")
+
+        used_chars = len("\n".join(parts))
+        truncated = False
+
+        if description:
+            description_block = "\n".join(["#### PR description", description, ""])
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+            else:
+                if len(description_block) > remaining:
+                    description_block = description_block[:remaining].rstrip()
+                    truncated = True
+                parts.append(description_block)
+                parts.append("")
+                used_chars += len(description_block) + 1
+
+        links = self._extract_pr_description_links(raw_description)
+        rendered_links = 0
+        skipped_links: list[str] = []
+
+        for link in links:
+            if rendered_links >= max_links:
+                truncated = True
+                break
+
+            rendered, skip_reason = self._render_pr_description_link_context(
+                link,
+                repository=repository,
+                link_max_chars=link_max_chars,
+            )
+            if skip_reason:
+                skipped_links.append(skip_reason)
+                continue
+            if not rendered:
+                continue
+
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(rendered) > remaining:
+                rendered = rendered[:remaining].rstrip()
+                truncated = True
+
+            parts.extend([rendered, ""])
+            used_chars += len(rendered) + 1
+            rendered_links += 1
+
+        if skipped_links:
+            parts.extend(["#### Skipped links", *[f"- {item}" for item in skipped_links], ""])
+
+        if truncated:
+            parts.append(
+                "[PR description/spec context truncated to fit the configured character or link limits.]"
+            )
+
+        if len(parts) <= 2:
+            return ""
+
+        return "\n".join(parts).strip()
+
+    def _extract_pr_description_links(self, description: str) -> list[dict]:
+        """Extracts link targets from markdown, HTML, and raw URL text."""
+        text = str(description or "")
+        links: list[dict] = []
+        seen: set[str] = set()
+
+        def add_link(url: str, label: str = "") -> None:
+            normalized = self._normalize_description_link_target(url)
+            if not normalized:
+                return
+            key = normalized.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            links.append({
+                "url": normalized,
+                "label": label.strip(),
+            })
+
+        for match in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", text):
+            add_link(match.group(2), match.group(1))
+
+        for match in re.finditer(
+            r"(?is)<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            text,
+        ):
+            add_link(match.group(1), self._field_text(match.group(2)))
+
+        for match in re.finditer(r"https?://[^\s<>\")\]]+", text):
+            add_link(match.group(0))
+
+        return links
+
+    def _normalize_description_link_target(self, url: str) -> str:
+        """Normalizes PR description link targets before attempting to fetch them."""
+        value = html.unescape(str(url or "")).strip()
+        value = value.strip("<>\"'`()[]{}")
+        value = re.sub(r"[.,;:!?]+$", "", value)
+        return value.strip()
+
+    def _render_pr_description_link_context(
+        self,
+        link: dict,
+        *,
+        repository: str,
+        link_max_chars: int,
+    ) -> tuple[str, str]:
+        """Fetches a supported spec link or returns a skip reason."""
+        url = str(link.get("url", "") or "").strip()
+        label = str(link.get("label", "") or "").strip()
+        if not url:
+            return "", "Skipped a PR description link with no URL."
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return "", f"Skipped unsupported non-HTTP link: {label or url}"
+
+        wiki_link = self._parse_wiki_link(url)
+        if not wiki_link:
+            return "", f"Skipped unsupported link: {label or url}"
+
+        try:
+            rendered = self._fetch_wiki_link_context(
+                wiki_link,
+                repository=repository,
+                source_url=url,
+                label=label,
+                link_max_chars=link_max_chars,
+            )
+        except TFSError as exc:
+            return "", f"Skipped wiki link {label or url}: {exc}"
+        if not rendered:
+            return "", f"Skipped unsupported or empty wiki link: {label or url}"
+        return rendered, ""
+
+    def _parse_wiki_link(self, url: str) -> dict[str, str]:
+        """Extracts wiki identifiers and page references from Azure DevOps wiki URLs."""
+        parsed = urlparse(url)
+        path = parsed.path or ""
+        marker = "/_wiki/wikis/"
+        if marker not in path:
+            return {}
+
+        tail = path.split(marker, 1)[1].strip("/")
+        segments = [unquote(segment) for segment in tail.split("/") if segment]
+        if not segments:
+            return {}
+
+        wiki_identifier = segments[0]
+        remaining = segments[1:]
+        query = parse_qs(parsed.query)
+
+        page_id = ""
+        page_path = ""
+
+        if query.get("pageId"):
+            page_id = query["pageId"][0].strip()
+        if query.get("path"):
+            page_path = query["path"][0].strip()
+        elif query.get("pagePath"):
+            page_path = query["pagePath"][0].strip()
+
+        if not page_path and remaining:
+            if remaining[0].isdigit():
+                page_id = page_id or remaining[0]
+                remaining = remaining[1:]
+            if remaining:
+                page_path = "/" + "/".join(remaining)
+            elif page_id:
+                page_path = "/"
+
+        if page_path and not page_path.startswith("/"):
+            page_path = f"/{page_path}"
+
+        return {
+            "wiki_identifier": wiki_identifier,
+            "page_id": page_id,
+            "page_path": page_path,
+        }
+
+    def _fetch_wiki_link_context(
+        self,
+        wiki_link: dict[str, str],
+        *,
+        repository: str,
+        source_url: str,
+        label: str,
+        link_max_chars: int,
+    ) -> str:
+        """Fetches a wiki page as plain text requirements context."""
+        wiki_identifier = wiki_link.get("wiki_identifier", "")
+        page_path = wiki_link.get("page_path", "")
+        page_id = wiki_link.get("page_id", "")
+        if not wiki_identifier or (not page_path and not page_id):
+            return ""
+
+        candidates: list[tuple[str, dict]] = []
+        if page_path:
+            candidates.append((
+                f"wiki/wikis/{wiki_identifier}/pages",
+                {
+                    "path": page_path,
+                    "includeContent": "true",
+                },
+            ))
+        if page_id:
+            candidates.append((
+                f"wiki/wikis/{wiki_identifier}/pages/{page_id}",
+                {
+                    "includeContent": "true",
+                },
+            ))
+
+        last_error = ""
+        payload = None
+        for path, params in candidates:
+            try:
+                payload = self._get(path, params, api_version="7.1-preview.1")
+                break
+            except TFSError as exc:
+                last_error = str(exc)
+
+        if payload is None:
+            raise TFSError(
+                f"Could not load wiki link content for '{source_url}'. {last_error}"
+            )
+
+        page_title, content = self._extract_wiki_page_content(payload, page_path, page_id)
+        if not content:
+            return ""
+
+        rendered = [
+            f"#### Linked spec: {label or page_title or page_path or source_url}",
+            f"- URL: {source_url}",
+        ]
+        if repository:
+            rendered.append(f"- Repository: {repository}")
+        if page_title:
+            rendered.append(f"- Page: {page_title}")
+        rendered.extend(["", content.strip()])
+        block = "\n".join(rendered).strip()
+        if len(block) > link_max_chars:
+            block = block[:link_max_chars].rstrip()
+            block += "\n[Linked spec content truncated.]"
+        return block
+
+    def _extract_wiki_page_content(
+        self,
+        payload: object,
+        page_path: str,
+        page_id: str,
+    ) -> tuple[str, str]:
+        """Pulls readable text out of a wiki page response."""
+        page_title = ""
+        content = ""
+
+        if isinstance(payload, dict):
+            page_title = str(
+                payload.get("path")
+                or payload.get("name")
+                or payload.get("title")
+                or page_path
+                or page_id
+                or ""
+            ).strip()
+            raw_content = (
+                payload.get("content")
+                or payload.get("contentHtml")
+                or payload.get("text")
+                or payload.get("markdown")
+                or ""
+            )
+            content = self._field_text(raw_content).strip()
+            if not content and isinstance(payload.get("value"), str):
+                content = self._field_text(payload.get("value", "")).strip()
+            if not content and isinstance(payload.get("page"), dict):
+                nested_page = payload.get("page", {})
+                page_title = str(
+                    nested_page.get("path")
+                    or nested_page.get("name")
+                    or nested_page.get("title")
+                    or page_title
+                ).strip()
+                content = self._field_text(
+                    nested_page.get("content")
+                    or nested_page.get("contentHtml")
+                    or nested_page.get("text")
+                    or nested_page.get("markdown")
+                    or "",
+                ).strip()
+        elif isinstance(payload, str):
+            content = self._field_text(payload).strip()
+
+        return page_title, content
 
     def _get_pr_changed_files(self, repository: str, pr_id: int) -> list[dict]:
         """Gets the list of files changed in a PR."""

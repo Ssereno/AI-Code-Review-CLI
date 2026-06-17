@@ -3,7 +3,8 @@
 Automated code review tool with Pull Request integration for Azure DevOps/TFS and support for multiple LLM providers.
 **Documentation where** [docs/index.md](docs/index.md) for complete guides on CLI usage, LLM configuration, and architecture.
 
-> **The CLI must be run from inside the local clone of the repository being reviewed.**
+> The CLI can run outside the repository being reviewed. When `tfs.local_repo_path`
+> is empty, it creates or reuses a managed local clone under `.ai-review/repos`.
 
 ## Features
 
@@ -12,7 +13,7 @@ Automated code review tool with Pull Request integration for Azure DevOps/TFS an
 - **Dry-run Mode** — Validate reviews before posting
 - **Multiple LLM Providers** — OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - **Smart Filtering** — Filter by file extensions, limit diff size
-- **Project-aware PR Context** — Sends repository and linked work item context while restricting findings to modified PR lines
+- **Project-aware PR Context** — Sends repository, linked work item, and PR description/spec context while restricting findings to modified PR lines
 - **RAG Context** — Enriches the review with related code snippets found via `git grep` in the local repository
 - **Single Reviewer Context** — One Markdown context file with local override support
 - **Usage Tracking** — Store per-PR token usage and optional cost estimates
@@ -76,6 +77,7 @@ tfs:
   base_url: https://dev.azure.com/your-org
   project: YourProject
   pat: xxxxxxxxx
+  local_clone_root: .ai-review/repos
 
 review:
   language: pt
@@ -86,7 +88,7 @@ review:
   max_comments_to_post: 20
   custom_prompt_file: review_context.local.md
   rag:
-    enabled: true                      # requires local branch == PR target
+    enabled: true                      # managed clones align to PR target automatically
     max_chars: 40000
   project_context:
     enabled: true
@@ -99,6 +101,10 @@ review:
   work_item_context:
     enabled: true
     max_items: 20
+  pr_description_context:
+    enabled: true
+    max_chars: 60000
+    max_links: 10
 ```
 
 ### 3. Run Your First Review

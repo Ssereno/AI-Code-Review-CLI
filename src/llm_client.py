@@ -16,6 +16,7 @@ import datetime
 import importlib.resources
 import json
 import os
+import re
 
 from .config import ReviewConfig
 from .usage_tracker import TokenUsage, estimate_text_tokens
@@ -171,9 +172,10 @@ PR_COMMENT_PROMPT = {
         '- "suggestion_replacement": texto EXATO que deve substituir o intervalo line/end_line se a correção for aplicável por suggestion block; string vazia se não tiveres a certeza\n'
         '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n'
         '- "evidence": citação EXATA do código da SOURCE BRANCH CODE TO VALIDATE que justifica o problema.\n\n'
-        "Foca apenas correção, null safety, edge cases, segurança, integridade de dados, contratos de API, resource management, performance relevante e alinhamento com work items. "
+        "Foca apenas correção, null safety, edge cases, segurança, integridade de dados, contratos de API, resource management, performance relevante, alinhamento com work items e contradições com a descrição/spec do PR. "
         "Não retornes elogios, comentários de estilo/naming/formatação ou sugestões gerais que não sejam defeitos acionáveis. "
         "Só retorna comentários de problema quando file e line apontam para uma linha adicionada ou modificada do PR. "
+        "Podes referenciar outro código do repositório apenas quando esse contexto for necessário para explicar ou corrigir um problema causado pela linha REVIEWABLE. "
         "anchor_code, problematic_code e evidence têm de existir nas linhas REVIEWABLE das âncoras permitidas da source branch. "
         "O problema descrito tem de ser causado pela própria linha REVIEWABLE, não por uma linha apenas de contexto. "
         "Se a sugestão já estiver aplicada no código atual da source branch, NÃO comentes. "
@@ -218,9 +220,10 @@ PR_COMMENT_PROMPT = {
         '- "suggestion_replacement": exact replacement text for the line/end_line range if the fix can be applied as a suggestion block; empty string when unsure\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n'
         '- "evidence": exact quote from SOURCE BRANCH CODE TO VALIDATE that proves the issue.\n\n'
-        "Focus only on correctness, null safety, edge cases, security, data integrity, API contracts, resource management, meaningful performance, and work-item alignment. "
+        "Focus only on correctness, null safety, edge cases, security, data integrity, API contracts, resource management, meaningful performance, work-item alignment, and contradictions with the PR description/spec. "
         "Do not return praise, style/naming/formatting comments, or general suggestions that are not actionable defects. "
         "Only return problem comments when file and line point to an added or modified PR line. "
+        "You may reference other repository code only when that context is necessary to explain or fix a problem caused by the REVIEWABLE line. "
         "anchor_code, problematic_code, and evidence must exist in the REVIEWABLE allowed source-branch anchor lines. "
         "The described issue must be caused by the REVIEWABLE changed line itself, not by a context-only line. "
         "If the suggestion is already applied in the current source branch code, do NOT comment. "
@@ -515,6 +518,54 @@ def get_pr_comment_prompt(language: str) -> str:
     return PR_COMMENT_PROMPT.get(language, PR_COMMENT_PROMPT["pt"])
 
 
+def get_structured_review_contract(language: str) -> str:
+    """Returns small-model friendly rules for structured PR validation."""
+    if language == "pt":
+        return (
+            "Contrato de validação estruturada:\n"
+            "1. Primeiro identifica as linhas REVIEWABLE. Só essas linhas podem receber comentários.\n"
+            "2. Usa diff, contexto do repositório, ficheiros completos, work items e descrição do PR/spec apenas para compreender a alteração.\n"
+            "3. A descrição do PR e os links de spec servem para detetar contradições com linhas REVIEWABLE; nao tens de validar que o PR implementa tudo o que o spec pede.\n"
+            "4. Escreve um comentário só quando a linha REVIEWABLE introduz, expõe ou torna acionável um defeito concreto ou contradiz o spec.\n"
+            "5. Não comentes código existente, linhas removidas, contexto read-only, estilo, naming, formatação, refactors gerais ou testes em falta.\n"
+            "6. Se outro ficheiro prova um contrato ou uma chamada, usa-o apenas como suporte para explicar o defeito da linha REVIEWABLE.\n"
+            "7. Um defeito = um comentário. Se duas respostas dizem a mesma coisa, mantém só a mais específica.\n"
+            "8. Se estiveres inseguro, retorna [] em vez de especular.\n"
+            "9. Retorna apenas um JSON array. Sem markdown, resumo, prose ou comentários gerais."
+        )
+    return (
+        "Structured validation contract:\n"
+        "1. First identify the REVIEWABLE lines. Only those lines may receive comments.\n"
+        "2. Use the diff, repository context, full files, work items, and PR/spec description only to understand the change.\n"
+        "3. The PR description and linked specs are read-only requirements context: use them to detect contradictions with REVIEWABLE lines, not to demand the whole spec be implemented.\n"
+        "4. Write a comment only when the REVIEWABLE line introduces, exposes, makes actionable a concrete defect, or directly conflicts with the spec.\n"
+        "5. Do not comment on existing code, deleted lines, read-only context, style, naming, formatting, broad refactors, or missing tests.\n"
+        "6. If another file proves a contract or call path, use it only as support for explaining the REVIEWABLE-line defect.\n"
+        "7. One defect = one comment. If two comments say the same thing, keep only the most specific one.\n"
+        "8. If unsure, return [] instead of speculating.\n"
+        "9. Return only a JSON array. No markdown, summary, prose, or general comments."
+    )
+
+
+def get_structured_review_quality_bar(language: str) -> str:
+    """Returns concise quality and severity guidance for structured findings."""
+    if language == "pt":
+        return (
+            "Barra minima para comentar:\n"
+            "- Comenta apenas defeitos que possam causar comportamento errado, falha de seguranca, perda/corrupcao de dados, quebra de contrato/API, leak de recursos, concorrencia incorreta, performance claramente prejudicial, ou incumprimento direto de work item.\n"
+            "- Nao comentes estilo, naming, formatacao, organizacao, testes em falta, logs pouco importantes, ou preferencias de design sem defeito concreto na linha REVIEWABLE.\n"
+            "- Cada comentario deve explicar: o que quebra, porque a linha REVIEWABLE causa isso, e qual a correcao concreta.\n"
+            "- Severidade: critical = exploracao/segredo/perda de dados/outage provavel; high = bug ou risco de seguranca provavel; medium = edge case/contrato/reliability real; low = defeito menor mas acionavel. Nao uses high/critical para limpeza ou estilo."
+        )
+    return (
+        "Minimum bar for comments:\n"
+        "- Comment only on defects that can cause wrong behavior, security exposure, data loss/corruption, API/contract breakage, resource leaks, concurrency bugs, clearly harmful performance, direct work-item noncompliance, or a concrete contradiction with the PR description/spec.\n"
+        "- Do not comment on style, naming, formatting, organization, missing tests, low-value logging, or design preferences without a concrete defect on the REVIEWABLE line.\n"
+        "- Each comment must explain: what breaks, why the REVIEWABLE line causes it, and the concrete fix.\n"
+        "- Severity: critical = likely exploit/secret exposure/data loss/outage; high = likely bug or security risk; medium = real edge case/contract/reliability issue; low = minor but actionable defect. Do not use high/critical for cleanup or style."
+    )
+
+
 def get_scope_guidance(review_scope: str, language: str, structured: bool = False) -> str:
     """Returns additional instructions based on the review scope."""
     scope = (review_scope or "diff_with_context").lower()
@@ -526,12 +577,13 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                     "Review scope: diff_with_context. Changed files and selected on-demand repository files "
                     "are provided as read-only context, and the diff includes added lines (+), deleted lines "
                     "(-), and surrounding unchanged context. Use repository context, diff context lines, and "
-                    "linked work item documentation only to understand the rest of the repository, product intent, and "
-                    "requirements. Focus exclusively on issues introduced by added lines (+) in this PR. "
+                    "linked work item documentation plus PR description/spec links only to understand the rest of the repository, product intent, and "
+                    "requirements. The PR description/spec links are requirements context for contradiction checks, not a checklist of everything the PR must implement. Focus exclusively on issues introduced by added lines (+) in this PR. "
                     "Only lines marked REVIEWABLE in the SOURCE BRANCH CODE TO VALIDATE packets may justify problem comments. "
                     "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                     "The file and line must point to an added or modified line in the PR diff, not a context-only "
-                    "or deleted line. If the repository context shows a symbol, property, contract, or behavior "
+                    "or deleted line. You may cite other repository code only as supporting context for why a REVIEWABLE changed line is wrong or how to fix it. "
+                    "If the repository context shows a symbol, property, contract, or behavior "
                     "already exists, do not report it as missing. "
                     "Do not emit general problem comments without file/line. "
                     "Return [] when there are no actionable defects."
@@ -540,12 +592,13 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
                 "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas "
                 "removidas (-) e contexto inalterado à volta das alterações. Usa o contexto do repositório, as "
-                "linhas de contexto do diff e a documentação dos work items apenas para compreender o restante repositório, intenção de produto "
-                "e requisitos. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
+                "linhas de contexto do diff, a documentação dos work items e a descrição do PR/spec apenas para compreender o restante repositório, intenção de produto "
+                "e requisitos. A descrição do PR/spec serve para detetar contradições com linhas REVIEWABLE, não para exigir que o PR implemente tudo o que o spec pede. Foca exclusivamente em problemas introduzidos pelas linhas adicionadas (+) deste PR. "
                 "Só linhas marcadas como REVIEWABLE nos pacotes SOURCE BRANCH CODE TO VALIDATE podem justificar comentários de problema. "
                 "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
                 "O file e line devem apontar para uma linha adicionada ou modificada no diff do PR, não para "
-                "uma linha apenas de contexto ou removida. Se o contexto do repositório mostrar que um símbolo, "
+                "uma linha apenas de contexto ou removida. Só podes citar outro código do repositório como contexto de suporte para explicar porque uma linha REVIEWABLE está errada ou como corrigi-la. "
+                "Se o contexto do repositório mostrar que um símbolo, "
                 "propriedade, contrato ou comportamento já existe, não o reportes como ausente. "
                 "Não emitas comentários gerais de problema sem file/line. "
                 "Retorna [] quando não houver defeitos acionáveis."
@@ -555,15 +608,16 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
             return (
                 "Review scope: diff_with_context. Changed files and selected on-demand repository files are "
                 "provided as read-only context, and the diff includes added lines (+), deleted lines (-), and "
-                "surrounding unchanged context. Use repository context, diff context lines, and linked work item documentation only to understand "
-                "the rest of the repository, product intent, and requirements. "
+                    "surrounding unchanged context. Use repository context, diff context lines, linked work item documentation, and PR description/spec links only to understand "
+                    "the rest of the repository, product intent, and requirements. The PR description/spec links are requirements context for contradiction checks, not a checklist of everything the PR must implement. "
                 "Focus only on issues introduced by added lines (+) in this PR."
             )
         return (
             "Escopo de review: diff_with_context. Os ficheiros alterados e ficheiros do repositório pedidos "
             "on-demand são fornecidos como contexto read-only, e o diff inclui linhas adicionadas (+), linhas removidas (-) e contexto inalterado "
-            "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff e a documentação "
-            "dos work items apenas para compreender o restante repositório, intenção de produto e requisitos. "
+            "à volta das alterações. Usa o contexto do repositório, as linhas de contexto do diff, a documentação "
+            "dos work items e a descrição do PR/spec apenas para compreender o restante repositório, intenção de produto e requisitos. "
+            "A descrição do PR/spec serve para detetar contradições com linhas REVIEWABLE, não para exigir que o PR implemente tudo o que o spec pede. "
             "Foca apenas problemas introduzidos pelas linhas adicionadas (+) deste PR."
         )
 
@@ -600,7 +654,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
 def build_user_message(diff: str, files_summary: list[dict],
                        context: str = "", project_context: str = "",
                        work_item_context: str = "",
-                       source_files_context: str = "") -> str:
+                       source_files_context: str = "",
+                       pr_description_context: str = "") -> str:
     """
     Builds the user message with the diff and context.
     """
@@ -616,6 +671,15 @@ def build_user_message(diff: str, files_summary: list[dict],
 
     if context:
         parts.append(f"### Additional context:\n{context}\n")
+
+    if pr_description_context:
+        parts.append(
+            "### Pull request description and linked specs (read-only requirements context):\n"
+            "Use this only to detect contradictions with REVIEWABLE changed lines. "
+            "Do not require the PR to implement every requirement in the spec; "
+            "only comment when a changed line goes against it.\n"
+            f"{pr_description_context}\n"
+        )
 
     parts.append(
         "### CHANGE REVIEW PACKETS (SOURCE BRANCH CODE TO VALIDATE):\n"
@@ -647,7 +711,8 @@ def build_user_message(diff: str, files_summary: list[dict],
         parts.append(
             "### Additional source-branch repository context (read-only support context):\n"
             "Use this only for architecture, contracts, dependencies, and call sites. "
-            "It cannot be the review target by itself.\n"
+            "It cannot be the review target by itself. Reference it only when it is "
+            "necessary to explain or fix a finding anchored to a REVIEWABLE changed line.\n"
             f"{project_context}\n"
         )
 
@@ -662,8 +727,17 @@ def build_user_message(diff: str, files_summary: list[dict],
         "### Review target:\n"
         "Review only the REVIEWABLE source-branch changed lines in the change packets. "
         "Use all other sections only to understand the repository and requirements. "
+        "Suggestions may reference other code only when needed to fix the changed-line finding. "
         "Problem comments must point to REVIEWABLE source-branch lines and quote exact "
         "source-branch evidence from those same lines.\n"
+    )
+    parts.append(
+        "### Final validation checklist before returning JSON:\n"
+        "For each comment, answer yes to all of these silently: "
+        "is the file and line marked REVIEWABLE, is the problem caused by that changed line, "
+        "do anchor_code/problematic_code/evidence quote exact text from that changed line, "
+        "is the fix not already present in the source branch, and would this comment still be valid "
+        "if all read-only context were removed? If any answer is no, omit the comment.\n"
     )
     parts.append("### SOURCE BRANCH DIFF FOR REVIEW:")
     parts.append(f"```diff\n{diff}\n```")
@@ -677,6 +751,7 @@ def build_context_request_message(diff: str, files_summary: list[dict],
                                   changed_files_context: str = "",
                                   work_item_context: str = "",
                                   fetched_context: str = "",
+                                  pr_description_context: str = "",
                                   max_files: int = 20) -> str:
     """Builds the prompt used to ask the model for extra context files."""
     parts = []
@@ -692,11 +767,22 @@ def build_context_request_message(diff: str, files_summary: list[dict],
     if context:
         parts.append(f"### Additional context:\n{context}\n")
 
+    if pr_description_context:
+        parts.append(
+            "### Pull request description and linked specs:\n"
+            "Use this to decide which extra repository files are needed. "
+            "Only request files when they are necessary to validate a REVIEWABLE changed line "
+            "or a concrete conflict with the spec.\n"
+            f"{pr_description_context}\n"
+        )
+
     parts.append(
         "### Change review packets (context selection only):\n"
         "These packets show the actual source-branch changed lines and nearby "
         "read-only context. Use them to decide which extra files are needed; do "
-        "not review the code yet.\n"
+        "not review the code yet. Request files only when they are needed to validate "
+        "a REVIEWABLE changed line, such as a called helper, interface contract, "
+        "configuration key, schema, or related domain rule.\n"
         f"{build_change_review_packets(diff, source_files_context=changed_files_context)}\n"
     )
 
@@ -719,7 +805,7 @@ def build_context_request_message(diff: str, files_summary: list[dict],
         )
 
     parts.append(
-        "### Repository manifest:\n"
+        "### Repository structure JSON:\n"
         f"{project_manifest}\n"
     )
     parts.append(
@@ -729,11 +815,99 @@ def build_context_request_message(diff: str, files_summary: list[dict],
     parts.append(
         "Return JSON only in this exact shape:\n"
         f'{{"files":["path/to/file"],"reason":"short reason"}}\n'
-        f"Request at most {max_files} files. Only request files from the manifest. "
+        f"Request at most {max_files} files. Only request files from the repository structure JSON. "
+        "Do not request broad folders, generated files, or files for curiosity. "
         "If no more context is needed, return {\"files\":[],\"reason\":\"enough context\"}."
     )
 
     return "\n".join(parts)
+
+
+def _normalize_issue_type(value: object) -> str:
+    """Normalizes common model variants to supported issue types."""
+    key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    aliases = {
+        "": "suggestion",
+        "defect": "bug",
+        "logic": "bug",
+        "logic_error": "bug",
+        "correctness": "bug",
+        "security_issue": "security",
+        "perf": "performance",
+        "null": "null_safety",
+        "null_safety": "null_safety",
+        "data": "data_integrity",
+        "data_integrity": "data_integrity",
+        "api": "api_contract",
+        "api_contract": "api_contract",
+        "error": "error_handling",
+        "error_handling": "error_handling",
+        "resource_management": "resource",
+        "workitem": "work_item",
+        "work_item": "work_item",
+    }
+    allowed = {
+        "bug",
+        "security",
+        "performance",
+        "null_safety",
+        "data_integrity",
+        "api_contract",
+        "error_handling",
+        "resource",
+        "work_item",
+        "suggestion",
+        "style",
+        "praise",
+    }
+    normalized = aliases.get(key, key)
+    return normalized if normalized in allowed else "suggestion"
+
+
+def _normalize_severity(value: object) -> str:
+    """Normalizes common severity variants while preserving posting priority."""
+    key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    aliases = {
+        "": "medium",
+        "blocker": "critical",
+        "critical": "critical",
+        "crit": "critical",
+        "severe": "critical",
+        "major": "high",
+        "high": "high",
+        "important": "high",
+        "moderate": "medium",
+        "medium": "medium",
+        "med": "medium",
+        "minor": "low",
+        "low": "low",
+        "warning": "low",
+        "informational": "info",
+        "info": "info",
+    }
+    return aliases.get(key, "medium")
+
+
+def _extract_structured_comment_items(payload: object) -> list[dict]:
+    """Extracts comment dicts from common LLM response wrapper shapes."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+
+    if "file" in payload or "line" in payload:
+        return [payload]
+
+    for key in ("comments", "review_comments", "findings", "issues", "results"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _extract_structured_comment_items(value)
+            if nested:
+                return nested
+
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +1070,7 @@ class LLMClient:
         project_context: str,
         work_item_context: str,
         source_files_context: str = "",
+        pr_description_context: str = "",
     ) -> str:
         """Trims repository context when the full prompt would exceed the budget."""
         limit = self._effective_prompt_token_limit()
@@ -909,6 +1084,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
         if self._estimate_prompt_tokens(system_prompt, full_message) <= limit:
             return project_context
@@ -920,6 +1096,7 @@ class LLMClient:
             project_context="",
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
         base_tokens = self._estimate_prompt_tokens(system_prompt, base_message)
         available_tokens = limit - base_tokens
@@ -953,6 +1130,7 @@ class LLMClient:
         project_context: str,
         work_item_context: str,
         source_files_context: str = "",
+        pr_description_context: str = "",
     ) -> str:
         """Builds the user prompt, trimming only repo context if necessary."""
         project_context = self._trim_project_context_for_prompt_budget(
@@ -963,6 +1141,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
         return build_user_message(
             diff,
@@ -971,6 +1150,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
 
     def request_context_files(self, diff: str, files_summary: list[dict],
@@ -979,6 +1159,7 @@ class LLMClient:
                               changed_files_context: str = "",
                               work_item_context: str = "",
                               fetched_context: str = "",
+                              pr_description_context: str = "",
                               max_files: int = 20) -> list[str]:
         """Asks the model which repository files it needs for extra context."""
         if not project_manifest.strip() or max_files <= 0:
@@ -986,8 +1167,8 @@ class LLMClient:
 
         system_prompt = (
             "You are selecting additional repository files for a code review. "
-            "Use the PR diff, current source-branch changed file contents, work item documentation, and "
-            "repository manifest to decide whether extra files are needed. "
+            "Use the PR diff, PR description/spec context, current source-branch changed file contents, work item documentation, and "
+            "repository structure JSON to decide whether extra files are needed. "
             "Return JSON only. Do not review the code yet."
         )
         user_message = build_context_request_message(
@@ -998,6 +1179,7 @@ class LLMClient:
             changed_files_context=changed_files_context,
             work_item_context=work_item_context,
             fetched_context=fetched_context,
+            pr_description_context=pr_description_context,
             max_files=max_files,
         )
         raw = self._run_tracked_call(
@@ -1114,7 +1296,8 @@ class LLMClient:
     def review(self, diff: str, files_summary: list[dict],
                context: str = "", review_scope: str = "diff_with_context",
                project_context: str = "", work_item_context: str = "",
-               source_files_context: str = "") -> str:
+               source_files_context: str = "",
+               pr_description_context: str = "") -> str:
         """
         Sends the diff to the LLM and returns the review as text.
         """
@@ -1155,6 +1338,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
         return self._run_tracked_call("general_review", system_prompt, user_message)
 
@@ -1162,7 +1346,8 @@ class LLMClient:
                              context: str = "", review_scope: str = "diff_with_context",
                              project_context: str = "",
                              work_item_context: str = "",
-                             source_files_context: str = "") -> list[dict]:
+                             source_files_context: str = "",
+                             pr_description_context: str = "") -> list[dict]:
         """
         Sends the diff to the LLM and returns structured PR comments.
         
@@ -1177,11 +1362,15 @@ class LLMClient:
             language=self.config.review_language,
             structured=True,
         )
+        validation_contract = get_structured_review_contract(self.config.review_language)
+        quality_bar = get_structured_review_quality_bar(self.config.review_language)
 
         if custom_prompt:
             system_prompt = (
                 f"{base_prompt}\n\n"
                 f"{scope_guidance}\n\n"
+                f"{validation_contract}\n\n"
+                f"{quality_bar}\n\n"
                 "---\n"
                 "Custom reviewer context (applies only inside the REVIEWABLE changed-line boundary):\n"
                 f"{custom_prompt}"
@@ -1192,7 +1381,12 @@ class LLMClient:
                 f"[Review context loaded from {custom_prompt_source}]"
             )
         else:
-            system_prompt = f"{base_prompt}\n\n{scope_guidance}"
+            system_prompt = (
+                f"{base_prompt}\n\n"
+                f"{scope_guidance}\n\n"
+                f"{validation_contract}\n\n"
+                f"{quality_bar}"
+            )
             merged_context = context
 
         user_message = self._build_user_message_with_prompt_budget(
@@ -1203,6 +1397,7 @@ class LLMClient:
             project_context=project_context,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
         )
 
         raw = self._run_tracked_call(
@@ -1230,16 +1425,18 @@ class LLMClient:
                     json_lines.append(line)
             text = "\n".join(json_lines).strip()
 
-        # Try to find JSON array
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1:
-            text = text[start:end + 1]
+        # Try to find JSON array/object even when smaller models add prose.
+        array_start = text.find("[")
+        array_end = text.rfind("]")
+        object_start = text.find("{")
+        object_end = text.rfind("}")
+        if array_start != -1 and array_end != -1:
+            text = text[array_start:array_end + 1]
+        elif object_start != -1 and object_end != -1:
+            text = text[object_start:object_end + 1]
 
         try:
-            comments = json.loads(text)
-            if not isinstance(comments, list):
-                comments = [comments]
+            comments = _extract_structured_comment_items(json.loads(text))
         except json.JSONDecodeError:
             return []
 
@@ -1258,8 +1455,8 @@ class LLMClient:
                 "file": str(c.get("file", "")),
                 "line": line,
                 "end_line": end_line,
-                "type": str(c.get("type", "suggestion")),
-                "severity": str(c.get("severity", "info")),
+                "type": _normalize_issue_type(c.get("type", "suggestion")),
+                "severity": _normalize_severity(c.get("severity", "")),
                 "comment": str(c.get("comment", "")),
                 "anchor_code": str(c.get("anchor_code", "")),
                 "problematic_code": str(c.get("problematic_code", "")),
