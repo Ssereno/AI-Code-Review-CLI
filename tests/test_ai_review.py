@@ -217,6 +217,9 @@ def test_run_review_dispatches_usage_without_validating_credentials(mocker, revi
 
 def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> None:
     """It should persist the markdown output even when comments are not posted."""
+    review_config.max_diff_files = 1
+    review_config.max_diff_lines = 2
+    review_config.file_extensions_filter = [".cs"]
     formatter = MagicMock()
     formatter.format_progress.side_effect = lambda message: f"PROGRESS:{message}"
     formatter.format_pr_details.return_value = "PR DETAILS"
@@ -345,8 +348,8 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     local_context.get_changed_files_context.assert_called_once_with(
         "feature/test",
         [{"path": "/a.py", "change_type": "edit"}],
-        max_chars=review_config.project_context_retrieval_max_chars,
-        file_max_chars=review_config.project_context_retrieval_file_max_chars,
+        max_chars=0,
+        file_max_chars=0,
     )
     local_context.map_repo_json.assert_called_once_with("repo-a", "feature/test")
     local_context.get_files_context.assert_called_once()
@@ -363,6 +366,10 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert llm.review_pr_structured.call_args.kwargs["pr_description_context"] == "PR DESCRIPTION CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["diff"] == diff
     git_utils.filter_diff_additions_only.assert_not_called()
+    git_utils.filter_diff_noise.assert_not_called()
+    git_utils.filter_diff_by_extensions.assert_not_called()
+    git_utils.limit_diff_files.assert_not_called()
+    git_utils.truncate_diff.assert_not_called()
     print_mock.assert_any_call("REVIEW")
     review_text = formatter.format_review.call_args.args[0]
     assert "Structured Review" in review_text
@@ -640,6 +647,84 @@ def test_review_scope_context_note_matches_scope() -> None:
 
     assert "modified PR lines" in contextual
     assert "diff_only mode" in diff_only
+
+
+def test_structured_review_chunks_diff_by_file_sections(mocker) -> None:
+    """Oversized diff_with_context reviews should validate every file chunk."""
+    diff = "\n".join([
+        "diff --git a/a.py b/a.py",
+        "+++ b/a.py",
+        "@@ -0,0 +1 @@",
+        "+a = 1",
+        "diff --git a/b.py b/b.py",
+        "+++ b/b.py",
+        "@@ -0,0 +1 @@",
+        "+b = 2",
+    ])
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 100
+
+    def estimate(**kwargs):
+        chunk = kwargs["diff"]
+        return 150 if "a.py" in chunk and "b.py" in chunk else 50
+
+    llm.estimate_structured_review_prompt_tokens.side_effect = estimate
+    llm.review_pr_structured.side_effect = [
+        [{"file": "a.py", "line": 1, "comment": "a"}],
+        [{"file": "b.py", "line": 1, "comment": "b"}],
+    ]
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: message
+    print_mock = mocker.patch("builtins.print")
+
+    comments = ai_review._review_pr_structured_with_complete_diff(
+        llm=llm,
+        formatter=formatter,
+        diff=diff,
+        files_summary=[],
+        context="",
+        review_scope="diff_with_context",
+        project_context="repo context",
+        work_item_context="work items",
+        source_files_context="source files",
+        pr_description_context="spec",
+    )
+
+    assert comments == [
+        {"file": "a.py", "line": 1, "comment": "a"},
+        {"file": "b.py", "line": 1, "comment": "b"},
+    ]
+    assert llm.review_pr_structured.call_count == 2
+    assert "a.py" in llm.review_pr_structured.call_args_list[0].kwargs["diff"]
+    assert "b.py" in llm.review_pr_structured.call_args_list[1].kwargs["diff"]
+    assert all(
+        call.kwargs["project_context"] == "repo context"
+        for call in llm.review_pr_structured.call_args_list
+    )
+    print_mock.assert_any_call("Review prompt exceeds provider budget; validating all changes in 2 chunk(s).")
+
+
+def test_structured_review_fails_when_single_file_exceeds_prompt_budget() -> None:
+    """A single oversized file section should fail instead of being truncated."""
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 10
+    llm.estimate_structured_review_prompt_tokens.return_value = 11
+
+    with pytest.raises(ai_review.LLMError, match="single changed file is too large"):
+        ai_review._review_pr_structured_with_complete_diff(
+            llm=llm,
+            formatter=MagicMock(),
+            diff="diff --git a/huge.py b/huge.py\n+++ b/huge.py\n@@ -0,0 +1 @@\n+x = 1",
+            files_summary=[],
+            context="",
+            review_scope="diff_with_context",
+            project_context="",
+            work_item_context="",
+            source_files_context="",
+            pr_description_context="",
+        )
+
+    llm.review_pr_structured.assert_not_called()
 
 
 def test_build_pr_metadata_issues_flags_review_risks() -> None:

@@ -73,7 +73,7 @@ def test_map_repo_json_returns_eligible_structure(mocker) -> None:
         ]),
     )
 
-    payload = json.loads(context.map_repo_json("repo-a", "feature/test"))
+    payload = json.loads(context.map_repo_json("repo-a", "feature/test", include_all_files=False))
 
     assert payload["repository"] == "repo-a"
     assert payload["ref"] == "origin/feature/test"
@@ -81,6 +81,32 @@ def test_map_repo_json_returns_eligible_structure(mocker) -> None:
     assert [item["path"] for item in payload["files"]] == [
         "src/app.py",
         "src/nested/helper.py",
+    ]
+
+
+def test_map_repo_json_includes_all_files_by_default(mocker) -> None:
+    """Repository maps for context selection should not hide excluded paths."""
+    config = ReviewConfig(
+        project_context_file_extensions=[".py"],
+        project_context_exclude_patterns=["build", "*.lock"],
+    )
+    context = LocalRepoContext("C:/repo-a", config)
+    mocker.patch.object(
+        context,
+        "_run_git",
+        return_value="\n".join([
+            "100644 blob abc 12\tsrc/app.py",
+            "100644 blob def 20\tbuild/out.py",
+            "100644 blob ghi 30\tpoetry.lock",
+        ]),
+    )
+
+    payload = json.loads(context.map_repo_json("repo-a", "feature/test"))
+
+    assert [item["path"] for item in payload["files"]] == [
+        "build/out.py",
+        "poetry.lock",
+        "src/app.py",
     ]
 
 
@@ -107,3 +133,40 @@ def test_get_files_context_reads_only_eligible_requested_paths(mocker) -> None:
     assert "#### /src/app.py" in rendered
     assert "missing.py" not in rendered
     show.assert_called_once_with("origin/feature/test", "src/app.py")
+
+
+def test_changed_files_context_includes_excluded_and_filtered_files(mocker) -> None:
+    """Changed PR files should be available even if normal context rules exclude them."""
+    config = ReviewConfig(
+        project_context_file_extensions=[".py"],
+        project_context_exclude_patterns=["build", "*.lock"],
+    )
+    context = LocalRepoContext("C:/repo-a", config)
+    mocker.patch.object(
+        context,
+        "_eligible_paths",
+        return_value=[
+            {"path": "build/out.lock"},
+            {"path": "docs/spec.md"},
+        ],
+    )
+    show = mocker.patch.object(
+        context,
+        "_show_file",
+        side_effect=lambda _ref, path: f"contents of {path}",
+    )
+
+    rendered = context.get_changed_files_context(
+        "feature/test",
+        [
+            {"path": "/build/out.lock", "change_type": "edit"},
+            {"path": "/docs/spec.md", "change_type": "edit"},
+        ],
+        max_chars=0,
+        file_max_chars=0,
+    )
+
+    assert "#### /build/out.lock" in rendered
+    assert "contents of build/out.lock" in rendered
+    assert "#### /docs/spec.md" in rendered
+    assert show.call_count == 2

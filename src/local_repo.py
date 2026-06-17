@@ -134,11 +134,11 @@ class LocalRepoContext:
             return
         self._run_git("switch", "-C", target, f"origin/{target}", "--quiet")
 
-    def map_repo_json(self, repository: str, ref: str) -> str:
-        """Returns a JSON structure map for eligible files at a git ref."""
+    def map_repo_json(self, repository: str, ref: str, include_all_files: bool = True) -> str:
+        """Returns a JSON structure map for files at a git ref."""
         branch = _branch_name(ref)
         tree_ref = f"origin/{branch}" if branch else ref
-        entries = self._eligible_paths(tree_ref)
+        entries = self._eligible_paths(tree_ref, include_all_files=include_all_files)
         directories = sorted({
             directory
             for item in entries
@@ -181,9 +181,10 @@ class LocalRepoContext:
                 "the PR. Use them as read-only support context, but keep findings "
                 "anchored to actual changed PR lines."
             ),
-            max_files=len(paths) if paths else 1,
+            max_files=0,
             max_chars=max_chars,
             file_max_chars=file_max_chars,
+            include_all_files=True,
         )
 
     def get_files_context(
@@ -196,6 +197,7 @@ class LocalRepoContext:
         max_files: int = 20,
         max_chars: int = 120000,
         file_max_chars: int = 30000,
+        include_all_files: bool = False,
     ) -> str:
         """Fetches selected eligible file contents from a source branch ref."""
         branch_name = _branch_name(branch)
@@ -203,9 +205,13 @@ class LocalRepoContext:
             return ""
 
         tree_ref = f"origin/{branch_name}"
-        eligible = {item["path"].lower(): item["path"] for item in self._eligible_paths(tree_ref)}
+        eligible = {
+            item["path"].lower(): item["path"]
+            for item in self._eligible_paths(tree_ref, include_all_files=include_all_files)
+        }
         selected: list[str] = []
         seen: set[str] = set()
+        file_limit = max_files if max_files and max_files > 0 else None
         for requested in requested_paths:
             key = _normalize_path(requested).lower()
             if not key or key in seen:
@@ -215,7 +221,7 @@ class LocalRepoContext:
                 continue
             seen.add(key)
             selected.append(path)
-            if len(selected) >= max_files:
+            if file_limit is not None and len(selected) >= file_limit:
                 break
 
         if not selected:
@@ -231,20 +237,22 @@ class LocalRepoContext:
         used_chars = 0
         included = 0
         truncated = False
+        char_limit = max_chars if max_chars and max_chars > 0 else None
+        per_file_limit = file_max_chars if file_max_chars and file_max_chars > 0 else None
 
         for path in selected:
-            remaining = max_chars - used_chars
-            if remaining <= 0:
+            remaining = char_limit - used_chars if char_limit is not None else None
+            if remaining is not None and remaining <= 0:
                 truncated = True
                 break
             try:
                 content = self._show_file(tree_ref, path)
             except LocalRepoError:
                 continue
-            if len(content) > file_max_chars:
-                content = content[:file_max_chars]
+            if per_file_limit is not None and len(content) > per_file_limit:
+                content = content[:per_file_limit]
                 truncated = True
-            if len(content) > remaining:
+            if remaining is not None and len(content) > remaining:
                 content = content[:remaining]
                 truncated = True
 
@@ -257,9 +265,10 @@ class LocalRepoContext:
         if included == 0:
             return ""
         if truncated:
+            configured_chars = "unlimited" if char_limit is None else str(char_limit)
             parts.append(
                 f"[Repository context truncated: included {included} file(s), "
-                f"used {used_chars} of {max_chars} configured characters.]"
+                f"used {used_chars} of {configured_chars} configured characters.]"
             )
         return "\n".join(parts).strip()
 
@@ -270,7 +279,7 @@ class LocalRepoContext:
             return {}
 
         tree_ref = f"origin/{branch_name}"
-        eligible = {item["path"].lower(): item["path"] for item in self._eligible_paths(tree_ref)}
+        eligible = {item["path"].lower(): item["path"] for item in self._eligible_paths(tree_ref, include_all_files=True)}
         contents: dict[str, str] = {}
         for requested in requested_paths:
             key = _normalize_path(requested).lower()
@@ -283,7 +292,7 @@ class LocalRepoContext:
                 continue
         return contents
 
-    def _eligible_paths(self, ref: str) -> list[dict]:
+    def _eligible_paths(self, ref: str, include_all_files: bool = False) -> list[dict]:
         output = self._run_git("ls-tree", "-r", "-l", ref)
         extensions = _normalize_extensions(self.config.project_context_file_extensions)
         entries: list[dict] = []
@@ -293,7 +302,11 @@ class LocalRepoContext:
             if not parsed:
                 continue
             path, size = parsed
-            if not self._is_eligible_path(path, extensions):
+            if include_all_files:
+                normalized = _normalize_path(path)
+                if not normalized or normalized.startswith("../"):
+                    continue
+            elif not self._is_eligible_path(path, extensions):
                 continue
             entries.append({
                 "path": path,

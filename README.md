@@ -83,8 +83,8 @@ review:
   language: pt
   verbosity: detailed                  # or: quick, security
   scope: diff_with_context             # diff_with_context, diff_only
-  file_extensions_filter: [".cs", ".ts", ".py"]
-  max_diff_files: 50
+  file_extensions_filter: [".cs", ".ts", ".py"]  # diff_only only
+  max_diff_files: 50                             # diff_only only
   max_comments_to_post: 20
   custom_prompt_file: review_context.local.md
   rag:
@@ -143,3 +143,8 @@ ruff check src/ tests/
 # Type checking (if using mypy)
 mypy src/
 ```
+
+`diff_with_context` validates every PR diff file and changed line. It ignores
+diff file-count limits, per-file diff line limits, and extension filters so
+changed files are not silently omitted. If a provider prompt is too large, the
+review is chunked by complete diff file sections instead of truncating changes.

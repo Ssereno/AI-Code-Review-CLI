@@ -1131,18 +1131,20 @@ class LLMClient:
         work_item_context: str,
         source_files_context: str = "",
         pr_description_context: str = "",
+        trim_project_context: bool = True,
     ) -> str:
         """Builds the user prompt, trimming only repo context if necessary."""
-        project_context = self._trim_project_context_for_prompt_budget(
-            system_prompt=system_prompt,
-            diff=diff,
-            files_summary=files_summary,
-            context=context,
-            project_context=project_context,
-            work_item_context=work_item_context,
-            source_files_context=source_files_context,
-            pr_description_context=pr_description_context,
-        )
+        if trim_project_context:
+            project_context = self._trim_project_context_for_prompt_budget(
+                system_prompt=system_prompt,
+                diff=diff,
+                files_summary=files_summary,
+                context=context,
+                project_context=project_context,
+                work_item_context=work_item_context,
+                source_files_context=source_files_context,
+                pr_description_context=pr_description_context,
+            )
         return build_user_message(
             diff,
             files_summary,
@@ -1152,6 +1154,35 @@ class LLMClient:
             source_files_context=source_files_context,
             pr_description_context=pr_description_context,
         )
+
+    def estimate_structured_review_prompt_tokens(
+        self,
+        diff: str,
+        files_summary: list[dict],
+        context: str = "",
+        review_scope: str = "diff_with_context",
+        project_context: str = "",
+        work_item_context: str = "",
+        source_files_context: str = "",
+        pr_description_context: str = "",
+    ) -> int:
+        """Estimates structured-review prompt tokens without trimming context."""
+        system_prompt, user_message = self._build_structured_review_prompt(
+            diff=diff,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+            trim_project_context=False,
+        )
+        return self._estimate_prompt_tokens(system_prompt, user_message)
+
+    def structured_review_prompt_token_limit(self) -> int:
+        """Returns the effective prompt token limit used for chunk planning."""
+        return self._effective_prompt_token_limit()
 
     def request_context_files(self, diff: str, files_summary: list[dict],
                               project_manifest: str,
@@ -1354,6 +1385,40 @@ class LLMClient:
         Returns:
             List of dicts with keys: file, line, type, severity, comment, suggestion
         """
+        system_prompt, user_message = self._build_structured_review_prompt(
+            diff=diff,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+            trim_project_context=review_scope != "diff_with_context",
+        )
+
+        raw = self._run_tracked_call(
+            "structured_comments",
+            system_prompt,
+            user_message,
+        )
+
+        return self._parse_structured_comments(raw)
+
+    def _build_structured_review_prompt(
+        self,
+        *,
+        diff: str,
+        files_summary: list[dict],
+        context: str = "",
+        review_scope: str = "diff_with_context",
+        project_context: str = "",
+        work_item_context: str = "",
+        source_files_context: str = "",
+        pr_description_context: str = "",
+        trim_project_context: bool = True,
+    ) -> tuple[str, str]:
+        """Builds the system and user messages for structured PR review."""
         base_prompt = get_pr_comment_prompt(self.config.review_language)
         custom_prompt, custom_prompt_source = self._load_custom_prompt()
 
@@ -1398,15 +1463,9 @@ class LLMClient:
             work_item_context=work_item_context,
             source_files_context=source_files_context,
             pr_description_context=pr_description_context,
+            trim_project_context=trim_project_context,
         )
-
-        raw = self._run_tracked_call(
-            "structured_comments",
-            system_prompt,
-            user_message,
-        )
-
-        return self._parse_structured_comments(raw)
+        return system_prompt, user_message
 
     def _parse_structured_comments(self, raw_response: str) -> list[dict]:
         """Parses the LLM JSON response."""

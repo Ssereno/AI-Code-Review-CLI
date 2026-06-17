@@ -52,10 +52,10 @@ review:
   verbosity: detailed
   scope: diff_with_context
   custom_prompt_file: review_context.local.md
-  max_diff_files: 50
-  max_diff_lines: 2000
+  max_diff_files: 50        # diff_only only
+  max_diff_lines: 2000      # diff_only only
   max_comments_to_post: 20
-  file_extensions_filter: []
+  file_extensions_filter: [] # diff_only only
   project_context:
     enabled: true
     mode: on_demand
@@ -185,10 +185,10 @@ This context is read-only and is used only to detect contradictions with changed
 | `review.verbosity` | `detailed` | Review style. Valid values: `quick`, `detailed`, `security`. |
 | `review.scope` | `diff_with_context` | Review/validation scope. Valid values: `diff_with_context`, `diff_only`. |
 | `review.custom_prompt_file` | `review_context.local.md` | One active Markdown reviewer context file. If the configured file is missing, the packaged `src/prompts/review_context.example.md` is used instead. Explicit custom paths continue to work when that file exists. |
-| `review.max_diff_files` | `50` | Maximum changed files sent to the LLM. Must be greater than `0`. |
-| `review.max_diff_lines` | `2000` | Maximum diff lines per file. Must be greater than `0`. |
+| `review.max_diff_files` | `50` | `diff_only` only. Maximum changed files sent to the LLM. `diff_with_context` ignores this and validates every changed file. Must be greater than `0`. |
+| `review.max_diff_lines` | `2000` | `diff_only` only. Maximum diff lines per file. `diff_with_context` ignores this and validates every changed line. Must be greater than `0`. |
 | `review.max_comments_to_post` | `20` | Maximum actionable inline comments kept after grounding, duplicate checks, and severity prioritization. Must be greater than `0`. |
-| `review.file_extensions_filter` | `[]` | Allowlist for files reviewed from the PR diff. Empty list means all file types. |
+| `review.file_extensions_filter` | `[]` | `diff_only` only. Allowlist for files reviewed from the PR diff. `diff_with_context` ignores this and validates every changed file. |
 
 ### Review / Validation Scope
 
@@ -197,6 +197,13 @@ giving the model read-only context from per-hunk change packets, full changed-fi
 contents, linked work item documentation, PR description/spec links, and on-demand repository files. Only
 lines marked as reviewable in the source-branch change packets can become inline
 comments.
+
+`diff_with_context` does not omit changed files or changed lines because of diff
+limits, extension filters, lock-file filters, generated-file filters, or
+repository context eligibility rules. If the complete prompt is too large for
+the provider, the CLI validates the PR in multiple complete file-section chunks
+and merges the results. It fails loudly instead of truncating when one changed
+file is too large to fit by itself.
 
 The reviewer context is intentionally single-file at runtime. `ai-review init`
 creates `review_context.example.md` as the kept example and

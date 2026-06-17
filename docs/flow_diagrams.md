@@ -29,15 +29,11 @@ flowchart TD
   Q --> R["🔀 Get PR diff\ngit diff origin/target...origin/source"]
   R --> S{Diff empty?}
   S -->|Yes| Z1["⚠️ No code changes — stop"]
-  S -->|No| T["🧹 Filter noise\n(binary files, lock files)"]
-  T --> U{File extensions filter?}
-  U -->|Yes| V["📂 Keep only allowed extensions"]
-  U -->|No| W{Review scope?}
-  V --> W
-  W -->|diff_only| X["✂️ Keep additions only\n(remove context and deletions)"]
-  W -->|diff_with_context| Y["📦 Limit files — max_diff_files"]
-  X --> Y
-  Y --> AA["✂️ Truncate per file — max_diff_lines"]
+  S -->|No| W{Review scope?}
+  W -->|diff_only| X["✂️ Apply compact diff filters\nnoise, extensions, file/line limits,\nadditions only"]
+  W -->|diff_with_context| Y["📦 Keep full validation diff\n(all changed files and lines)"]
+  X --> AA
+  Y --> AA["🧩 Chunk by complete file sections\nonly if provider prompt is too large"]
   AA --> BB{RAG enabled?}
   BB -->|No| CC["🤖 Build LLM prompt\n(diff + changed files + work items\n+ project context + RAG context)"]
   BB -->|Yes| DD["🔍 Verify: local branch == PR target branch"]

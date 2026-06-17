@@ -1124,6 +1124,163 @@ def _join_context_sections(*sections: str) -> str:
     )
 
 
+def _split_diff_file_sections(diff: str) -> list[str]:
+    """Splits a unified diff into complete file sections."""
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git") and current:
+            sections.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append(current)
+    return ["\n".join(section) for section in sections if any(line.strip() for line in section)]
+
+
+def _chunk_diff_for_prompt_budget(
+    *,
+    llm: LLMClient,
+    diff: str,
+    files_summary: list[dict],
+    context: str,
+    review_scope: str,
+    project_context: str,
+    work_item_context: str,
+    source_files_context: str,
+    pr_description_context: str,
+) -> list[str]:
+    """Returns full-diff chunks that fit the provider prompt budget."""
+    limit = llm.structured_review_prompt_token_limit()
+    if not isinstance(limit, int):
+        return [diff]
+    if limit <= 0:
+        return [diff]
+
+    full_tokens = llm.estimate_structured_review_prompt_tokens(
+        diff=diff,
+        files_summary=files_summary,
+        context=context,
+        review_scope=review_scope,
+        project_context=project_context,
+        work_item_context=work_item_context,
+        source_files_context=source_files_context,
+        pr_description_context=pr_description_context,
+    )
+    if full_tokens <= limit:
+        return [diff]
+
+    chunks: list[str] = []
+    current_sections: list[str] = []
+    for section in _split_diff_file_sections(diff):
+        section_tokens = llm.estimate_structured_review_prompt_tokens(
+            diff=section,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+        )
+        if section_tokens > limit:
+            first_line = next(
+                (line for line in section.splitlines() if line.startswith("diff --git")),
+                "[unknown file section]",
+            )
+            raise LLMError(
+                "A single changed file is too large to validate without truncation "
+                f"for the configured provider prompt limit ({limit} estimated tokens): "
+                f"{first_line}"
+            )
+
+        candidate_sections = [*current_sections, section]
+        candidate = "\n".join(candidate_sections)
+        candidate_tokens = llm.estimate_structured_review_prompt_tokens(
+            diff=candidate,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+        )
+        if current_sections and candidate_tokens > limit:
+            chunks.append("\n".join(current_sections))
+            current_sections = [section]
+        else:
+            current_sections = candidate_sections
+
+    if current_sections:
+        chunks.append("\n".join(current_sections))
+    return chunks or [diff]
+
+
+def _review_pr_structured_with_complete_diff(
+    *,
+    llm: LLMClient,
+    formatter: ReviewFormatter,
+    diff: str,
+    files_summary: list[dict],
+    context: str,
+    review_scope: str,
+    project_context: str,
+    work_item_context: str,
+    source_files_context: str,
+    pr_description_context: str,
+) -> list[dict]:
+    """Reviews all diff file sections, chunking only when the provider needs it."""
+    if review_scope != "diff_with_context":
+        return llm.review_pr_structured(
+            diff=diff,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+        )
+
+    chunks = _chunk_diff_for_prompt_budget(
+        llm=llm,
+        diff=diff,
+        files_summary=files_summary,
+        context=context,
+        review_scope=review_scope,
+        project_context=project_context,
+        work_item_context=work_item_context,
+        source_files_context=source_files_context,
+        pr_description_context=pr_description_context,
+    )
+    if len(chunks) > 1:
+        print(formatter.format_info(
+            f"Review prompt exceeds provider budget; validating all changes in {len(chunks)} chunk(s)."
+        ))
+
+    comments: list[dict] = []
+    for index, chunk in enumerate(chunks, start=1):
+        if len(chunks) > 1:
+            print(formatter.format_info(
+                f"Validating diff chunk {index}/{len(chunks)}."
+            ))
+        chunk_comments = llm.review_pr_structured(
+            diff=chunk,
+            files_summary=files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project_context,
+            work_item_context=work_item_context,
+            source_files_context=source_files_context,
+            pr_description_context=pr_description_context,
+        )
+        if isinstance(chunk_comments, list):
+            comments.extend(chunk_comments)
+    return comments
+
+
 def _build_on_demand_project_context(
     *,
     llm: LLMClient,
@@ -1139,6 +1296,7 @@ def _build_on_demand_project_context(
     user_context: str,
     work_item_context: str,
     source_files_context: str,
+    unlimited_context: bool = False,
 ) -> str:
     """Builds repository context by letting the model request files from a manifest."""
     project_manifest = ""
@@ -1169,9 +1327,18 @@ def _build_on_demand_project_context(
 
     fetched_context = ""
     requested_keys: set[str] = set()
-    for round_index in range(config.project_context_retrieval_max_rounds):
-        remaining_files = config.project_context_retrieval_max_files - len(requested_keys)
-        remaining_chars = config.project_context_retrieval_max_chars - len(fetched_context)
+    max_rounds = (
+        config.project_context_retrieval_max_rounds
+        if not unlimited_context else
+        max(config.project_context_retrieval_max_rounds, 1)
+    )
+    for round_index in range(max_rounds):
+        if unlimited_context:
+            remaining_files = 1000000
+            remaining_chars = 1000000000
+        else:
+            remaining_files = config.project_context_retrieval_max_files - len(requested_keys)
+            remaining_chars = config.project_context_retrieval_max_chars - len(fetched_context)
         if remaining_files <= 0 or remaining_chars <= 0:
             break
 
@@ -1209,9 +1376,10 @@ def _build_on_demand_project_context(
                 round_context = local_context.get_files_context(
                     source_branch,
                     new_paths,
-                    max_files=remaining_files,
-                    max_chars=remaining_chars,
-                    file_max_chars=config.project_context_retrieval_file_max_chars,
+                    max_files=0 if unlimited_context else remaining_files,
+                    max_chars=0 if unlimited_context else remaining_chars,
+                    file_max_chars=0 if unlimited_context else config.project_context_retrieval_file_max_chars,
+                    include_all_files=unlimited_context,
                 )
             else:
                 round_context = tfs.get_project_files_context(
@@ -1654,63 +1822,67 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # Get diff files summary
     git_utils = git_utils_pr
 
-    # --- Noise filter (binary, lock files, oversized sections) ---
-    diff = git_utils_pr.filter_diff_noise(diff, config.max_diff_lines)
-    if not diff.strip():
-        print(formatter.format_warning("After filtering noise (binary/lock files), the diff is empty."))
-        return 0
-
-    # Filter extensions before limiting/truncating the diff sent to the LLM
-    if config.file_extensions_filter:
-        try:
-            diff = git_utils.filter_diff_by_extensions(
-                diff,
-                config.file_extensions_filter,
-            )
-        except GitError as exc:
-            print(formatter.format_warning(str(exc)))
-            return 0
-
     review_scope = (config.review_scope or "diff_with_context").lower()
+    validation_diff = diff
+    diff_for_review = validation_diff
+    was_truncated = False
 
     if review_scope == "diff_only":
+        # Keep the legacy PR-only mode compact. All configured filters and
+        # limits apply only to diff_only, never to diff_with_context.
+        diff_for_review = git_utils_pr.filter_diff_noise(diff_for_review, config.max_diff_lines)
+        if not diff_for_review.strip():
+            print(formatter.format_warning("After filtering noise (binary/lock files), the diff is empty."))
+            return 0
+
+        if config.file_extensions_filter:
+            try:
+                diff_for_review = git_utils.filter_diff_by_extensions(
+                    diff_for_review,
+                    config.file_extensions_filter,
+                )
+            except GitError as exc:
+                print(formatter.format_warning(str(exc)))
+                return 0
+
         # Keep the legacy PR-only mode compact by removing context and deletions.
-        diff = git_utils.filter_diff_additions_only(diff)
-        if not diff.strip():
+        diff_for_review = git_utils.filter_diff_additions_only(diff_for_review)
+        if not diff_for_review.strip():
             print(formatter.format_warning(
                 "After filtering additions only, the diff is empty. No new code to review."
             ))
             return 0
 
-    # Limit number of diff files if needed
-    diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
-        diff,
-        config.max_diff_files,
-    )
-    if files_limited:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_files} files. "
-            f"{omitted_files} file(s) omitted."
-        ))
+        diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
+            diff_for_review,
+            config.max_diff_files,
+        )
+        if files_limited:
+            print(formatter.format_warning(
+                f"Diff truncated to {config.max_diff_files} files. "
+                f"{omitted_files} file(s) omitted."
+            ))
 
-    files_summary = git_utils.get_changed_files_summary(diff_limited)
+        diff_for_review = diff_limited
 
-    # Truncate diff if needed
-    diff_truncated, was_truncated = git_utils.truncate_diff(
-        diff_limited,
-        config.max_diff_lines,
-    )
-    if was_truncated:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_lines} lines per file."
-        ))
+        diff_truncated, was_truncated = git_utils.truncate_diff(
+            diff_for_review,
+            config.max_diff_lines,
+        )
+        if was_truncated:
+            print(formatter.format_warning(
+                f"Diff truncated to {config.max_diff_lines} lines per file."
+            ))
+        diff_for_review = diff_truncated
+
+    files_summary = git_utils.get_changed_files_summary(diff_for_review)
 
     use_contextual_review = review_scope == "diff_with_context"
     load_changed_file_context = review_scope == "diff_with_context"
 
     # --- RAG context ---
     rag_context = ""
-    if config.rag_enabled and diff_truncated.strip():
+    if config.rag_enabled and diff_for_review.strip():
         # Verify local branch matches the PR target branch to avoid RAG context contamination.
         _target_branch = target_ref.removeprefix("origin/")
         try:
@@ -1733,7 +1905,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
         print(formatter.format_progress("Loading RAG context from local repository"))
         rag_context = obter_contexto_rag(
-            diff_truncated,
+            diff_for_review,
             repo_path=git_utils.repo_path,
             max_chars=config.rag_max_chars,
         )
@@ -1828,8 +2000,8 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             source_files_context = local_context.get_changed_files_context(
                 pr_details.get("source_branch", ""),
                 pr_details.get("changed_files", []),
-                max_chars=config.project_context_retrieval_max_chars,
-                file_max_chars=config.project_context_retrieval_file_max_chars,
+                max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_max_chars,
+                file_max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_file_max_chars,
             )
         except LocalRepoError as exc:
             print(formatter.format_warning(
@@ -1867,9 +2039,10 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                     "contracts, dependencies, and call sites. The review target remains "
                     "the PR diff only."
                 ),
-                max_files=config.project_context_max_files or 1000000,
-                max_chars=config.project_context_max_chars or 1000000000,
-                file_max_chars=config.project_context_retrieval_file_max_chars,
+                max_files=0 if review_scope == "diff_with_context" else config.project_context_max_files or 1000000,
+                max_chars=0 if review_scope == "diff_with_context" else config.project_context_max_chars or 1000000000,
+                file_max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_file_max_chars,
+                include_all_files=review_scope == "diff_with_context",
             )
         except (LocalRepoError, ValueError) as exc:
             print(formatter.format_warning(
@@ -1901,11 +2074,12 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
                 pr_description_context=pr_description_context,
                 repo_name=repo_name,
                 source_branch=pr_details.get("source_branch", ""),
-                diff=diff_truncated,
+                diff=diff_for_review,
                 files_summary=files_summary,
                 user_context=getattr(args, "context", ""),
                 work_item_context=work_item_context,
                 source_files_context=source_files_context,
+                unlimited_context=review_scope == "diff_with_context",
             )
     except LLMError as exc:
         print(formatter.format_error(str(exc)))
@@ -1917,8 +2091,10 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     start_time = time.time()
 
     try:
-        structured_comments = llm.review_pr_structured(
-            diff=diff_truncated,
+        structured_comments = _review_pr_structured_with_complete_diff(
+            llm=llm,
+            formatter=formatter,
+            diff=diff_for_review,
             files_summary=files_summary,
             context="\n\n".join(filter(None, [getattr(args, "context", ""), rag_context])),
             review_scope=config.review_scope,
@@ -1954,7 +2130,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     structured_comments, discarded_comments, discarded_ungrounded = (
         _filter_comments_to_grounded_source_lines(
             structured_comments,
-            diff_truncated,
+            validation_diff,
             source_file_contents,
         )
     )
@@ -1971,7 +2147,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # changes bypass the evidence gate.
     structured_comments, extra_discarded_comments = _filter_comments_to_changed_lines(
         structured_comments,
-        diff_truncated,
+        validation_diff,
     )
     if extra_discarded_comments:
         print(formatter.format_info(

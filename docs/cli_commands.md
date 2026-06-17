@@ -114,11 +114,13 @@ ai-review pr-review 42 -p gemini -m gemini-2.0-flash
 #### Override maximum files
 
 ```bash
-# Envia apenas os primeiros 20 ficheiros ao LLM
+# diff_only only: send only the first 20 files to the LLM
 ai-review pr-review 42 --max-diff-files 20
 ```
 
-Overrides the `review.max_diff_files` option in `config.yaml`.
+Overrides the `review.max_diff_files` option in `config.yaml`. This limit is
+ignored by `diff_with_context`, which validates every changed file and chunks by
+complete diff file sections when needed.
 
 #### Add context
 
