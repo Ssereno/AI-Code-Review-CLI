@@ -349,8 +349,8 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     local_context.get_changed_files_context.assert_called_once_with(
         "feature/test",
         [{"path": "/a.py", "change_type": "edit"}],
-        max_chars=78000,
-        file_max_chars=39000,
+        max_chars=29250,
+        file_max_chars=14625,
     )
     local_context.map_repo_json.assert_called_once_with("repo-a", "feature/test")
     local_context.get_files_context.assert_called_once()
@@ -891,6 +891,51 @@ def test_structured_review_loads_context_per_batch(mocker, review_config) -> Non
     assert llm.review_pr_structured.call_args_list[1].kwargs["source_files_context"] == "B SOURCE CONTEXT"
     assert llm.review_pr_structured.call_args_list[0].kwargs["project_context"] == "A REQUESTED CONTEXT"
     assert llm.review_pr_structured.call_args_list[1].kwargs["project_context"] == "B REQUESTED CONTEXT"
+
+
+def test_structured_review_reduces_context_before_call(review_config) -> None:
+    """Final batch context should be reduced before exceeding the prompt budget."""
+    diff = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+a = 1"
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 100
+
+    def estimate(**kwargs):
+        total_context = sum(
+            len(str(kwargs.get(name, "")))
+            for name in (
+                "project_context",
+                "work_item_context",
+                "source_files_context",
+                "pr_description_context",
+            )
+        )
+        return 20 + (total_context // 20)
+
+    llm.estimate_structured_review_prompt_tokens.side_effect = estimate
+    llm.review_pr_structured.return_value = []
+
+    ai_review._review_pr_structured_with_complete_diff(
+        llm=llm,
+        formatter=MagicMock(),
+        diff=diff,
+        files_summary=[],
+        context="",
+        review_scope="diff_with_context",
+        project_context="P" * 2000,
+        work_item_context="W" * 2000,
+        source_files_context="S" * 2000,
+        pr_description_context="R" * 2000,
+    )
+
+    call_kwargs = llm.review_pr_structured.call_args.kwargs
+    assert len(call_kwargs["project_context"]) < 2000
+    assert len(call_kwargs["source_files_context"]) < 2000
+    assert "reduced to fit" in "\n".join([
+        call_kwargs["project_context"],
+        call_kwargs["source_files_context"],
+        call_kwargs["work_item_context"],
+        call_kwargs["pr_description_context"],
+    ])
 
 
 def test_build_pr_metadata_issues_flags_review_risks() -> None:

@@ -1478,7 +1478,105 @@ def _parent_review_directories(path: str) -> list[str]:
 
 def _batch_context_budget(llm: LLMClient) -> int:
     """Returns a conservative character budget for per-batch fetched context."""
-    return max(4000, _batch_token_target(llm) * 2)
+    return max(2000, int(_batch_token_target(llm) * 0.75))
+
+
+def _cap_text(text: str, max_chars: int, label: str) -> str:
+    """Caps context text with an explicit truncation marker."""
+    value = str(text or "")
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return (
+        value[:max_chars].rstrip()
+        + f"\n\n[{label} reduced to fit the per-batch prompt budget.]"
+    )
+
+
+def _fit_batch_prompt_context(
+    *,
+    llm: LLMClient,
+    batch: ReviewBatch,
+    context: str,
+    review_scope: str,
+    project_context: str,
+    work_item_context: str,
+    source_files_context: str,
+    pr_description_context: str,
+) -> tuple[str, str, str, str]:
+    """Reduces read-only batch context until the estimated prompt fits budget."""
+    target = _batch_token_target(llm)
+    project = project_context
+    work = work_item_context
+    source = source_files_context
+    pr_context = pr_description_context
+
+    def estimate() -> int:
+        return _estimate_review_tokens(
+            llm,
+            diff=batch.diff,
+            files_summary=batch.files_summary,
+            context=context,
+            review_scope=review_scope,
+            project_context=project,
+            work_item_context=work,
+            source_files_context=source,
+            pr_description_context=pr_context,
+        )
+
+    if estimate() <= target:
+        return project, work, source, pr_context
+
+    reductions = [
+        ("project context", "project"),
+        ("source file context", "source"),
+        ("work item context", "work"),
+        ("PR/spec context", "pr"),
+    ]
+    for label, field_name in reductions:
+        current = {
+            "project": project,
+            "source": source,
+            "work": work,
+            "pr": pr_context,
+        }[field_name]
+        if not current:
+            continue
+        reduced = _cap_text(current, max(1000, len(current) // 2), label)
+        if field_name == "project":
+            project = reduced
+        elif field_name == "source":
+            source = reduced
+        elif field_name == "work":
+            work = reduced
+        else:
+            pr_context = reduced
+        if estimate() <= target:
+            return project, work, source, pr_context
+
+    # Keep shrinking read-only context before failing; the batch diff and
+    # changed-line instructions are the only non-negotiable payload.
+    for _ in range(8):
+        if estimate() <= target:
+            return project, work, source, pr_context
+        project = _cap_text(project, max(0, len(project) // 2), "project context")
+        source = _cap_text(source, max(0, len(source) // 2), "source file context")
+        work = _cap_text(work, max(0, len(work) // 2), "work item context")
+        pr_context = _cap_text(pr_context, max(0, len(pr_context) // 2), "PR/spec context")
+
+    if estimate() > target:
+        project = ""
+        source = ""
+        work = ""
+        pr_context = (
+            "[Read-only PR/spec context omitted because the batch diff and "
+            "review instructions filled the per-batch prompt budget.]"
+        )
+    if estimate() > target:
+        raise LLMError(
+            "Review batch prompt is still too large after reducing read-only context. "
+            f"Batch {batch.id} contains {len(batch.changed_files)} changed file(s)."
+        )
+    return project, work, source, pr_context
 
 
 def _review_pr_structured_with_complete_diff(
@@ -1523,9 +1621,9 @@ def _review_pr_structured_with_complete_diff(
         context=context,
         review_scope=review_scope,
         project_context="",
-        work_item_context=work_item_context,
+        work_item_context="",
         source_files_context="",
-        pr_description_context=pr_description_context,
+        pr_description_context="",
     )
     if len(batches) > 1:
         print(formatter.format_info(
@@ -1622,6 +1720,22 @@ def _review_pr_structured_with_complete_diff(
             batch,
             max_chars=max(3000, _batch_context_budget(llm) // 5),
             label="Work item context",
+        )
+
+        batch_project_context, batch_work_context, batch_source_context, batch_pr_context = (
+            _fit_batch_prompt_context(
+                llm=llm,
+                batch=batch,
+                context=_join_context_sections(
+                    context,
+                    f"Review batch {batch.id} of {len(batches)}. Validate only REVIEWABLE lines present in this batch; final aggregation will deduplicate findings across batches.",
+                ),
+                review_scope=review_scope,
+                project_context=batch_project_context,
+                work_item_context=batch_work_context,
+                source_files_context=batch_source_context,
+                pr_description_context=batch_pr_context,
+            )
         )
 
         chunk_comments = llm.review_pr_structured(

@@ -27,7 +27,7 @@ class LLMError(Exception):
     pass
 
 
-ESTIMATED_CHARS_PER_TOKEN = 3
+ESTIMATED_CHARS_PER_TOKEN = 2
 DEFAULT_PROMPT_TOKEN_LIMITS = {
     "bedrock": 180000,
 }
