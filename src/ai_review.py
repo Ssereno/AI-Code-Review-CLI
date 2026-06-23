@@ -48,6 +48,7 @@ import re
 import sys
 import time
 import threading
+from dataclasses import dataclass, field
 
 
 def _configure_console_streams() -> None:
@@ -98,6 +99,17 @@ from src import __version__ as VERSION
 
 
 REVIEW_SCOPE_CHOICES = ["diff_only", "diff_with_context"]
+
+
+@dataclass
+class ReviewBatch:
+    """One token-bounded review unit for a subset of PR changes."""
+
+    id: int
+    diff: str
+    changed_files: list[str] = field(default_factory=list)
+    files_summary: list[dict] = field(default_factory=list)
+    estimated_tokens: int = 0
 
 
 def _get_spinner_frames() -> list[str]:
@@ -1139,7 +1151,92 @@ def _split_diff_file_sections(diff: str) -> list[str]:
     return ["\n".join(section) for section in sections if any(line.strip() for line in section)]
 
 
-def _chunk_diff_for_prompt_budget(
+def _diff_section_path(section: str) -> str:
+    """Returns the source/right-side path represented by a diff section."""
+    for line in (section or "").splitlines():
+        if line.startswith("+++ "):
+            value = line[4:].strip().split("\t", 1)[0]
+            if value != "/dev/null":
+                return _normalize_review_path(value)
+        if line.startswith("diff --git ") and " b/" in line:
+            return _normalize_review_path(line.split(" b/", 1)[1])
+    return ""
+
+
+def _filter_files_summary_for_diff(files_summary: list[dict], diff: str) -> list[dict]:
+    """Keeps file summary rows that belong to a batch diff."""
+    paths = set(_changed_lines_by_file(diff).keys())
+    if not paths:
+        paths = {
+            path for path in (_diff_section_path(section) for section in _split_diff_file_sections(diff))
+            if path
+        }
+    return [
+        item for item in files_summary
+        if _normalize_review_path(item.get("file", "")) in paths
+    ]
+
+
+def _split_diff_section_hunks(section: str) -> list[str]:
+    """Splits a single file diff section into complete hunk-level sections."""
+    lines = section.splitlines()
+    first_hunk = next((index for index, line in enumerate(lines) if line.startswith("@@")), -1)
+    if first_hunk < 0:
+        return [section]
+
+    header = lines[:first_hunk]
+    hunks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines[first_hunk:]:
+        if line.startswith("@@") and current:
+            hunks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        hunks.append(current)
+    return [
+        "\n".join([*header, *hunk])
+        for hunk in hunks
+        if hunk
+    ]
+
+
+def _batch_token_target(llm: LLMClient) -> int:
+    """Returns a conservative target token budget for each review batch."""
+    limit = llm.structured_review_prompt_token_limit()
+    if not isinstance(limit, int) or limit <= 0:
+        limit = 60000
+    return max(1, int(limit * 0.65))
+
+
+def _estimate_review_tokens(
+    llm: LLMClient,
+    *,
+    diff: str,
+    files_summary: list[dict],
+    context: str,
+    review_scope: str,
+    project_context: str,
+    work_item_context: str,
+    source_files_context: str,
+    pr_description_context: str,
+) -> int:
+    """Estimates review prompt tokens with a safe fallback for test doubles."""
+    estimate = llm.estimate_structured_review_prompt_tokens(
+        diff=diff,
+        files_summary=files_summary,
+        context=context,
+        review_scope=review_scope,
+        project_context=project_context,
+        work_item_context=work_item_context,
+        source_files_context=source_files_context,
+        pr_description_context=pr_description_context,
+    )
+    return estimate if isinstance(estimate, int) else 0
+
+
+def _plan_review_batches(
     *,
     llm: LLMClient,
     diff: str,
@@ -1150,15 +1247,11 @@ def _chunk_diff_for_prompt_budget(
     work_item_context: str,
     source_files_context: str,
     pr_description_context: str,
-) -> list[str]:
-    """Returns full-diff chunks that fit the provider prompt budget."""
-    limit = llm.structured_review_prompt_token_limit()
-    if not isinstance(limit, int):
-        return [diff]
-    if limit <= 0:
-        return [diff]
-
-    full_tokens = llm.estimate_structured_review_prompt_tokens(
+) -> list[ReviewBatch]:
+    """Plans token-bounded review batches without dropping changed lines."""
+    target = _batch_token_target(llm)
+    full_tokens = _estimate_review_tokens(
+        llm,
         diff=diff,
         files_summary=files_summary,
         context=context,
@@ -1168,38 +1261,38 @@ def _chunk_diff_for_prompt_budget(
         source_files_context=source_files_context,
         pr_description_context=pr_description_context,
     )
-    if full_tokens <= limit:
-        return [diff]
+    if full_tokens and full_tokens <= target:
+        return [
+            ReviewBatch(
+                id=1,
+                diff=diff,
+                changed_files=sorted(_changed_lines_by_file(diff).keys()),
+                files_summary=files_summary,
+                estimated_tokens=full_tokens,
+            )
+        ]
 
-    chunks: list[str] = []
+    batches: list[ReviewBatch] = []
     current_sections: list[str] = []
-    for section in _split_diff_file_sections(diff):
-        section_tokens = llm.estimate_structured_review_prompt_tokens(
-            diff=section,
-            files_summary=files_summary,
-            context=context,
-            review_scope=review_scope,
-            project_context=project_context,
-            work_item_context=work_item_context,
-            source_files_context=source_files_context,
-            pr_description_context=pr_description_context,
-        )
-        if section_tokens > limit:
-            first_line = next(
-                (line for line in section.splitlines() if line.startswith("diff --git")),
-                "[unknown file section]",
-            )
-            raise LLMError(
-                "A single changed file is too large to validate without truncation "
-                f"for the configured provider prompt limit ({limit} estimated tokens): "
-                f"{first_line}"
-            )
+    batch_id = 1
 
-        candidate_sections = [*current_sections, section]
-        candidate = "\n".join(candidate_sections)
-        candidate_tokens = llm.estimate_structured_review_prompt_tokens(
-            diff=candidate,
-            files_summary=files_summary,
+    def make_batch(batch_diff: str, estimated_tokens: int = 0) -> ReviewBatch:
+        nonlocal batch_id
+        batch = ReviewBatch(
+            id=batch_id,
+            diff=batch_diff,
+            changed_files=sorted(_changed_lines_by_file(batch_diff).keys()),
+            files_summary=_filter_files_summary_for_diff(files_summary, batch_diff),
+            estimated_tokens=estimated_tokens,
+        )
+        batch_id += 1
+        return batch
+
+    def estimate(batch_diff: str) -> int:
+        return _estimate_review_tokens(
+            llm,
+            diff=batch_diff,
+            files_summary=_filter_files_summary_for_diff(files_summary, batch_diff),
             context=context,
             review_scope=review_scope,
             project_context=project_context,
@@ -1207,15 +1300,185 @@ def _chunk_diff_for_prompt_budget(
             source_files_context=source_files_context,
             pr_description_context=pr_description_context,
         )
-        if current_sections and candidate_tokens > limit:
-            chunks.append("\n".join(current_sections))
-            current_sections = [section]
-        else:
-            current_sections = candidate_sections
+
+    for section in _split_diff_file_sections(diff):
+        section_tokens = estimate(section)
+        section_units = [section]
+        if section_tokens and section_tokens > target:
+            section_units = _split_diff_section_hunks(section)
+            if len(section_units) == 1:
+                first_line = next(
+                    (line for line in section.splitlines() if line.startswith("diff --git")),
+                    "[unknown file section]",
+                )
+                raise LLMError(
+                    "A single changed file is too large to validate without truncation "
+                    f"for the configured batch target ({target} estimated tokens): "
+                    f"{first_line}"
+                )
+
+        for unit in section_units:
+            unit_tokens = estimate(unit)
+            if unit_tokens and unit_tokens > target:
+                first_line = next(
+                    (line for line in unit.splitlines() if line.startswith("diff --git")),
+                    "[unknown file section]",
+                )
+                hunk_line = next(
+                    (line for line in unit.splitlines() if line.startswith("@@")),
+                    "[unknown hunk]",
+                )
+                raise LLMError(
+                    "A single changed hunk is too large to validate without truncation "
+                    f"for the configured batch target ({target} estimated tokens): "
+                    f"{first_line} {hunk_line}"
+                )
+
+            candidate_sections = [*current_sections, unit]
+            candidate = "\n".join(candidate_sections)
+            candidate_tokens = estimate(candidate)
+            if current_sections and candidate_tokens and candidate_tokens > target:
+                batch_diff = "\n".join(current_sections)
+                batches.append(make_batch(batch_diff, estimate(batch_diff)))
+                current_sections = [unit]
+            else:
+                current_sections = candidate_sections
 
     if current_sections:
-        chunks.append("\n".join(current_sections))
-    return chunks or [diff]
+        batch_diff = "\n".join(current_sections)
+        batches.append(make_batch(batch_diff, estimate(batch_diff)))
+    return batches or [make_batch(diff, full_tokens)]
+
+
+def _chunk_diff_for_prompt_budget(**kwargs) -> list[str]:
+    """Compatibility wrapper returning planned batch diffs."""
+    return [batch.diff for batch in _plan_review_batches(**kwargs)]
+
+
+def _changed_file_records_for_batch(changed_files: list[dict], batch: ReviewBatch) -> list[dict]:
+    """Returns changed-file metadata records that belong to one review batch."""
+    batch_paths = {_normalize_review_path(path) for path in batch.changed_files}
+    return [
+        item for item in changed_files
+        if _normalize_review_path(item.get("path", "")) in batch_paths
+    ]
+
+
+def _extract_batch_terms(batch: ReviewBatch) -> list[str]:
+    """Extracts deterministic keywords from a batch for context excerpting."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for path in batch.changed_files:
+        parts = re.split(r"[^A-Za-z0-9_]+", path)
+        for part in parts:
+            if len(part) >= 3 and part.lower() not in seen:
+                seen.add(part.lower())
+                terms.append(part)
+    for line in batch.diff.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", line):
+            key = token.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(token)
+            if len(terms) >= 40:
+                return terms
+    return terms
+
+
+def _excerpt_context_for_batch(
+    context: str,
+    batch: ReviewBatch,
+    *,
+    max_chars: int,
+    label: str,
+) -> str:
+    """Returns a deterministic excerpt of large read-only context for a batch."""
+    text = str(context or "").strip()
+    if not text or max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    terms = [term.lower() for term in _extract_batch_terms(batch)]
+    lines = text.splitlines()
+    selected_indexes: set[int] = set()
+    for index, line in enumerate(lines):
+        normalized = line.lower()
+        if line.startswith("#") or any(term and term in normalized for term in terms):
+            for nearby in range(max(0, index - 2), min(len(lines), index + 3)):
+                selected_indexes.add(nearby)
+
+    selected_lines = [lines[index] for index in sorted(selected_indexes)]
+    excerpt = "\n".join(selected_lines).strip()
+    if not excerpt:
+        excerpt = text[:max_chars].rstrip()
+    elif len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars].rstrip()
+
+    return (
+        f"[{label} excerpted for review batch {batch.id}; omitted text must not be "
+        "treated as an unmet requirement.]\n"
+        f"{excerpt}"
+    )
+
+
+def _slice_repo_map_json(project_manifest: str, batch: ReviewBatch, max_files: int = 200) -> str:
+    """Narrows a repository structure JSON payload to paths relevant to a batch."""
+    text = str(project_manifest or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return text[:60000]
+
+    batch_paths = {_normalize_review_path(path) for path in batch.changed_files}
+    batch_dirs = {
+        os.path.dirname(path).replace("\\", "/")
+        for path in batch_paths
+        if os.path.dirname(path)
+    }
+    batch_roots = {path.split("/", 1)[0] for path in batch_paths if path}
+    selected = []
+    for item in payload.get("files", []):
+        path = _normalize_review_path(item.get("path", ""))
+        directory = os.path.dirname(path).replace("\\", "/")
+        root = path.split("/", 1)[0] if path else ""
+        if path in batch_paths or directory in batch_dirs or root in batch_roots:
+            selected.append(item)
+        if len(selected) >= max_files:
+            break
+
+    directories = sorted({
+        directory
+        for item in selected
+        for directory in _parent_review_directories(str(item.get("path", "")))
+    })
+    sliced = {
+        "repository": payload.get("repository", ""),
+        "ref": payload.get("ref", ""),
+        "batch_id": batch.id,
+        "directories": directories,
+        "files": selected,
+        "counts": {
+            "directories": len(directories),
+            "files": len(selected),
+            "total_repository_files": payload.get("counts", {}).get("files", len(payload.get("files", []))),
+        },
+        "note": "Repository map sliced for this review batch.",
+    }
+    return json.dumps(sliced, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _parent_review_directories(path: str) -> list[str]:
+    """Returns parent directories for a normalized review path."""
+    parts = _normalize_review_path(path).split("/")[:-1]
+    return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+
+
+def _batch_context_budget(llm: LLMClient) -> int:
+    """Returns a conservative character budget for per-batch fetched context."""
+    return max(4000, _batch_token_target(llm) * 2)
 
 
 def _review_pr_structured_with_complete_diff(
@@ -1230,6 +1493,15 @@ def _review_pr_structured_with_complete_diff(
     work_item_context: str,
     source_files_context: str,
     pr_description_context: str,
+    local_context: LocalRepoContext | None = None,
+    tfs=None,
+    config: ReviewConfig | None = None,
+    repo_name: str = "",
+    source_branch: str = "",
+    changed_files: list[dict] | None = None,
+    project_manifest: str = "",
+    user_context: str = "",
+    project_context_mode: str = "on_demand",
 ) -> list[dict]:
     """Reviews all diff file sections, chunking only when the provider needs it."""
     if review_scope != "diff_with_context":
@@ -1244,37 +1516,126 @@ def _review_pr_structured_with_complete_diff(
             pr_description_context=pr_description_context,
         )
 
-    chunks = _chunk_diff_for_prompt_budget(
+    batches = _plan_review_batches(
         llm=llm,
         diff=diff,
         files_summary=files_summary,
         context=context,
         review_scope=review_scope,
-        project_context=project_context,
+        project_context="",
         work_item_context=work_item_context,
-        source_files_context=source_files_context,
+        source_files_context="",
         pr_description_context=pr_description_context,
     )
-    if len(chunks) > 1:
+    if len(batches) > 1:
         print(formatter.format_info(
-            f"Review prompt exceeds provider budget; validating all changes in {len(chunks)} chunk(s)."
+            f"Validating all changes in {len(batches)} token-safe batch(es)."
         ))
 
     comments: list[dict] = []
-    for index, chunk in enumerate(chunks, start=1):
-        if len(chunks) > 1:
+    changed_files = changed_files or []
+    for batch in batches:
+        if len(batches) > 1:
             print(formatter.format_info(
-                f"Validating diff chunk {index}/{len(chunks)}."
+                f"Validating review batch {batch.id}/{len(batches)} ({len(batch.changed_files)} file(s))."
             ))
+        batch_source_context = source_files_context
+        if local_context is not None and config is not None:
+            try:
+                batch_source_context = local_context.get_changed_files_context(
+                    source_branch,
+                    _changed_file_records_for_batch(changed_files, batch),
+                    max_chars=_batch_context_budget(llm),
+                    file_max_chars=max(2000, _batch_context_budget(llm) // 2),
+                )
+            except LocalRepoError as exc:
+                print(formatter.format_warning(
+                    f"Could not load changed-file context for batch {batch.id}; continuing with diff only: {exc}"
+                ))
+
+        batch_project_context = project_context
+        batch_manifest = _slice_repo_map_json(project_manifest, batch)
+        if config is not None and (project_context_mode or "on_demand").lower() == "full":
+            try:
+                manifest_payload = json.loads(batch_manifest) if batch_manifest else {}
+                requested_paths = [
+                    str(item.get("path", ""))
+                    for item in manifest_payload.get("files", [])
+                    if item.get("path")
+                ]
+                if local_context is not None and requested_paths:
+                    batch_project_context = local_context.get_files_context(
+                        source_branch,
+                        requested_paths,
+                        title=f"Repository context for review batch {batch.id}",
+                        intro=(
+                            "These files are read-only support context selected for "
+                            "this review batch. The review target remains the batch diff only."
+                        ),
+                        max_files=min(len(requested_paths), 50),
+                        max_chars=_batch_context_budget(llm),
+                        file_max_chars=max(2000, _batch_context_budget(llm) // 4),
+                        include_all_files=True,
+                    )
+            except (LocalRepoError, ValueError, TypeError) as exc:
+                print(formatter.format_warning(
+                    f"Could not load repository context for batch {batch.id}; continuing without it: {exc}"
+                ))
+        elif config is not None and (project_context_mode or "on_demand").lower() == "on_demand":
+            if batch_manifest and (local_context is not None or tfs is not None):
+                batch_project_context = _build_on_demand_project_context(
+                    llm=llm,
+                    tfs=tfs,
+                    config=config,
+                    formatter=formatter,
+                    local_context=local_context,
+                    pr_description_context=_excerpt_context_for_batch(
+                        pr_description_context,
+                        batch,
+                        max_chars=max(2000, _batch_context_budget(llm) // 6),
+                        label="PR description/spec context",
+                    ),
+                    repo_name=repo_name,
+                    source_branch=source_branch,
+                    diff=batch.diff,
+                    files_summary=batch.files_summary,
+                    user_context=user_context,
+                    work_item_context=_excerpt_context_for_batch(
+                        work_item_context,
+                        batch,
+                        max_chars=max(2000, _batch_context_budget(llm) // 6),
+                        label="Work item context",
+                    ),
+                    source_files_context=batch_source_context,
+                    unlimited_context=False,
+                    project_manifest=batch_manifest,
+                )
+
+        batch_pr_context = _excerpt_context_for_batch(
+            pr_description_context,
+            batch,
+            max_chars=max(3000, _batch_context_budget(llm) // 5),
+            label="PR description/spec context",
+        )
+        batch_work_context = _excerpt_context_for_batch(
+            work_item_context,
+            batch,
+            max_chars=max(3000, _batch_context_budget(llm) // 5),
+            label="Work item context",
+        )
+
         chunk_comments = llm.review_pr_structured(
-            diff=chunk,
-            files_summary=files_summary,
-            context=context,
+            diff=batch.diff,
+            files_summary=batch.files_summary,
+            context=_join_context_sections(
+                context,
+                f"Review batch {batch.id} of {len(batches)}. Validate only REVIEWABLE lines present in this batch; final aggregation will deduplicate findings across batches.",
+            ),
             review_scope=review_scope,
-            project_context=project_context,
-            work_item_context=work_item_context,
-            source_files_context=source_files_context,
-            pr_description_context=pr_description_context,
+            project_context=batch_project_context,
+            work_item_context=batch_work_context,
+            source_files_context=batch_source_context,
+            pr_description_context=batch_pr_context,
         )
         if isinstance(chunk_comments, list):
             comments.extend(chunk_comments)
@@ -1297,25 +1658,25 @@ def _build_on_demand_project_context(
     work_item_context: str,
     source_files_context: str,
     unlimited_context: bool = False,
+    project_manifest: str = "",
 ) -> str:
     """Builds repository context by letting the model request files from a manifest."""
-    project_manifest = ""
-
-    try:
-        if local_context is not None:
-            project_manifest = local_context.map_repo_json(repo_name, source_branch)
-        else:
-            project_manifest = tfs.get_project_manifest(
-                repo_name,
-                source_branch,
-                max_chars=config.project_context_manifest_max_chars,
-                file_extensions=config.project_context_file_extensions,
-                exclude_patterns=config.project_context_exclude_patterns,
-            )
-    except Exception as exc:
-        print(formatter.format_warning(
-            f"Could not load repository structure; continuing without on-demand context: {exc}"
-        ))
+    if not project_manifest:
+        try:
+            if local_context is not None:
+                project_manifest = local_context.map_repo_json(repo_name, source_branch)
+            else:
+                project_manifest = tfs.get_project_manifest(
+                    repo_name,
+                    source_branch,
+                    max_chars=config.project_context_manifest_max_chars,
+                    file_extensions=config.project_context_file_extensions,
+                    exclude_patterns=config.project_context_exclude_patterns,
+                )
+        except Exception as exc:
+            print(formatter.format_warning(
+                f"Could not load repository structure; continuing without on-demand context: {exc}"
+            ))
 
     if not project_manifest:
         return ""
@@ -1993,94 +2354,41 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     source_files_context = ""
     if load_changed_file_context and config.project_context_enabled:
-        print(formatter.format_progress(
-            "Getting full source-branch contents for changed files"
+        print(formatter.format_info(
+            "Changed-file source context will be loaded per token-safe review batch."
         ))
-        try:
-            source_files_context = local_context.get_changed_files_context(
-                pr_details.get("source_branch", ""),
-                pr_details.get("changed_files", []),
-                max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_max_chars,
-                file_max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_file_max_chars,
-            )
-        except LocalRepoError as exc:
-            print(formatter.format_warning(
-                f"Could not load source-branch changed file contents; continuing with diff only: {exc}"
-            ))
-
-        if source_files_context:
-            print(formatter.format_info(
-                f"Source-branch changed file contents loaded ({len(source_files_context):,} characters). "
-                f"{_review_scope_context_note(config.review_scope)}"
-            ))
 
     project_context = ""
+    project_manifest = ""
     project_context_mode = (config.project_context_mode or "on_demand").lower()
     if (
         use_contextual_review
         and config.project_context_enabled
         and project_context_mode == "full"
     ):
-        print(formatter.format_progress("Getting full repository context from source branch"))
-        try:
-            repo_map = json.loads(local_context.map_repo_json(
-                repo_name,
-                pr_details.get("source_branch", ""),
-            ))
-            project_context = local_context.get_files_context(
-                pr_details.get("source_branch", ""),
-                [
-                    item.get("path", "")
-                    for item in repo_map.get("files", [])
-                ],
-                title="Full repository context",
-                intro=(
-                    "Use this repository snapshot only to understand existing architecture, "
-                    "contracts, dependencies, and call sites. The review target remains "
-                    "the PR diff only."
-                ),
-                max_files=0 if review_scope == "diff_with_context" else config.project_context_max_files or 1000000,
-                max_chars=0 if review_scope == "diff_with_context" else config.project_context_max_chars or 1000000000,
-                file_max_chars=0 if review_scope == "diff_with_context" else config.project_context_retrieval_file_max_chars,
-                include_all_files=review_scope == "diff_with_context",
-            )
-        except (LocalRepoError, ValueError) as exc:
-            print(formatter.format_warning(
-                f"Could not load full repository context; continuing with PR diff only: {exc}"
-            ))
-
-        if project_context:
-            print(formatter.format_info(
-                f"Full repository context loaded ({len(project_context):,} characters). "
-                f"{_review_scope_context_note(config.review_scope)}"
-            ))
+        print(formatter.format_info(
+            "Full repository context mode will be narrowed per token-safe review batch."
+        ))
 
     try:
         llm = LLMClient(config)
         if (
             use_contextual_review
             and config.project_context_enabled
-            and project_context_mode == "on_demand"
         ):
             print(formatter.format_progress(
-                "Preparing on-demand repository context"
+                "Preparing repository structure for token-safe batch context"
             ))
-            project_context = _build_on_demand_project_context(
-                llm=llm,
-                tfs=tfs,
-                config=config,
-                formatter=formatter,
-                local_context=local_context,
-                pr_description_context=pr_description_context,
-                repo_name=repo_name,
-                source_branch=pr_details.get("source_branch", ""),
-                diff=diff_for_review,
-                files_summary=files_summary,
-                user_context=getattr(args, "context", ""),
-                work_item_context=work_item_context,
-                source_files_context=source_files_context,
-                unlimited_context=review_scope == "diff_with_context",
-            )
+            try:
+                project_manifest = local_context.map_repo_json(
+                    repo_name,
+                    pr_details.get("source_branch", ""),
+                )
+            except Exception as exc:
+                project_manifest = ""
+                print(formatter.format_warning(
+                    f"Could not load repository structure; continuing without on-demand context: {exc}"
+                ))
     except LLMError as exc:
         print(formatter.format_error(str(exc)))
         return 1
@@ -2102,6 +2410,15 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             work_item_context=work_item_context,
             source_files_context=source_files_context,
             pr_description_context=pr_description_context,
+            local_context=local_context,
+            tfs=tfs,
+            config=config,
+            repo_name=repo_name,
+            source_branch=pr_details.get("source_branch", ""),
+            changed_files=pr_details.get("changed_files", []),
+            project_manifest=project_manifest,
+            user_context=getattr(args, "context", ""),
+            project_context_mode=project_context_mode,
         )
     except LLMError as exc:
         progress.stop()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -348,8 +349,8 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     local_context.get_changed_files_context.assert_called_once_with(
         "feature/test",
         [{"path": "/a.py", "change_type": "edit"}],
-        max_chars=0,
-        file_max_chars=0,
+        max_chars=78000,
+        file_max_chars=39000,
     )
     local_context.map_repo_json.assert_called_once_with("repo-a", "feature/test")
     local_context.get_files_context.assert_called_once()
@@ -364,7 +365,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert llm.review_pr_structured.call_args.kwargs["project_context"] == "REQUESTED PROJECT CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["work_item_context"] == "WORK ITEM CONTEXT"
     assert llm.review_pr_structured.call_args.kwargs["pr_description_context"] == "PR DESCRIPTION CONTEXT"
-    assert llm.review_pr_structured.call_args.kwargs["diff"] == diff
+    assert llm.review_pr_structured.call_args.kwargs["diff"] == diff.rstrip()
     git_utils.filter_diff_additions_only.assert_not_called()
     git_utils.filter_diff_noise.assert_not_called()
     git_utils.filter_diff_by_extensions.assert_not_called()
@@ -701,7 +702,7 @@ def test_structured_review_chunks_diff_by_file_sections(mocker) -> None:
         call.kwargs["project_context"] == "repo context"
         for call in llm.review_pr_structured.call_args_list
     )
-    print_mock.assert_any_call("Review prompt exceeds provider budget; validating all changes in 2 chunk(s).")
+    print_mock.assert_any_call("Validating all changes in 2 token-safe batch(es).")
 
 
 def test_structured_review_fails_when_single_file_exceeds_prompt_budget() -> None:
@@ -725,6 +726,171 @@ def test_structured_review_fails_when_single_file_exceeds_prompt_budget() -> Non
         )
 
     llm.review_pr_structured.assert_not_called()
+
+
+def test_plan_review_batches_splits_oversized_file_by_hunks() -> None:
+    """A large file should split by complete hunks instead of being omitted."""
+    diff = "\n".join([
+        "diff --git a/big.py b/big.py",
+        "--- a/big.py",
+        "+++ b/big.py",
+        "@@ -1,1 +1,1 @@",
+        "-old_a",
+        "+new_a",
+        "@@ -20,1 +20,1 @@",
+        "-old_b",
+        "+new_b",
+    ])
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 100
+
+    def estimate(**kwargs):
+        batch_diff = kwargs["diff"]
+        if "new_a" in batch_diff and "new_b" in batch_diff:
+            return 100
+        return 20
+
+    llm.estimate_structured_review_prompt_tokens.side_effect = estimate
+
+    batches = ai_review._plan_review_batches(
+        llm=llm,
+        diff=diff,
+        files_summary=[{"file": "big.py", "additions": 2, "deletions": 2}],
+        context="",
+        review_scope="diff_with_context",
+        project_context="",
+        work_item_context="",
+        source_files_context="",
+        pr_description_context="",
+    )
+
+    assert len(batches) == 2
+    assert all("diff --git a/big.py b/big.py" in batch.diff for batch in batches)
+    assert "new_a" in batches[0].diff
+    assert "new_b" in batches[1].diff
+
+
+def test_plan_review_batches_covers_every_file_once() -> None:
+    """Every changed file section should appear in exactly one planned batch."""
+    diff = "\n".join([
+        "diff --git a/a.py b/a.py",
+        "+++ b/a.py",
+        "@@ -0,0 +1 @@",
+        "+a = 1",
+        "diff --git a/b.py b/b.py",
+        "+++ b/b.py",
+        "@@ -0,0 +1 @@",
+        "+b = 2",
+        "diff --git a/c.py b/c.py",
+        "+++ b/c.py",
+        "@@ -0,0 +1 @@",
+        "+c = 3",
+    ])
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 100
+    llm.estimate_structured_review_prompt_tokens.side_effect = lambda **kwargs: (
+        150 if kwargs["diff"].count("diff --git") > 1 else 30
+    )
+
+    batches = ai_review._plan_review_batches(
+        llm=llm,
+        diff=diff,
+        files_summary=[],
+        context="",
+        review_scope="diff_with_context",
+        project_context="",
+        work_item_context="",
+        source_files_context="",
+        pr_description_context="",
+    )
+
+    covered = [
+        path
+        for batch in batches
+        for path in batch.changed_files
+    ]
+    assert sorted(covered) == ["a.py", "b.py", "c.py"]
+    assert len(covered) == len(set(covered))
+
+
+def test_structured_review_loads_context_per_batch(mocker, review_config) -> None:
+    """Batch review calls should receive only batch-specific changed-file context."""
+    review_config.project_context_retrieval_max_rounds = 1
+    diff = "\n".join([
+        "diff --git a/a.py b/a.py",
+        "+++ b/a.py",
+        "@@ -0,0 +1 @@",
+        "+a = 1",
+        "diff --git a/b.py b/b.py",
+        "+++ b/b.py",
+        "@@ -0,0 +1 @@",
+        "+b = 2",
+    ])
+    llm = MagicMock()
+    llm.structured_review_prompt_token_limit.return_value = 100
+    llm.estimate_structured_review_prompt_tokens.side_effect = lambda **kwargs: (
+        150 if kwargs["diff"].count("diff --git") > 1 else 20
+    )
+    llm.request_context_files.side_effect = [["shared/a_contract.py"], ["shared/b_contract.py"]]
+    llm.review_pr_structured.side_effect = [[], []]
+    formatter = MagicMock()
+    formatter.format_info.side_effect = lambda message: message
+    formatter.format_warning.side_effect = lambda message: message
+    local_context = MagicMock()
+    local_context.get_changed_files_context.side_effect = [
+        "A SOURCE CONTEXT",
+        "B SOURCE CONTEXT",
+    ]
+    local_context.get_files_context.side_effect = [
+        "A REQUESTED CONTEXT",
+        "B REQUESTED CONTEXT",
+    ]
+    project_manifest = json.dumps({
+        "repository": "repo-a",
+        "ref": "origin/feature/test",
+        "files": [
+            {"path": "a.py"},
+            {"path": "b.py"},
+            {"path": "shared/a_contract.py"},
+            {"path": "shared/b_contract.py"},
+        ],
+        "counts": {"files": 4},
+    })
+
+    comments = ai_review._review_pr_structured_with_complete_diff(
+        llm=llm,
+        formatter=formatter,
+        diff=diff,
+        files_summary=[],
+        context="",
+        review_scope="diff_with_context",
+        project_context="",
+        work_item_context="Work item docs for a and b",
+        source_files_context="",
+        pr_description_context="Spec docs for a and b",
+        local_context=local_context,
+        config=review_config,
+        repo_name="repo-a",
+        source_branch="feature/test",
+        changed_files=[
+            {"path": "/a.py", "change_type": "edit"},
+            {"path": "/b.py", "change_type": "edit"},
+        ],
+        project_manifest=project_manifest,
+        project_context_mode="on_demand",
+    )
+
+    assert comments == []
+    assert local_context.get_changed_files_context.call_args_list[0].args[1] == [
+        {"path": "/a.py", "change_type": "edit"}
+    ]
+    assert local_context.get_changed_files_context.call_args_list[1].args[1] == [
+        {"path": "/b.py", "change_type": "edit"}
+    ]
+    assert llm.review_pr_structured.call_args_list[0].kwargs["source_files_context"] == "A SOURCE CONTEXT"
+    assert llm.review_pr_structured.call_args_list[1].kwargs["source_files_context"] == "B SOURCE CONTEXT"
+    assert llm.review_pr_structured.call_args_list[0].kwargs["project_context"] == "A REQUESTED CONTEXT"
+    assert llm.review_pr_structured.call_args_list[1].kwargs["project_context"] == "B REQUESTED CONTEXT"
 
 
 def test_build_pr_metadata_issues_flags_review_risks() -> None:

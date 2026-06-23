@@ -201,9 +201,10 @@ comments.
 `diff_with_context` does not omit changed files or changed lines because of diff
 limits, extension filters, lock-file filters, generated-file filters, or
 repository context eligibility rules. If the complete prompt is too large for
-the provider, the CLI validates the PR in multiple complete file-section chunks
-and merges the results. It fails loudly instead of truncating when one changed
-file is too large to fit by itself.
+the provider, the CLI validates the PR in token-safe batches and merges the
+results. Each batch receives only its own diff plus batch-specific source,
+spec/work-item, and repository context. It fails loudly instead of truncating
+when one changed hunk is too large to fit by itself.
 
 The reviewer context is intentionally single-file at runtime. `ai-review init`
 creates `review_context.example.md` as the kept example and

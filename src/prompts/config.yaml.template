@@ -87,7 +87,8 @@ review:
   # Review scope:
   #   diff_with_context (default): reviews PR changes with unified diff,
   #     project, and work-item context. This mode validates every PR diff file
-  #     and line; diff limits and extension filters do not remove changes.
+  #     and line in token-safe batches; diff limits and extension filters do
+  #     not remove changes.
   #   diff_only: reviews only differences introduced in the PR using the compact
   #     filtered/limited diff behavior below
   scope: diff_with_context

@@ -147,4 +147,5 @@ mypy src/
 `diff_with_context` validates every PR diff file and changed line. It ignores
 diff file-count limits, per-file diff line limits, and extension filters so
 changed files are not silently omitted. If a provider prompt is too large, the
-review is chunked by complete diff file sections instead of truncating changes.
+review is split into token-safe batches. Each API call receives only the batch
+diff plus batch-specific changed-file, spec/work-item, and repository context.
