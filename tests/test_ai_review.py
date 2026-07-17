@@ -194,7 +194,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     llm = MagicMock()
     llm.review.return_value = "General review"
     llm.review_pr_structured.return_value = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+        {"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}
     ]
 
     git_utils = MagicMock()
@@ -230,7 +230,7 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     assert result == 0
     save_output.assert_called_once()
     tfs.post_review_comments.assert_not_called()
-    print_mock.assert_any_call("REVIEW")
+    print_mock.assert_any_call("COMMENTS")
 
 
 def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_config) -> None:
@@ -260,7 +260,7 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     llm = MagicMock()
     llm.review.return_value = "General review"
     llm.review_pr_structured.return_value = [
-        {"file": "a.py", "line": 1, "type": "bug", "severity": "high", "comment": "msg"}
+        {"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}
     ]
 
     git_utils = MagicMock()
@@ -322,8 +322,8 @@ def test_select_pr_interactive_rejects_invalid_choice(mocker) -> None:
 def test_select_comments_to_post_respects_individual_answers(mocker) -> None:
     """It should collect only the comments accepted during manual selection."""
     comments = [
-        {"file": "a.py", "line": 10, "type": "bug", "severity": "high", "comment": "one"},
-        {"file": "b.py", "line": 20, "type": "style", "severity": "low", "comment": "two"},
+        {"file": "a.py", "line": 10, "type": "bug", "comment": "one"},
+            {"file": "b.py", "line": 20, "type": "style", "comment": "two"},
     ]
     mocker.patch("builtins.input", side_effect=["2", "", "n"])
     mocker.patch("builtins.print")

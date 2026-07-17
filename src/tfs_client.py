@@ -160,7 +160,7 @@ class TFSClient:
         else:
             path = "git/pullrequests"
 
-        params = {"$top": top}
+        params: dict[str, int | str] = {"$top": top}
 
         if status != "all":
             params["searchCriteria.status"] = status
@@ -213,7 +213,7 @@ class TFSClient:
             "repository_id": pr["repository"]["id"],
             "merge_status": pr.get("mergeStatus", ""),
             "reviewers": reviewers,
-            "labels": [l.get("name", "") for l in pr.get("labels", [])],
+            "labels": [lbl.get("name", "") for lbl in pr.get("labels", [])],  # noqa: E741
             "is_draft": pr.get("isDraft", False),
             "url": pr.get("url", ""),
         }
@@ -298,13 +298,33 @@ class TFSClient:
                               review_scope: str = "diff_only") -> str:
         """
         Gets the diff of a specific Pull Request.
-        
+
+        For ``diff_only`` scope (default), builds a standard unified diff for
+        each changed file and appends the full new-version file content as a
+        clearly-marked read-only block::
+
+            ### FULL_FILE_CONTEXT_START: /path/to/file ###
+            <full file content>
+            ### FULL_FILE_CONTEXT_END ###
+
+        This block is preserved by
+        :py:meth:`GitUtils.filter_diff_additions_only` so that the LLM
+        receives the surrounding context without being asked to review
+        unchanged lines.
+
+        For ``full_code`` scope, only the new-version file content is sent
+        (every line prefixed with ``+``), without a ``-`` baseline.
+
         Args:
             repository: Repository name.
             pr_id: Pull Request ID.
-            
+            review_scope: ``"diff_only"`` (default) or ``"full_code"``.
+
         Returns:
-            Diff as text.
+            Diff as text, ready to be passed to the LLM client.
+
+        Raises:
+            TFSError: If the PR has no iterations or contains no file changes.
         """
         # Get PR details
         path = f"git/repositories/{repository}/pullrequests/{pr_id}"
@@ -372,7 +392,24 @@ class TFSClient:
 
     def _build_full_code_diff_part(self, repository: str, file_path: str,
                                    change_type: str, source_branch: str) -> list[str]:
-        """Builds a full_code-style payload with the complete content of the new version."""
+        """Builds a ``full_code``-style payload for a single changed file.
+
+        Fetches the complete new-version content from the source branch and
+        prefixes every line with ``+``, producing a pseudo-diff that represents
+        the entire file as added content.  No ``-`` (deleted) lines are
+        included.
+
+        Args:
+            repository: Repository name.
+            file_path: Server path of the file (e.g. ``/src/auth.py``).
+            change_type: TFS change type string (``"edit"``, ``"add"``,
+                ``"rename"``, ``"delete"``, …).
+            source_branch: Source branch ref name (with or without the
+                ``refs/heads/`` prefix).
+
+        Returns:
+            List of diff-header and content strings for this file.
+        """
         parts = [
             f"diff --git a{file_path} b{file_path}",
             f"--- a{file_path}",
@@ -399,7 +436,37 @@ class TFSClient:
     def _build_unified_diff_part(self, repository: str, file_path: str,
                                  original_path: str, change_type: str,
                                  source_branch: str, target_branch: str) -> list[str]:
-        """Builds a unified diff with only changed lines for diff_only."""
+        """Builds a unified diff for a single file in ``diff_only`` mode.
+
+        Fetches the old version from the target branch and the new version
+        from the source branch, then generates a standard unified diff with
+        3 lines of context using :py:mod:`difflib`.
+
+        After the diff lines, the **full new-version file content** is
+        appended as a read-only context block bounded by sentinel markers::
+
+            ### FULL_FILE_CONTEXT_START: /path/to/file ###
+            <complete file content — not a diff, not prefixed with +/->
+            ### FULL_FILE_CONTEXT_END ###
+
+        These markers are recognised by
+        :py:meth:`GitUtils.filter_diff_additions_only`, which preserves every
+        line inside the block.  This lets the LLM understand surrounding code
+        without being asked to review unchanged lines.
+
+        Args:
+            repository: Repository name.
+            file_path: Server path of the new version of the file.
+            original_path: Server path of the old version (differs on renames).
+            change_type: TFS change type string (``"edit"``, ``"add"``,
+                ``"rename"``, ``"delete"``, …).
+            source_branch: Source branch ref (feature branch — new version).
+            target_branch: Target branch ref (base branch — old version).
+
+        Returns:
+            List of diff strings for this file, including the
+            ``FULL_FILE_CONTEXT`` block when new content is available.
+        """
         old_lines: list[str] = []
         new_lines: list[str] = []
 
@@ -449,7 +516,18 @@ class TFSClient:
 
         # difflib does not include the "diff --git" header — always add it
         # so that filter_diff_by_extensions and _split_diff_sections work correctly.
-        return [f"diff --git a{original_path} b{file_path}"] + diff
+        result = [f"diff --git a{original_path} b{file_path}"] + diff
+
+        # Include full file content as read-only context for the LLM.
+        # This section is preserved by filter_diff_additions_only and allows
+        # the model to understand the surrounding code without reviewing
+        # unchanged lines.
+        if new_lines:
+            result.append(f"### FULL_FILE_CONTEXT_START: {file_path} ###")
+            result.extend(new_lines)
+            result.append("### FULL_FILE_CONTEXT_END ###")
+
+        return result
 
     def _get_raw(self, path: str, params: Optional[dict] = None,
                api_version: Optional[str] = None) -> str:
@@ -627,7 +705,7 @@ class TFSClient:
             repository: Repository name.
             pr_id: Pull Request ID.
             comments: List of structured LLM comments with keys:
-                     file, line, type, severity, comment, suggestion
+                     file, line, type, comment, suggestion
             
         Returns:
             List of results for each posted comment.
@@ -643,8 +721,6 @@ class TFSClient:
 
             file_path = c.get("file", "")
             line = c.get("line", 0)
-            comment_type = str(c.get("type", "")).lower()
-            is_problem = comment_type not in ("praise", "")
 
             try:
                 if use_inline_comments and file_path and line > 0:
@@ -684,11 +760,10 @@ class TFSClient:
             "praise": "Positive",
         }
 
-        severity = comment.get("severity", "info")
         comment_type = comment.get("type", "suggestion")
         label = type_labels.get(comment_type, comment_type.title())
 
-        parts = [f"**{label}** ({severity.upper()})"]
+        parts = [f"**{label}**"]
         parts.append("")
         parts.append(comment.get("comment", ""))
 

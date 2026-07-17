@@ -51,7 +51,7 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
         return False
     if sys.platform == "win32":
-        return os.environ.get("TERM") == "xterm" or os.environ.get("WT_SESSION")
+        return bool(os.environ.get("TERM") == "xterm" or os.environ.get("WT_SESSION"))
     return True
 
 
@@ -239,20 +239,6 @@ class ReviewFormatter:
                 )
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
-        severity_colors = {
-            "critical": c.RED + c.BOLD,
-            "high": c.RED,
-            "medium": c.YELLOW,
-            "low": c.GREEN,
-            "info": c.CYAN,
-        }
-        severity_icons = {
-            "critical": "🔴",
-            "high": "🟠",
-            "medium": "🟡",
-            "low": "🟢",
-            "info": "ℹ️",
-        }
         type_labels = {
             "bug": "🐛 Bug",
             "security": "🔒 Security",
@@ -272,10 +258,7 @@ class ReviewFormatter:
             lines.append("")
 
         for i, comment in enumerate(comments, 1):
-            severity = comment.get("severity", "info")
             comment_type = comment.get("type", "suggestion")
-            sev_color = severity_colors.get(severity, c.WHITE)
-            icon = severity_icons.get(severity, "ℹ️")
             label = type_labels.get(comment_type, comment_type.title())
 
             file_info = ""
@@ -287,7 +270,7 @@ class ReviewFormatter:
 
             lines.append(
                 f"  {c.CYAN}{i:>3}){c.RESET} "
-                f"{icon} {sev_color}{label} ({severity.upper()}){c.RESET}"
+                f"{c.BOLD}{label}{c.RESET}"
             )
             if file_info:
                 lines.append(f"       {file_info}")
@@ -400,9 +383,31 @@ class ReviewFormatter:
         return summary
 
     def _terminal_review(self, review_text: str) -> str:
+        """Renders the AI review body for terminal output.
+
+        Wraps ``review_text`` between two bold horizontal rules and prepends
+        the section header ``🤖 AI Review Comments:``.  No transformation is
+        applied to the review content itself — it is appended verbatim so that
+        any Markdown or plain-text structure produced by the LLM is preserved.
+
+        Output format::
+
+            ────────────────────────────────────────────────────────────
+            🤖 AI Review Comments:
+            ────────────────────────────────────────────────────────────
+
+            <review_text>
+
+        Args:
+            review_text: The raw review text returned by the LLM client.
+
+        Returns:
+            A formatted string ready to be printed to the terminal,
+            including ANSI bold codes around the header and dividers.
+        """
         c = Colors
         output = f"\n{c.BOLD}{'─' * 60}{c.RESET}\n"
-        output += f"{c.BOLD}📝 REVIEW:{c.RESET}\n"
+        output += f"{c.BOLD}🤖 AI Review Comments:{c.RESET}\n"
         output += f"{c.BOLD}{'─' * 60}{c.RESET}\n\n"
         output += review_text
         output += "\n"
@@ -429,7 +434,7 @@ class ReviewFormatter:
     def _markdown_header(self, review_type: str, repo_name: str,
                          branch: str, extra_info: str) -> str:
         header = "# 🤖 AI Code Review\n\n"
-        header += f"| Field | Value |\n|-------|-------|\n"
+        header += "| Field | Value |\n|-------|-------|\n"
         header += f"| **Type** | {review_type} |\n"
         if repo_name:
             header += f"| **Repository** | {repo_name} |\n"

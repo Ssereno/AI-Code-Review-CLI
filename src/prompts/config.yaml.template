@@ -27,7 +27,7 @@ llm:
   max_tokens: 4096
 
   # Temperature (0.0 = deterministic, 1.0 = creative)
-  temperature: 0.3
+  temperature: 0.0
 
 # ---------------------------------------------------------------------------
 # Provider credentials — fill in the block for your chosen provider
@@ -81,7 +81,7 @@ review:
   # Review scope:
   #   diff_only (default): focuses only on differences introduced in the PR
   #   full_code: allows full code review of changed files
-  scope: diff_only
+  scope: full_code
 
   # Markdown file with custom rules/context for the prompt
   # The content of this file is injected into LLM instructions on each review
@@ -94,7 +94,7 @@ review:
   max_diff_lines: 4500
 
   # Filter by file extensions (empty list = all files)
-  # Example: [".py", ".js", ".cs", ".ts"]
+  # Example: [".cs", ".ts"]
   file_extensions_filter: []
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,6 @@ You are a Docs Agent specialized in technical documentation.
 Document the indicated code by generating the following artifacts:
 
 1. **Google Style docstrings** — add to the existing source file
-2. **`README.md`** — module usage guide with Python examples
 
 ## Constraints
 

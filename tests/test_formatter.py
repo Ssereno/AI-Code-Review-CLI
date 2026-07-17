@@ -169,7 +169,6 @@ def test_format_structured_comments_variants() -> None:
         {
             "file": "src/app.py",
             "line": 10,
-            "severity": "high",
             "type": "bug",
             "comment": "Possible crash",
             "suggestion": "Add guard",
@@ -229,3 +228,44 @@ def test_save_output_handles_os_error(tmp_path: Path, mocker) -> None:
     save_output("content", str(tmp_path / "review.md"))
 
     print_mock.assert_called_once()
+
+
+def test_terminal_review_contains_new_header() -> None:
+    """It should render the updated header '🤖 AI Review Comments:' in terminal format."""
+    formatter = ReviewFormatter(color=False, output_format="terminal")
+
+    rendered = formatter.format_review("Some review content")
+
+    assert "🤖 AI Review Comments:" in rendered
+
+
+def test_terminal_review_does_not_contain_old_header() -> None:
+    """It should NOT contain the old '📝 REVIEW:' header after the change."""
+    formatter = ReviewFormatter(color=False, output_format="terminal")
+
+    rendered = formatter.format_review("Some review content")
+
+    assert "📝 REVIEW:" not in rendered
+
+
+def test_terminal_review_includes_review_text() -> None:
+    """It should include the review body text in the output."""
+    formatter = ReviewFormatter(color=False, output_format="terminal")
+    review_text = "Detected a potential null-pointer dereference."
+
+    rendered = formatter.format_review(review_text)
+
+    assert review_text in rendered
+
+
+def test_terminal_review_header_consistent_with_structured_comments() -> None:
+    """Both _terminal_review and format_structured_comments should use '🤖 AI Review Comments'."""
+    formatter = ReviewFormatter(color=False, output_format="terminal")
+
+    review_rendered = formatter.format_review("text")
+    structured_rendered = formatter.format_structured_comments(
+        [{"type": "suggestion", "comment": "Minor issue"}]
+    )
+
+    assert "🤖 AI Review Comments" in review_rendered
+    assert "🤖 AI Review Comments" in structured_rendered
