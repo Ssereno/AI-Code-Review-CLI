@@ -300,17 +300,17 @@ class TFSClient:
         Gets the diff of a specific Pull Request.
 
         For ``diff_only`` scope (default), builds a standard unified diff for
-        each changed file and appends the full new-version file content as a
-        clearly-marked read-only block::
+        each changed file and appends the full old-version (target branch) file
+        content as a clearly-marked read-only block::
 
             ### FULL_FILE_CONTEXT_START: /path/to/file ###
-            <full file content>
+            <full file content — before changes>
             ### FULL_FILE_CONTEXT_END ###
 
         This block is preserved by
         :py:meth:`GitUtils.filter_diff_additions_only` so that the LLM
-        receives the surrounding context without being asked to review
-        unchanged lines.
+        receives the pre-change context without treating already-changed lines
+        as established code.
 
         For ``full_code`` scope, only the new-version file content is sent
         (every line prefixed with ``+``), without a ``-`` baseline.
@@ -442,7 +442,7 @@ class TFSClient:
         from the source branch, then generates a standard unified diff with
         3 lines of context using :py:mod:`difflib`.
 
-        After the diff lines, the **full new-version file content** is
+        After the diff lines, the **full old-version (target branch) file content** is
         appended as a read-only context block bounded by sentinel markers::
 
             ### FULL_FILE_CONTEXT_START: /path/to/file ###
@@ -451,8 +451,8 @@ class TFSClient:
 
         These markers are recognised by
         :py:meth:`GitUtils.filter_diff_additions_only`, which preserves every
-        line inside the block.  This lets the LLM understand surrounding code
-        without being asked to review unchanged lines.
+        line inside the block.  This lets the LLM understand the surrounding
+        code before the changes without being asked to review unchanged lines.
 
         Args:
             repository: Repository name.
@@ -465,7 +465,7 @@ class TFSClient:
 
         Returns:
             List of diff strings for this file, including the
-            ``FULL_FILE_CONTEXT`` block when new content is available.
+            ``FULL_FILE_CONTEXT`` block when old content is available.
         """
         old_lines: list[str] = []
         new_lines: list[str] = []
@@ -518,13 +518,15 @@ class TFSClient:
         # so that filter_diff_by_extensions and _split_diff_sections work correctly.
         result = [f"diff --git a{original_path} b{file_path}"] + diff
 
-        # Include full file content as read-only context for the LLM.
-        # This section is preserved by filter_diff_additions_only and allows
-        # the model to understand the surrounding code without reviewing
-        # unchanged lines.
-        if new_lines:
+        # Include old-version file content as read-only context for the LLM.
+        # Using the pre-change (target branch) content ensures the diff is the
+        # sole source of "what is new", preventing the LLM from treating
+        # already-changed lines as established code.
+        # delete is excluded: the diff already contains the full removed content.
+        # add is excluded automatically because old_lines is empty for new files.
+        if old_lines and change_type != "delete":
             result.append(f"### FULL_FILE_CONTEXT_START: {file_path} ###")
-            result.extend(new_lines)
+            result.extend(old_lines)
             result.append("### FULL_FILE_CONTEXT_END ###")
 
         return result
