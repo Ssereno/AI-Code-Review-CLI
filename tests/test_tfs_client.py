@@ -354,7 +354,7 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
 # ---------------------------------------------------------------------------
 
 def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None:
-    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the new file content."""
+    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the old (target branch) file content."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -368,11 +368,29 @@ def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None
     joined = "\n".join(result)
 
     assert "### FULL_FILE_CONTEXT_START: /src/app.py ###" in joined
-    assert "new line one" in joined
-    assert "new line two" in joined
+    assert "old line" in joined
+    assert "new line one" not in joined.split("### FULL_FILE_CONTEXT_START")[1]
     assert "### FULL_FILE_CONTEXT_END ###" in joined
     # Context block must appear after the diff headers
     assert joined.index("### FULL_FILE_CONTEXT_START") > joined.index("diff --git")
+
+
+def test_build_unified_diff_part_no_context_block_on_add(mocker) -> None:
+    """_build_unified_diff_part must NOT append a FULL_FILE_CONTEXT block for add (no old version exists)."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        return_value="new content",
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a", "/src/new_file.py", "/src/new_file.py", "add",
+        "refs/heads/feature", "refs/heads/main",
+    )
+    joined = "\n".join(result)
+
+    assert "### FULL_FILE_CONTEXT_START" not in joined
+    assert "### FULL_FILE_CONTEXT_END" not in joined
 
 
 def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:

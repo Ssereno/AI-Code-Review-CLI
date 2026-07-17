@@ -210,8 +210,8 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     * Only added lines (``+``) appear in the diff section.
     * A ``### FULL_FILE_CONTEXT_START: <path> ###`` /
       ``### FULL_FILE_CONTEXT_END ###`` block is embedded in the payload for
-      each changed file, containing the complete new-version file content as
-      **read-only** background.
+      each changed file, containing the complete old-version (before changes)
+      file content as **read-only** background.
     * The review must focus **exclusively** on the changed lines (``+``); the
       full-file section exists only to prevent the model from hallucinating
       about the surrounding code.
