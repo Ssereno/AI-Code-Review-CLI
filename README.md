@@ -111,6 +111,33 @@ output:
   color: true
 ```
 
+### Review Scope
+
+`review.scope` controls how much code is sent to the LLM for each changed file.
+
+| Scope | Description |
+|---|---|
+| `diff_only` | Default. Unified diff (changed lines only) + full file content as read-only context. |
+| `full_code` | All lines of the new file version, every line prefixed with `+`. No baseline. |
+
+#### `diff_only` — diff with full-file context (default)
+
+```yaml
+review:
+  scope: diff_only
+  scope: full_code
+```
+
+When `diff_only` is active, the tool:
+
+1. Generates a standard unified diff (added/removed lines with 3 lines of surrounding context) for each changed file.
+2. Appends the **complete new-version file content** as a clearly-marked, read-only context block immediately after the diff for that file:
+3. Strips all context lines and deleted lines (`-`) before sending to the LLM, so only added lines (`+`) and structural headers remain in the diff section.
+4. Instructs the LLM (via the system prompt) to **use the full-file block as read-only background** and to focus the review exclusively on the `+` lines.
+
+#### `full_code` — entire new file as added lines
+Every line of the new file version is prefixed with `+` and sent without a `-` baseline. The LLM receives the complete content and is asked to review only the new code. This is more expensive and slower but may catch issues in unchanged lines that are affected by the changes.
+
 ### Filter by File Extension
 
 `file_extensions_filter` works as an **allowlist**: only files with listed extensions are sent to the LLM for review. Remaining files are excluded from the diff before any processing.
@@ -180,22 +207,6 @@ bedrock:
   region: us-east-1
   profile: my-sso-profile
 ```
-
-**Option 4 — Default credential chain** (env vars, instance role, etc.):
-```yaml
-bedrock:
-  region: us-east-1
-  # no credentials needed
-```
-
-Bedrock authentication is auto-detected:
-
-| `access_key_id` | `secret_access_key` | Mode |
-|---|---|---|
-| set | not set | Long-term API key (HTTP Bearer) |
-| set | set | IAM credentials (SigV4) |
-| not set | not set + `profile` | AWS SSO / named profile |
-| not set | not set | Default credential chain |
 
 ## CLI Usage
 
@@ -380,29 +391,3 @@ tfs:
 ```
 
 Avoid `verify_ssl: false` except for temporary troubleshooting.
-
-### Bedrock Authentication Error
-
-- Confirm `bedrock.region` matches the region of the model/inference profile.
-- Confirm `llm.model` with a valid Bedrock model ID or inference profile ARN.
-- **Long-term API key**: set only `bedrock.access_key_id` (no `secret_access_key`).
-- **IAM credentials**: set both `bedrock.access_key_id` and `bedrock.secret_access_key`.
-- **Profile/SSO**: set `bedrock.profile` and ensure the profile is configured in `~/.aws/config`.
-- If none of the above are set, the AWS default credential chain is used (env vars, instance role, etc.).
-
-## Tests
-
-The project's functional coverage is reflected in the `tests/` folder, including:
-
-- `tests/test_ai_review.py` for the CLI and main workflow
-- `tests/test_config.py` for configuration and validation
-- `tests/test_formatter.py` for terminal/markdown/json rendering
-- `tests/test_git_utils.py` for diffs and Git utilities
-- `tests/test_llm_client.py` for prompts, parsing, and LLM providers
-- `tests/test_tfs_client.py` for TFS/Azure DevOps integration
-
-Run the suite:
-
-```bash
-python -m pytest --cov=src --cov-report=term
-```

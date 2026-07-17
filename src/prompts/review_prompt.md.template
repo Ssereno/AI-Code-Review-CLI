@@ -1,0 +1,2 @@
+- Naming Conventions & Casing, follow Microsoft's official C# naming guidelines (https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/coding-style/identifier-names).
+- XML Documentation Comments, follow Microsoft's official code documentation (https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/xmldoc/).

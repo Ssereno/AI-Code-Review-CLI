@@ -289,17 +289,43 @@ class GitUtils:
         Keeps only added lines (+) and structural headers needed for the LLM.
 
         Lines kept:
-            - diff --git ...
-            - --- a/...
-            - +++ b/...
-            - @@ ... @@
-            - + <content>
+            - ``diff --git ...``
+            - ``--- a/...``
+            - ``+++ b/...``
+            - ``@@ ... @@``
+            - ``+ <content>``
+
+        FULL_FILE_CONTEXT blocks — delimited by
+        ``### FULL_FILE_CONTEXT_START: <path> ###`` and
+        ``### FULL_FILE_CONTEXT_END ###`` — are preserved in their entirety.
+        These blocks are appended by
+        :py:meth:`TFSClient._build_unified_diff_part` and carry the complete
+        new-version file content as read-only background for the LLM.  Every
+        line between the sentinel markers is kept, regardless of whether it
+        starts with ``+``, ``-``, or a space.
+
+        Args:
+            diff: Raw unified diff string, possibly containing
+                FULL_FILE_CONTEXT blocks.
 
         Returns:
-            Filtered diff.
+            Filtered diff string with context/deleted lines stripped but
+            FULL_FILE_CONTEXT blocks intact.
         """
         result = []
+        in_context_block = False
         for line in diff.split("\n"):
+            if line.startswith("### FULL_FILE_CONTEXT_START:"):
+                in_context_block = True
+                result.append(line)
+                continue
+            if line.startswith("### FULL_FILE_CONTEXT_END"):
+                in_context_block = False
+                result.append(line)
+                continue
+            if in_context_block:
+                result.append(line)
+                continue
             if (
                 line.startswith("diff --git")
                 or line.startswith("--- ")
@@ -371,7 +397,7 @@ class GitUtils:
             return diff
 
         filtered_sections = []
-        current_section = []
+        current_section: list[str] = []
         include_section = False
 
         for line in diff.split("\n"):

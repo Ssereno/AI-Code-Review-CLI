@@ -235,3 +235,100 @@ def test_truncate_diff_without_sections_and_summary(sample_diff: str) -> None:
         {"file": "src/app.py", "additions": 2, "deletions": 1},
         {"file": "docs/readme.md", "additions": 2, "deletions": 1},
     ]
+
+
+# ---------------------------------------------------------------------------
+# filter_diff_additions_only — FULL_FILE_CONTEXT block preservation
+# ---------------------------------------------------------------------------
+
+def test_filter_diff_additions_only_preserves_full_file_context_block() -> None:
+    """Lines inside a FULL_FILE_CONTEXT block must be kept verbatim, regardless of prefix."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1,2 +1,2 @@",
+        " this_context_line_outside",      # context — must be stripped
+        "-deleted_line_outside",            # deletion — must be stripped
+        "+added_line_outside",              # addition — must be kept
+        "### FULL_FILE_CONTEXT_START: /src/app.py ###",
+        "raw_context_inside",               # raw line — must be kept
+        " raw_space_inside",               # raw line — must be kept
+        "-raw_minus_inside",                # raw line — must be kept
+        "+raw_plus_inside",                 # raw line — must be kept
+        "### FULL_FILE_CONTEXT_END ###",
+    ])
+
+    filtered = instance.filter_diff_additions_only(diff)
+
+    assert "this_context_line_outside" not in filtered
+    assert "deleted_line_outside" not in filtered
+    assert "+added_line_outside" in filtered
+    assert "### FULL_FILE_CONTEXT_START: /src/app.py ###" in filtered
+    assert "raw_context_inside" in filtered
+    assert " raw_space_inside" in filtered
+    assert "-raw_minus_inside" in filtered
+    assert "+raw_plus_inside" in filtered
+    assert "### FULL_FILE_CONTEXT_END ###" in filtered
+
+
+def test_filter_diff_additions_only_handles_multiple_full_file_context_blocks() -> None:
+    """All FULL_FILE_CONTEXT blocks in a multi-file diff must each be fully preserved."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/a.py b/src/a.py",
+        "+line_a",
+        "### FULL_FILE_CONTEXT_START: /src/a.py ###",
+        "content_a",
+        "### FULL_FILE_CONTEXT_END ###",
+        "diff --git a/src/b.py b/src/b.py",
+        "+line_b",
+        "### FULL_FILE_CONTEXT_START: /src/b.py ###",
+        "content_b",
+        "### FULL_FILE_CONTEXT_END ###",
+    ])
+
+    filtered = instance.filter_diff_additions_only(diff)
+
+    assert "content_a" in filtered
+    assert "content_b" in filtered
+    assert "+line_a" in filtered
+    assert "+line_b" in filtered
+
+
+def test_filter_diff_additions_only_without_context_block_strips_context_and_deletions() -> None:
+    """Without FULL_FILE_CONTEXT blocks the method must still strip context and deletion lines."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "+added_line",
+        " context_line",
+        "-removed_line",
+    ])
+
+    filtered = instance.filter_diff_additions_only(diff)
+
+    assert "+added_line" in filtered
+    assert "context_line" not in filtered
+    assert "removed_line" not in filtered
+
+
+def test_filter_diff_additions_only_context_block_ends_before_next_diff_section() -> None:
+    """The section after ### FULL_FILE_CONTEXT_END ### must revert to normal filtering."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "### FULL_FILE_CONTEXT_START: /src/a.py ###",
+        "inside_block",
+        "### FULL_FILE_CONTEXT_END ###",
+        " outside_context_line",   # context — must be stripped after block ends
+        "-outside_deleted",         # deletion — must be stripped after block ends
+        "+outside_added",           # addition — must be kept
+    ])
+
+    filtered = instance.filter_diff_additions_only(diff)
+
+    assert "inside_block" in filtered
+    assert "outside_context_line" not in filtered
+    assert "outside_deleted" not in filtered
+    assert "+outside_added" in filtered

@@ -89,11 +89,132 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
-    assert "experienced code reviewer" in get_system_prompt("quick", "en")
+    assert "code reviewer" in get_system_prompt("quick", "en")
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
     assert "added lines" in get_scope_guidance("diff_only", "en")
+
+
+# ---------------------------------------------------------------------------
+# SYSTEM_PROMPTS / get_system_prompt — Phase 1 change validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("language", ["en", "pt"])
+def test_get_system_prompt_quick_returns_non_empty_string(language: str) -> None:
+    """quick prompts must return a non-empty string for every supported language."""
+    prompt = get_system_prompt("quick", language)
+    assert isinstance(prompt, str)
+    assert len(prompt.strip()) > 0
+
+
+def test_get_system_prompt_detailed_en_enforces_inline_comment_format() -> None:
+    """detailed/en must specify the inline comment output format after Phase 1."""
+    prompt = get_system_prompt("detailed", "en")
+    # Must instruct the LLM to return only inline comments
+    assert "inline comments" in prompt.lower()
+    # Must include the exact per-line format marker
+    assert "Line <line_number>" in prompt
+
+
+def test_get_system_prompt_detailed_en_forbids_summary_sections() -> None:
+    """detailed/en must explicitly forbid summary sections after Phase 1."""
+    prompt = get_system_prompt("detailed", "en")
+    assert "Do NOT produce summary sections" in prompt
+
+
+def test_get_system_prompt_detailed_en_contains_no_focus_on_or_structured_review_language() -> None:
+    """detailed/en must NOT contain generic 'Focus on' or 'structured review' language after Phase 1."""
+    prompt = get_system_prompt("detailed", "en")
+    assert "focus on" not in prompt.lower()
+    assert "structured review" not in prompt.lower()
+
+
+def test_get_system_prompt_detailed_pt_enforces_inline_comment_format() -> None:
+    """detailed/pt must specify the inline comment output format in Portuguese after Phase 1."""
+    prompt = get_system_prompt("detailed", "pt")
+    assert "inline" in prompt.lower()
+    # Must include the per-line format marker in Portuguese
+    assert "Linha" in prompt
+
+
+def test_get_system_prompt_detailed_pt_forbids_summary_sections() -> None:
+    """detailed/pt must explicitly forbid summary sections in Portuguese after Phase 1."""
+    prompt = get_system_prompt("detailed", "pt")
+    assert "NÃO produzas" in prompt
+    # The forbidden construct must mention summary sections
+    assert "sumário" in prompt.lower() or "secções" in prompt.lower()
+
+
+def test_get_system_prompt_detailed_pt_contains_no_focus_on_or_structured_review_language() -> None:
+    """detailed/pt must NOT contain generic 'Focus on' or 'structured review' language after Phase 1."""
+    prompt = get_system_prompt("detailed", "pt")
+    assert "focus on" not in prompt.lower()
+    assert "structured review" not in prompt.lower()
+
+
+def test_get_system_prompt_security_en_mentions_security_specific_terms() -> None:
+    """security/en must include core vulnerability types it is expected to check for."""
+    prompt = get_system_prompt("security", "en")
+    for term in ("SQL Injection", "XSS", "CSRF"):
+        assert term in prompt, f"Security prompt missing expected term: '{term}'"
+
+
+def test_get_system_prompt_unknown_verbosity_falls_back_to_detailed() -> None:
+    """An unrecognised verbosity level must silently fall back to the 'detailed' prompt."""
+    fallback = get_system_prompt("unknown_verbosity", "en")
+    expected = get_system_prompt("detailed", "en")
+    assert fallback == expected
+
+
+def test_get_system_prompt_unknown_language_falls_back_to_pt() -> None:
+    """An unrecognised language code must fall back to the Portuguese ('pt') prompt."""
+    fallback = get_system_prompt("detailed", "xx")
+    expected = get_system_prompt("detailed", "pt")
+    assert fallback == expected
+
+
+# ---------------------------------------------------------------------------
+# get_scope_guidance — diff_only with FULL_FILE_CONTEXT
+# ---------------------------------------------------------------------------
+
+def test_get_scope_guidance_diff_only_references_full_file_context_markers() -> None:
+    """diff_only guidance must reference FULL_FILE_CONTEXT_START and _END for all language/mode combos."""
+    for lang in ("en", "pt"):
+        for structured in (False, True):
+            guidance = get_scope_guidance("diff_only", lang, structured=structured)
+            assert "FULL_FILE_CONTEXT_START" in guidance, f"lang={lang} structured={structured}"
+            assert "FULL_FILE_CONTEXT_END" in guidance, f"lang={lang} structured={structured}"
+
+
+@pytest.mark.parametrize("language", ["en", "pt"])
+def test_get_scope_guidance_diff_only_structured_demands_valid_line_number(language: str) -> None:
+    """Structured diff_only guidance must instruct the LLM to supply a line number > 0."""
+    guidance = get_scope_guidance("diff_only", language, structured=True)
+    assert "(>0)" in guidance
+
+
+def test_get_scope_guidance_diff_only_non_structured_focuses_on_changed_lines() -> None:
+    """Non-structured diff_only guidance must tell the LLM to focus on changed/added lines."""
+    guidance_en = get_scope_guidance("diff_only", "en", structured=False)
+    guidance_pt = get_scope_guidance("diff_only", "pt", structured=False)
+
+    assert "changed lines" in guidance_en.lower() or "added lines" in guidance_en.lower()
+    assert "alteradas" in guidance_pt.lower() or "adicionadas" in guidance_pt.lower()
+
+
+def test_get_scope_guidance_diff_only_structured_does_not_demand_line_in_non_structured() -> None:
+    """Non-structured diff_only guidance must NOT mandate a minimum line number."""
+    guidance_en = get_scope_guidance("diff_only", "en", structured=False)
+    assert "(>0)" not in guidance_en
+
+
+def test_get_scope_guidance_unknown_scope_falls_back_to_diff_only() -> None:
+    """An unrecognised review_scope must fall through and return diff_only guidance."""
+    guidance = get_scope_guidance("unknown_scope", "en")
+
+    assert "diff_only" in guidance
+    assert "FULL_FILE_CONTEXT_START" in guidance
 
 
 def test_build_user_message_includes_files_and_context() -> None:
@@ -157,13 +278,13 @@ def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
     client = LLMClient(make_llm_config(llm_provider="copilot"))
     copilot = mocker.patch(
         "src.llm_client.LLMClient._call_copilot",
-        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]',
+        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]',
     )
 
     comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     assert copilot.called
-    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "severity": "high", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]
+    assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]
 
 
 def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
@@ -173,7 +294,7 @@ def test_parse_structured_comments_handles_markdown_single_object_and_invalid_js
         "```json\n[{\"file\": \"a.py\", \"line\": 1, \"comment\": \"x\"}]\n```"
     )
     single = client._parse_structured_comments(
-        '{"file": "a.py", "line": 2, "type": "style", "severity": "low", "comment": "y"}'
+        '{"file": "a.py", "line": 2, "type": "style", "comment": "y"}'
     )
     fallback = client._parse_structured_comments("not json at all")
 

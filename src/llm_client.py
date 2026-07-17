@@ -23,87 +23,56 @@ class LLMError(Exception):
     """Exception for LLM communication errors."""
     pass
 
-
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPTS = {
     "quick": {
         "pt": (
-            "És um code reviewer experiente. Analisa o diff de código fornecido "
+            "És um code reviewer experiente em .Net C#, TypeScript e SQL. Analisa o diff de código fornecido "
             "e dá um review CONCISO e direto. Foca-te nos problemas mais críticos:\n"
             "- Bugs e erros lógicos\n"
             "- Problemas de segurança\n"
             "- Problemas de performance graves\n\n"
             "Formato: Lista de bullet points com o ficheiro e linha quando possível. "
-            "Se o código estiver bom, diz isso brevemente. Responde em português."
         ),
         "en": (
-            "You are an experienced code reviewer. Analyze the provided code diff "
+            "You are an experienced .Net C#, TypeScript and SQL code reviewer. Analyze the provided code diff "
             "and give a CONCISE review. Focus on critical issues:\n"
             "- Bugs and logic errors\n"
             "- Security issues\n"
             "- Major performance problems\n\n"
             "Format: Bullet points with file and line when possible. "
-            "If the code looks good, say so briefly."
         ),
     },
     "detailed": {
         "pt": (
-            "Analisa detalhadamente o "
-            "diff de código fornecido e produz um review completo e estruturado.\n\n"
-            "O teu review DEVE incluir as seguintes secções:\n\n"
-            "## Resumo Geral\n"
-            "Breve resumo das alterações e opinião geral.\n\n"
-            "## Bugs e Erros Potenciais\n"
-            "Identifica bugs, erros lógicos ou comportamentos inesperados. "
-            "Indica o ficheiro e linha.\n\n"
-            "## Segurança\n"
-            "Problemas de segurança (SQL injection, XSS, credenciais hardcoded, etc.)\n\n"
-            "## Performance\n"
-            "Problemas de performance ou oportunidades de otimização.\n\n"
-            "## Arquitetura e Design\n"
-            "Sugestões sobre design patterns, SOLID, separação de responsabilidades.\n\n"
-            "## Code Style e Boas Práticas\n"
-            "Naming conventions, código duplicado, complexidade, legibilidade.\n\n"
-            "## Pontos Positivos\n"
-            "O que está bem feito no código.\n\n"
-            "## Sugestões de Melhoria\n"
-            "Sugestões concretas com exemplos de código quando possível.\n\n"
-            "Escreve de forma direta e objetiva, sem saudações e sem emojis. "
-            "Não incluas introduções como 'Olá' ou 'Como code reviewer sénior'. "
-            "Indica sempre o ficheiro e número de linha quando referenciares código específico. "
-            "Responde em português."
+            "És um code reviewer experiente em .Net C#, TypeScript e SQL. Analisa o diff de código "
+            "fornecido e retorna apenas comentários inline.\n\n"
+            "Formato de output — para cada problema encontrado, escreve exatamente:\n"
+            "- Linha <número_linha>: <descrição do problema> \n\n"
+            "Regras:\n"
+            "- Reporta APENAS problemas específicos associados a uma linha ou bloco concreto de código alterado.\n"
+            "- NÃO produzas secções de sumário (ex: 'Bugs Potenciais', 'Visão Geral de Segurança').\n"
+            "- NÃO produzas parágrafos introdutórios ou de fecho.\n"
+            "- Se não encontrares problemas, escreve apenas: Nenhum problema encontrado.\n"
+            "- Sê específico, objetivo e conciso. Responde em português."
         ),
         "en": (
-            "Analyze the provided "
-            "code diff in detail and produce a complete, structured review.\n\n"
-            "Your review MUST include these sections:\n\n"
-            "## General Summary\n"
-            "Brief summary of changes and overall opinion.\n\n"
-            "## Potential Bugs and Errors\n"
-            "Identify bugs, logic errors, or unexpected behaviors. "
-            "Include file and line number.\n\n"
-            "## Security\n"
-            "Security issues (SQL injection, XSS, hardcoded credentials, etc.)\n\n"
-            "## Performance\n"
-            "Performance issues or optimization opportunities.\n\n"
-            "## Architecture and Design\n"
-            "Suggestions on design patterns, SOLID, separation of concerns.\n\n"
-            "## Code Style and Best Practices\n"
-            "Naming conventions, duplicated code, complexity, readability.\n\n"
-            "## Positive Aspects\n"
-            "What's done well in the code.\n\n"
-            "## Improvement Suggestions\n"
-            "Concrete suggestions with code examples when possible.\n\n"
-            "Write in a direct, objective tone with no greetings and no emojis. "
-            "Do not include intros like 'Hello' or 'As a senior reviewer'. "
-            "Always include file and line number when referencing specific code."
+            "You are an expert .Net C#, TypeScript e SQL code reviewer. Analyze the provided code and return only inline comments.\n\n"
+            "Output format — for each issue found, output exactly:\n"
+            "- Line <line_number>: <issue description>\n\n"
+            "Rules:\n"
+            "- Report ONLY specific issues tied to a concrete line or block of changed code.\n"
+            "- Do NOT produce summary sections (e.g. 'Potential Bugs', 'Security Overview').\n"
+            "- Do NOT produce introductory or closing paragraphs.\n"
+            "- If no issues are found, output only: No issues found.\n"
+            "- Be specific, actionable, and concise."
         ),
     },
     "security": {
         "pt": (
-            "És um especialista em segurança de aplicações (AppSec). Analisa o diff "
+            "És um especialista em segurança de aplicações .Net C#, TypeScript e SQL. Analisa o diff "
             "de código fornecido com foco EXCLUSIVO em segurança.\n\n"
             "Procura por:\n"
             "- SQL Injection\n"
@@ -117,13 +86,11 @@ SYSTEM_PROMPTS = {
             "- Dependências com vulnerabilidades conhecidas\n"
             "- Logging de informação sensível\n"
             "- Configurações inseguras\n\n"
-            "Classifica cada problema encontrado por severidade: "
-            "🔴 CRÍTICO, 🟠 ALTO, 🟡 MÉDIO, 🟢 BAIXO.\n"
             "Fornece recomendações de correção para cada problema. "
             "Responde em português."
         ),
         "en": (
-            "You are an application security (AppSec) specialist. Analyze the "
+            "You are an application security .Net C#, TypeScript and SQL specialist. Analyze the "
             "provided code diff with EXCLUSIVE focus on security.\n\n"
             "Look for:\n"
             "- SQL Injection\n"
@@ -137,8 +104,6 @@ SYSTEM_PROMPTS = {
             "- Dependencies with known vulnerabilities\n"
             "- Logging of sensitive information\n"
             "- Insecure configurations\n\n"
-            "Classify each issue by severity: "
-            "🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🟢 LOW.\n"
             "Provide fix recommendations for each issue."
         ),
     },
@@ -147,16 +112,14 @@ SYSTEM_PROMPTS = {
 # Special prompt for PR review with structured comments
 PR_COMMENT_PROMPT = {
     "pt": (
-        "Analisa o diff de código de um Pull Request "
-        "e retorna os teus comentários em formato JSON estruturado.\n\n"
+        "Analisa o diff de código de um Pull Request e retorna os teus comentários em formato JSON estruturado.\n\n"
         "Para CADA problema encontrado, retorna um objeto JSON com:\n"
         '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
         '- "line": número da linha no diff (inteiro, ou 0 se geral)\n'
         '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severidade ("critical", "high", "medium", "low", "info")\n'
         '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
         '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
-        '- "reference": fonte ou referência para o problema (ex: "OWASP Top 10", "PEP 8", URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        '- "reference": fonte ou referência para o problema (URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
@@ -166,48 +129,108 @@ PR_COMMENT_PROMPT = {
         '    "file": "src/auth.py",\n'
         '    "line": 42,\n'
         '    "type": "security",\n'
-        '    "severity": "high",\n'
         '    "comment": "Password armazenada em texto simples sem hashing",\n'
         '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
-        '    "reference": "OWASP - Password Storage Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)"\n'
+        '    "reference": "OWASP - Password Storage Cheat Sheet"\n'
         '  }\n'
         ']\n\n'
-        "Se o código estiver bom, retorna um array com um único comentário de tipo "
-        '"praise". Responde APENAS com JSON válido, sem markdown ou texto extra.'
     ),
     "en": (
-        "Analyze the Pull Request code diff "
-        "and return your comments in structured JSON format.\n\n"
+        "Analyze the Pull Request code diff and return your comments in structured JSON format.\n\n"
         "For EACH issue found, return a JSON object with:\n"
         '- "file": file path (e.g., "src/auth.py")\n'
         '- "line": line number in diff (integer, or 0 if general)\n'
         '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "severity": severity ("critical", "high", "medium", "low", "info")\n'
         '- "comment": direct description of the issue, with no greetings and no emojis\n'
         '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
         '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
-        "Respond ONLY with a valid JSON array. If the code looks good, return an "
-        'array with a single "praise" type comment. Respond ONLY with valid JSON.'
     ),
 }
 
 
 def get_system_prompt(verbosity: str, language: str) -> str:
-    """Returns the appropriate system prompt."""
+    """Returns the system prompt for the given verbosity level and language.
+
+    Selects a prompt from ``SYSTEM_PROMPTS`` keyed by *verbosity*. If the
+    requested verbosity is not found, the function falls back to
+    ``"detailed"``.  Within the selected prompt group, the language is
+    resolved by *language*; if the language key is absent, ``"pt"``
+    (Portuguese) is used as the default.
+
+    The ``"detailed"`` prompt instructs the LLM to return **only** inline
+    comments in the format ``- Line <n>: <description>``,
+    prohibiting summary sections and introductory/closing paragraphs.
+    When no issues are found the expected output is ``No issues found.``
+    (English) or ``Nenhum problema encontrado.`` (Portuguese).
+
+    Args:
+        verbosity: Review depth key — one of ``"quick"``, ``"detailed"``,
+            or ``"security"``. Any unrecognised value falls back to
+            ``"detailed"``.
+        language: Response language code — ``"en"`` for English,
+            ``"pt"`` for Portuguese.
+
+    Returns:
+        The system prompt string for the resolved verbosity and language.
+    """
     prompts = SYSTEM_PROMPTS.get(verbosity, SYSTEM_PROMPTS["detailed"])
     return prompts.get(language, prompts["pt"])
 
 
 def get_pr_comment_prompt(language: str) -> str:
-    """Returns the prompt for structured PR comments."""
+    """Returns the prompt that requests structured JSON PR comments from the LLM.
+
+    Retrieves the prompt from ``PR_COMMENT_PROMPT`` for the given *language*.
+    If the language key is not present, ``"pt"`` (Portuguese) is used as the
+    default.
+
+    The returned prompt instructs the LLM to produce a valid JSON array where
+    each element represents a single review comment with the fields
+    ``file``, ``line``, ``type``, ``comment``, ``suggestion``,
+    and ``reference``.
+
+    Args:
+        language: Response language code — ``"en"`` for English,
+            ``"pt"`` for Portuguese.
+
+    Returns:
+        The prompt string used to request structured PR comments.
+    """
     return PR_COMMENT_PROMPT.get(language, PR_COMMENT_PROMPT["pt"])
 
 
 def get_scope_guidance(review_scope: str, language: str, structured: bool = False) -> str:
-    """Returns additional instructions based on the review scope."""
+    """Returns LLM instructions tailored to the active review scope.
+
+    For ``diff_only`` scope, the instructions inform the LLM that:
+
+    * Only added lines (``+``) appear in the diff section.
+    * A ``### FULL_FILE_CONTEXT_START: <path> ###`` /
+      ``### FULL_FILE_CONTEXT_END ###`` block is embedded in the payload for
+      each changed file, containing the complete new-version file content as
+      **read-only** background.
+    * The review must focus **exclusively** on the changed lines (``+``); the
+      full-file section exists only to prevent the model from hallucinating
+      about the surrounding code.
+
+    For ``full_code`` scope, the instructions inform the LLM that the diff
+    represents the entire new file content (every line prefixed with ``+``)
+    and that deleted code is absent.
+
+    Args:
+        review_scope: ``"diff_only"`` (default) or ``"full_code"``.
+        language: Response language code — ``"en"`` for English,
+            ``"pt"`` for Portuguese.
+        structured: When ``True``, appends additional constraints for the
+            structured JSON comment mode (every comment must carry a valid
+            file path and line number > 0 for inline posting).
+
+    Returns:
+        Instruction string to be appended to the system prompt.
+    """
     scope = (review_scope or "diff_only").lower()
 
     if scope == "full_code":
@@ -218,7 +241,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
                 "Do not comment on deleted or absent code."
             )
         return (
-            "Escopo de review: full_code. O diff contém apenas linhas adicionadas (+) de cada ficheiro. "
+            "Ambito de review: full_code. O diff contém apenas linhas adicionadas (+) de cada ficheiro. "
             "Analisa o conteúdo completo dos ficheiros alterados e identifica problemas no novo código. "
             "Não comentes código eliminado ou ausente."
         )
@@ -227,13 +250,19 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
         if language == "en":
             return (
                 "Review scope: diff_only. The diff contains only added lines (+) — context and deletions were removed. "
-                "Focus exclusively on issues introduced by the new lines in this PR. "
+                "A full file content section (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
+                "is provided for each file as read-only context. "
+                "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines (marked + in the diff). "
+                "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes. "
                 "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
                 "Do not emit general problem comments without file/line."
             )
         return (
-            "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
-            "Foca exclusivamente em problemas introduzidos pelas novas linhas do PR. "
+            "Ambito de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
+            "Uma secção com o conteúdo completo do ficheiro (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) "
+            "é fornecida como contexto de leitura. "
+            "Usa-a para compreender o código envolvente, mas foca o teu review EXCLUSIVAMENTE nas linhas alteradas (marcadas com + no diff). "
+            "NÃO reportes problemas em linhas não alteradas, exceto se afetarem diretamente a correção das alterações. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
             "Não emitas comentários gerais de problema sem file/line."
         )
@@ -241,11 +270,17 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     if language == "en":
         return (
             "Review scope: diff_only. The diff contains only added lines (+). "
-            "Focus only on issues introduced by the new lines in this PR."
+            "A full file content section (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
+            "is provided for each file as read-only context. "
+            "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines. "
+            "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes."
         )
     return (
-        "Escopo de review: diff_only. O diff contém apenas linhas adicionadas (+). "
-        "Foca apenas problemas introduzidos pelas novas linhas deste PR."
+        "Ambito de review: diff_only. O diff contém apenas linhas adicionadas (+). "
+        "Uma secção com o conteúdo completo do ficheiro (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) "
+        "é fornecida como contexto de leitura. "
+        "Usa-a para compreender o código envolvente, mas foca o teu review EXCLUSIVAMENTE nas linhas alteradas. "
+        "NÃO reportes problemas em linhas não alteradas, exceto se afetarem diretamente a correção das alterações."
     )
 
 
@@ -361,7 +396,7 @@ class LLMClient:
         Sends the diff to the LLM and returns structured PR comments.
         
         Returns:
-            List of dicts with keys: file, line, type, severity, comment, suggestion
+            List of dicts with keys: file, line, type, comment, suggestion
         """
         base_prompt = get_pr_comment_prompt(self.config.review_language)
         custom_prompt = self._load_custom_prompt_text()
@@ -445,7 +480,6 @@ class LLMClient:
                 "file": "",
                 "line": 0,
                 "type": "suggestion",
-                "severity": "info",
                 "comment": raw_response,
                 "suggestion": "",
                 "reference": "",
@@ -458,7 +492,6 @@ class LLMClient:
                 "file": str(c.get("file", "")),
                 "line": int(c.get("line", 0)),
                 "type": str(c.get("type", "suggestion")),
-                "severity": str(c.get("severity", "info")),
                 "comment": str(c.get("comment", "")),
                 "suggestion": str(c.get("suggestion", "")),
                 "reference": str(c.get("reference", "")),
@@ -475,7 +508,7 @@ class LLMClient:
         Also supports Azure OpenAI.
         """
         try:
-            import requests
+            import requests  # noqa: F401
         except ImportError:
             raise LLMError("Module 'requests' not installed: pip install requests")
 
@@ -1176,8 +1209,8 @@ class LLMClient:
             LLMError: On boto3 import failure, BotoCoreError, or unexpected response.
         """
         try:
-            import boto3
-            from botocore.exceptions import BotoCoreError, ClientError
+            import boto3  # type: ignore[import-untyped]
+            from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
         except ImportError:
             raise LLMError(
                 "AWS dependency not installed.\n"

@@ -349,6 +349,86 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "No textual differences detected" in no_text[-1]
 
 
+# ---------------------------------------------------------------------------
+# _build_unified_diff_part — FULL_FILE_CONTEXT block
+# ---------------------------------------------------------------------------
+
+def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None:
+    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the new file content."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["old line", "new line one\nnew line two"],
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a", "/src/app.py", "/src/app.py", "edit",
+        "refs/heads/feature", "refs/heads/main",
+    )
+    joined = "\n".join(result)
+
+    assert "### FULL_FILE_CONTEXT_START: /src/app.py ###" in joined
+    assert "new line one" in joined
+    assert "new line two" in joined
+    assert "### FULL_FILE_CONTEXT_END ###" in joined
+    # Context block must appear after the diff headers
+    assert joined.index("### FULL_FILE_CONTEXT_START") > joined.index("diff --git")
+
+
+def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:
+    """_build_unified_diff_part must NOT append a FULL_FILE_CONTEXT block when change_type is delete."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        return_value="old content",
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a", "/src/app.py", "/src/app.py", "delete",
+        "refs/heads/feature", "refs/heads/main",
+    )
+    joined = "\n".join(result)
+
+    assert "### FULL_FILE_CONTEXT_START" not in joined
+    assert "### FULL_FILE_CONTEXT_END" not in joined
+
+
+def test_build_unified_diff_part_context_block_uses_new_file_path(mocker) -> None:
+    """The FULL_FILE_CONTEXT_START marker must reference the new file path (file_path), not original_path."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["old content", "new content"],
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a", "/src/renamed.py", "/src/original.py", "rename",
+        "refs/heads/feature", "refs/heads/main",
+    )
+    joined = "\n".join(result)
+
+    assert "### FULL_FILE_CONTEXT_START: /src/renamed.py ###" in joined
+    assert "### FULL_FILE_CONTEXT_START: /src/original.py ###" not in joined
+
+
+def test_build_unified_diff_part_no_context_block_when_content_unavailable(mocker) -> None:
+    """When both old and new file content fetches fail, no FULL_FILE_CONTEXT block must appear."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=RuntimeError("unreachable"),
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a", "/src/app.py", "/src/app.py", "edit",
+        "refs/heads/feature", "refs/heads/main",
+    )
+    joined = "\n".join(result)
+
+    assert "### FULL_FILE_CONTEXT_START" not in joined
+    assert "### FULL_FILE_CONTEXT_END" not in joined
+
+
 def test_raw_get_and_comment_endpoints(mocker) -> None:
     """It should expose raw file content and build comment payloads correctly."""
     client = TFSClient(make_tfs_config())
@@ -411,7 +491,6 @@ def test_repository_helpers_and_status_formatting(mocker) -> None:
     comment = client._format_review_comment(
         {
             "type": "security",
-            "severity": "high",
             "comment": "Avoid plain text secrets",
             "suggestion": "Use a vault",
             "reference": "OWASP",
