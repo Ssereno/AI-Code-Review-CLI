@@ -168,7 +168,12 @@ Edit it to tailor the review to your team:
 - Include business/architecture context
 - Add examples of good/bad comments
 
-The path is configurable in `config.yaml` (default: `review_prompt.md` in the current directory):
+**Rules can be scoped** to specific file types using language tags. During a review, the AI detects the files changed in the diff, identifies their extensions, and only loads:
+
+- Rules marked with `<!-- lang: all -->` for all files.
+- Rules matching the extensions of the files being reviewed. Example `<!-- lang: cs,ts -->` applied when .cs or .ts files are present.
+
+The path for the **markdown-customizable prompt** is configurable in `config.yaml` (default: `review_prompt.md` in the current directory):
 
 ```yaml
 review:

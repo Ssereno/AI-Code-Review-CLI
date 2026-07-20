@@ -264,6 +264,120 @@ def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> N
     assert "Custom user instructions" in system_prompt
     assert "Custom context loaded from" in user_message
 
+def test_review_omits_custom_instructions_header_when_filter_empties_prompt(mocker, tmp_path: Path) -> None:
+    """If filtering removes all sections, the 'Custom user instructions' header should not appear."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text(
+        "<!-- lang: java -->\n"
+        "## Java Rules\n"
+        "- Use streams.\n",
+        encoding="utf-8",
+    )
+    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    client = LLMClient(config)
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+
+    client.review("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
+
+    system_prompt, user_message = openai.call_args.args[:2]
+    assert "Custom user instructions" not in system_prompt
+    assert "Custom context loaded from" not in user_message
+    
+def test_review_filters_custom_prompt_sections_by_changed_extensions(mocker, tmp_path: Path) -> None:
+    """Only sections matching the extensions of changed files (plus 'all') should be kept."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text(
+        "<!-- lang: all -->\n"
+        "## General\n"
+        "- Always check for secrets.\n"
+        "\n"
+        "<!-- lang: cs -->\n"
+        "## CSharp Rules\n"
+        "- Avoid magic strings.\n"
+        "\n"
+        "<!-- lang: py -->\n"
+        "## Python Rules\n"
+        "- Use type hints.\n",
+        encoding="utf-8",
+    )
+    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    client = LLMClient(config)
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+
+    client.review("+code", [{"file": "app.py", "additions": 1, "deletions": 0}])
+
+    system_prompt, _ = openai.call_args.args[:2]
+    assert "General" in system_prompt
+    assert "Python Rules" in system_prompt
+    assert "CSharp Rules" not in system_prompt
+
+
+def test_review_keeps_only_all_sections_when_no_matching_extension(mocker, tmp_path: Path) -> None:
+    """If no changed file matches a tagged section, only 'all' sections remain."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text(
+        "<!-- lang: all -->\n"
+        "## General\n"
+        "- Always check for secrets.\n"
+        "\n"
+        "<!-- lang: java -->\n"
+        "## Java Rules\n"
+        "- Use streams.\n",
+        encoding="utf-8",
+    )
+    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    client = LLMClient(config)
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+
+    client.review("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
+
+    system_prompt, _ = openai.call_args.args[:2]
+    assert "General" in system_prompt
+    assert "Java Rules" not in system_prompt
+
+
+def test_review_includes_multiple_extension_sections(mocker, tmp_path: Path) -> None:
+    """Changed files with different extensions should each pull in their matching section."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text(
+        "<!-- lang: ts -->\n"
+        "## TypeScript Rules\n"
+        "- No any types.\n"
+        "\n"
+        "<!-- lang: html -->\n"
+        "## Html Rules\n"
+        "- No inline styles.\n",
+        encoding="utf-8",
+    )
+    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    client = LLMClient(config)
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+
+    client.review(
+        "+code",
+        [
+            {"file": "foo.component.ts", "additions": 1, "deletions": 0},
+            {"file": "foo.component.html", "additions": 1, "deletions": 0},
+        ],
+    )
+
+    system_prompt, _ = openai.call_args.args[:2]
+    assert "TypeScript Rules" in system_prompt
+    assert "Html Rules" in system_prompt
+
+
+def test_review_without_lang_tags_keeps_full_custom_prompt(mocker, tmp_path: Path) -> None:
+    """Custom prompt with no <!-- lang: --> tags at all should pass through unchanged."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Always mention tests", encoding="utf-8")
+    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    client = LLMClient(config)
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+
+    client.review("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
+
+    system_prompt, _ = openai.call_args.args[:2]
+    assert "Always mention tests" in system_prompt
 
 def test_review_raises_for_unsupported_provider() -> None:
     """It should reject unsupported providers before any HTTP call."""
