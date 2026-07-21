@@ -317,6 +317,34 @@ class LLMClient:
     def __init__(self, config: ReviewConfig):
         self.config = config
 
+    def _dump_prompt_debug(self, system_prompt: str, user_message: str) -> None:
+        """
+        Appends the full prompt/context sent to the LLM to a debug log file.
+
+        Only active when ``config.debug_dump`` is enabled. The log may
+        contain source code and PR content, so it must never be committed
+        to version control.
+        """
+        if not getattr(self.config, "debug_dump", False):
+            return
+
+        log_path = self.config.debug_dump_file or os.path.join("logs", "llm_prompt_debug.log")
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'=' * 80}\n")
+                f.write(f"[FULL CONTEXT SENT TO LLM] {datetime.datetime.now().isoformat()}\n")
+                f.write(f"Provider: {self.config.llm_provider} | Model: {self.config.get_effective_model()}\n")
+                f.write(f"{'=' * 80}\n")
+                f.write("--- SYSTEM PROMPT ---\n")
+                f.write(system_prompt + "\n")
+                f.write("--- USER MESSAGE ---\n")
+                f.write(user_message + "\n")
+        except OSError:
+            pass
+
     def _load_custom_prompt_text(self) -> str:
         """Loads extra instructions from a configurable Markdown file."""
         path = (self.config.custom_prompt_file or "").strip()
@@ -374,6 +402,7 @@ class LLMClient:
             merged_context = context
 
         user_message = build_user_message(diff, files_summary, merged_context)
+        self._dump_prompt_debug(system_prompt, user_message)
 
         provider = self.config.llm_provider.lower()
 
@@ -438,6 +467,7 @@ class LLMClient:
             merged_context = context
 
         user_message = build_user_message(diff, files_summary, merged_context)
+        self._dump_prompt_debug(system_prompt, user_message)
 
         provider = self.config.llm_provider.lower()
 
