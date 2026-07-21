@@ -103,6 +103,10 @@ class ReviewConfig:
     output_file: str = ""                   # Path to save output
     color_output: bool = True               # Terminal colors
 
+    # --- Debug ----------------------------------------------------------
+    debug_dump: bool = False                # Dump diff and full LLM prompt to a log file
+    debug_dump_file: str = ""               # Custom path (empty = logs/pr_<id>_debug.log)
+
     def get_effective_model(self) -> str:
         """Returns the effective model (configured or provider default)."""
         if self.model:
@@ -222,6 +226,9 @@ class ReviewConfig:
             "output_format": ("output", "format"),
             "output_file": ("output", "file"),
             "color_output": ("output", "color"),
+            # Debug
+            "debug_dump": ("debug", "dump"),
+            "debug_dump_file": ("debug", "dump_file"),
         }
 
         for attr, keys in mapping.items():

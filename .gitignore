@@ -45,3 +45,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Debug logs (may contain source code / PR content)
+logs/

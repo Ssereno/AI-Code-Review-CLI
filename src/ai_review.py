@@ -45,6 +45,7 @@ import os
 import sys
 import time
 import threading
+from datetime import datetime
 
 
 def _configure_console_streams() -> None:
@@ -254,6 +255,10 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         "--no-color", action="store_true",
         help="Disable terminal colors"
     )
+    group_output.add_argument(
+        "--debug-dump", action="store_true",
+        help="Dump the diff and full LLM prompt/context sent to the LLM into a debug log file"
+    )
 
     group_config = parser.add_argument_group("Configuration")
     group_config.add_argument(
@@ -269,6 +274,35 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         "--config", default=None,
         help="Configuration file (config.yaml)"
     )
+
+
+def _dump_debug_log(pr_id: int, label: str, content: str, path: str = "") -> str:
+    """
+    Appends a labeled, timestamped section to a debug log file.
+
+    Used to record exactly what is sent to the LLM (diff and full
+    prompt/context) for troubleshooting purposes. The log file may contain
+    source code and PR content, so it should only be enabled explicitly
+    (``--debug-dump``) and never committed to version control.
+
+    Args:
+        pr_id: Pull Request ID (used to build the default file name).
+        label: Section title (e.g., "DIFF SENT TO LLM").
+        content: Text content to append.
+        path: Optional custom log file path. Defaults to
+            ``logs/pr_<id>_debug.log``.
+
+    Returns:
+        The path of the log file that was written to.
+    """
+    log_path = path or os.path.join("logs", f"pr_{pr_id}_debug.log")
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"\n{'=' * 80}\n[{label}] {datetime.now().isoformat()}\n{'=' * 80}\n")
+        f.write(content + "\n")
+    return log_path
 
 
 def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
@@ -321,6 +355,8 @@ def run_review(args: argparse.Namespace) -> int:
         config.dry_run = True
     if getattr(args, "auto_post", False):
         config.auto_post_comments = True
+    if getattr(args, "debug_dump", False):
+        config.debug_dump = True
 
     # --- Validate configuration ---
     issues = config.validate()
@@ -484,6 +520,12 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_warning(
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
+
+    if config.debug_dump:
+        log_path = _dump_debug_log(
+            pr_id, "DIFF SENT TO LLM", diff_truncated, config.debug_dump_file
+        )
+        print(formatter.format_info(f"🐛 Debug: diff dumped to {log_path}"))
 
     # --- Perform structured review ---
     progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")

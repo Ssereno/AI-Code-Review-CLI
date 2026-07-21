@@ -122,3 +122,7 @@ output:
 
   # Terminal colors
   color: true
+
+debug:
+  dump: true
+  dump_file: "logs/debug.log"
