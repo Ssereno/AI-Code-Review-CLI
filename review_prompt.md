@@ -99,4 +99,5 @@
 - If the change is purely formatting/whitespace, do not comment on it.
 - Ignore auto-generated files (generated migrations, `*.designer.cs`, `node_modules`, etc.) unless they contain manually-added code.
 - Flag only issues relevant to the diff/change being reviewed, not the entire file, unless the change requires it.
+- Before flagging something as "missing", verify it isn't present in the surrounding unchanged context (lines without `+`/`-`). Only flag genuinely absent elements, not elements outside the shown diff hunk.
 - Priority order: Security > Functional bugs > Maintainability > Style.
