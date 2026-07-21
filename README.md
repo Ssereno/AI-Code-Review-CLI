@@ -314,9 +314,8 @@ flowchart TD
   R --> S[Limit files with max_diff_files]
   S --> T[Build changed-files summary]
   T --> U[Truncate each file with max_diff_lines]
-  U --> V[Run AI general review]
-  V --> W[Run AI structured comment generation]
-  W --> X[Preview review and suggested comments]
+  U --> V[Run single AI call: narrative review + structured comments]
+  V --> X[Preview review and suggested comments]
   X --> Y{Dry-run enabled?}
   Y -->|Yes| Z[Stop after preview]
   Y -->|No| AA{Auto-post enabled?}
@@ -355,6 +354,7 @@ Options:
 - `--format {terminal,markdown,json}`
 - `--output`, `-o`
 - `--no-color`
+- `--debug-dump`
 - `--model`, `-m`
 - `--provider`, `-p`
 - `--config`
@@ -391,3 +391,11 @@ tfs:
 ```
 
 Avoid `verify_ssl: false` except for temporary troubleshooting.
+
+### Debug Dump
+
+```yaml
+debug:
+  dump: true
+  dump_file: logs/llm_prompt_debug.log
+```

@@ -192,10 +192,10 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
     tfs.get_pull_request_diff.return_value = diff
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
-        {"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}
-    ]
+    llm.review_pr.return_value = (
+        "General review",
+        [{"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}],
+    )
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
@@ -258,10 +258,8 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     tfs.post_review_comments.side_effect = FakeTFSError("boom")
 
     llm = MagicMock()
-    llm.review.return_value = "General review"
-    llm.review_pr_structured.return_value = [
-        {"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}
-    ]
+    structured_comments = [{"file": "a.py", "line": 1, "type": "bug", "comment": "msg"}]
+    llm.review_pr.return_value = ("General review", structured_comments)
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
@@ -273,7 +271,7 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     mocker.patch("src.ai_review.ProgressIndicator", return_value=progress)
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
     mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
-    mocker.patch("src.ai_review._select_comments_to_post", return_value=llm.review_pr_structured.return_value)
+    mocker.patch("src.ai_review._select_comments_to_post", return_value=structured_comments)
     mocker.patch("src.ai_review._save_pr_review_output")
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
     mocker.patch("src.tfs_client.TFSError", new=FakeTFSError)
