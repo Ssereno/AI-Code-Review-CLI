@@ -89,7 +89,7 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
-    assert "code reviewer" in get_system_prompt("quick", "en")
+    assert "code reviewer" in get_system_prompt("quick", "en").lower()
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)

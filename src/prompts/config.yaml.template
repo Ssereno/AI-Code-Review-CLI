@@ -124,5 +124,5 @@ output:
   color: true
 
 debug:
-  dump: true
+  dump: false
   dump_file: "logs/debug.log"
