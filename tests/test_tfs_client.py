@@ -354,7 +354,7 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
 # ---------------------------------------------------------------------------
 
 def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None:
-    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the old (target branch) file content."""
+    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the new (source branch, post-change) file content."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -366,17 +366,19 @@ def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None
         "refs/heads/feature", "refs/heads/main",
     )
     joined = "\n".join(result)
+    context_block = joined.split("### FULL_FILE_CONTEXT_START")[1]
 
     assert "### FULL_FILE_CONTEXT_START: /src/app.py ###" in joined
-    assert "old line" in joined
-    assert "new line one" not in joined.split("### FULL_FILE_CONTEXT_START")[1]
+    assert "new line one" in context_block
+    assert "new line two" in context_block
+    assert "old line" not in context_block
     assert "### FULL_FILE_CONTEXT_END ###" in joined
     # Context block must appear after the diff headers
     assert joined.index("### FULL_FILE_CONTEXT_START") > joined.index("diff --git")
 
 
-def test_build_unified_diff_part_no_context_block_on_add(mocker) -> None:
-    """_build_unified_diff_part must NOT append a FULL_FILE_CONTEXT block for add (no old version exists)."""
+def test_build_unified_diff_part_context_block_present_on_add(mocker) -> None:
+    """_build_unified_diff_part must append a FULL_FILE_CONTEXT block for add, containing the new content."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -389,8 +391,9 @@ def test_build_unified_diff_part_no_context_block_on_add(mocker) -> None:
     )
     joined = "\n".join(result)
 
-    assert "### FULL_FILE_CONTEXT_START" not in joined
-    assert "### FULL_FILE_CONTEXT_END" not in joined
+    assert "### FULL_FILE_CONTEXT_START: /src/new_file.py ###" in joined
+    assert "new content" in joined
+    assert "### FULL_FILE_CONTEXT_END ###" in joined
 
 
 def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:
@@ -412,7 +415,8 @@ def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:
 
 
 def test_build_unified_diff_part_context_block_uses_new_file_path(mocker) -> None:
-    """The FULL_FILE_CONTEXT_START marker must reference the new file path (file_path), not original_path."""
+    """The FULL_FILE_CONTEXT_START marker must reference the new file path (file_path), not original_path,
+    and the block content must be the new (renamed) file's content."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -424,9 +428,12 @@ def test_build_unified_diff_part_context_block_uses_new_file_path(mocker) -> Non
         "refs/heads/feature", "refs/heads/main",
     )
     joined = "\n".join(result)
+    context_block = joined.split("### FULL_FILE_CONTEXT_START")[1]
 
     assert "### FULL_FILE_CONTEXT_START: /src/renamed.py ###" in joined
     assert "### FULL_FILE_CONTEXT_START: /src/original.py ###" not in joined
+    assert "new content" in context_block
+    assert "old content" not in context_block
 
 
 def test_build_unified_diff_part_no_context_block_when_content_unavailable(mocker) -> None:

@@ -89,7 +89,7 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
-    assert "code reviewer" in get_system_prompt("quick", "en")
+    assert "code reviewer" in get_system_prompt("quick", "en").lower()
     assert "JSON" in get_pr_comment_prompt("pt")
     assert "full_code" in get_scope_guidance("full_code", "en")
     assert "file e line" in get_scope_guidance("diff_only", "pt", structured=True)
@@ -249,17 +249,20 @@ def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
     assert client._load_custom_prompt_text() == ""
 
 
-def test_review_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> None:
+def test_review_pr_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> None:
     """It should route reviews to the configured provider and merge custom context."""
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("Always mention tests", encoding="utf-8")
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch(
+        "src.llm_client.LLMClient._call_openai",
+        return_value='{"summary": "review text", "comments": []}',
+    )
 
-    result = client.review("+code", [{"file": "a.py", "additions": 1, "deletions": 0}], context="Focus on bugs")
+    result = client.review_pr("+code", [{"file": "a.py", "additions": 1, "deletions": 0}], context="Focus on bugs")
 
-    assert result == "review text"
+    assert result == ("review text", [])
     system_prompt, user_message = openai.call_args.args[:2]
     assert "Custom user instructions" in system_prompt
     assert "Custom context loaded from" in user_message
@@ -379,42 +382,76 @@ def test_review_without_lang_tags_keeps_full_custom_prompt(mocker, tmp_path: Pat
     system_prompt, _ = openai.call_args.args[:2]
     assert "Always mention tests" in system_prompt
 
-def test_review_raises_for_unsupported_provider() -> None:
+def test_review_pr_raises_for_unsupported_provider() -> None:
     """It should reject unsupported providers before any HTTP call."""
     client = LLMClient(make_llm_config(llm_provider="unknown"))
 
     with pytest.raises(LLMError, match="Unsupported provider"):
-        client.review("+code", [])
+        client.review_pr("+code", [])
 
 
-def test_review_pr_structured_dispatches_and_parses(mocker) -> None:
-    """It should dispatch structured reviews and normalize JSON comments."""
+def test_review_pr_dispatches_and_parses_combined_response(mocker) -> None:
+    """It should dispatch a single combined review and normalize summary + JSON comments."""
     client = LLMClient(make_llm_config(llm_provider="copilot"))
     copilot = mocker.patch(
         "src.llm_client.LLMClient._call_copilot",
-        return_value='[{"file": "src/app.py", "line": 5, "type": "bug", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]',
+        return_value=(
+            '{"summary": "General review", "comments": '
+            '[{"file": "src/app.py", "line": 5, "type": "bug", "comment": "boom", '
+            '"suggestion": "fix", "reference": "Docs"}]}'
+        ),
     )
 
-    comments = client.review_pr_structured("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
+    summary, comments = client.review_pr("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     assert copilot.called
+    assert summary == "General review"
     assert comments == [{"file": "src/app.py", "line": 5, "type": "bug", "comment": "boom", "suggestion": "fix", "reference": "Docs"}]
 
 
-def test_parse_structured_comments_handles_markdown_single_object_and_invalid_json() -> None:
-    """It should parse code fences, single objects and invalid fallback payloads."""
+def test_parse_combined_response_handles_markdown_missing_fields_and_invalid_json() -> None:
+    """It should parse code fences, tolerate missing/invalid fields and fall back on invalid payloads."""
     client = LLMClient(make_llm_config())
-    fenced = client._parse_structured_comments(
-        "```json\n[{\"file\": \"a.py\", \"line\": 1, \"comment\": \"x\"}]\n```"
-    )
-    single = client._parse_structured_comments(
-        '{"file": "a.py", "line": 2, "type": "style", "comment": "y"}'
-    )
-    fallback = client._parse_structured_comments("not json at all")
 
-    assert fenced[0]["file"] == "a.py"
-    assert single[0]["line"] == 2
-    assert fallback[0]["comment"] == "not json at all"
+    fenced_summary, fenced_comments = client._parse_combined_response(
+        "```json\n{\"summary\": \"ok\", \"comments\": [{\"file\": \"a.py\", \"line\": 1, \"comment\": \"x\"}]}\n```"
+    )
+    assert fenced_summary == "ok"
+    assert fenced_comments[0]["file"] == "a.py"
+    assert fenced_comments[0]["line"] == 1
+
+    # Missing "comments" field defaults to an empty list.
+    no_comments_summary, no_comments = client._parse_combined_response(
+        '{"summary": "only summary"}'
+    )
+    assert no_comments_summary == "only summary"
+    assert no_comments == []
+
+    # Non-list "comments" field is treated as if no comments were provided.
+    bad_comments_summary, bad_comments = client._parse_combined_response(
+        '{"summary": "weird", "comments": "not a list"}'
+    )
+    assert bad_comments_summary == "weird"
+    assert bad_comments == []
+
+    # Non-dict JSON value (e.g. a bare array with no nested object) falls back
+    # to the raw response text as the summary, with no comments.
+    raw_array = "[1, 2, 3]"
+    array_summary, array_comments = client._parse_combined_response(raw_array)
+    assert array_summary == raw_array
+    assert array_comments == []
+
+    # Malformed JSON falls back to raw text as summary with no comments.
+    fallback_summary, fallback_comments = client._parse_combined_response("not json at all")
+    assert fallback_summary == "not json at all"
+    assert fallback_comments == []
+
+    # A non-numeric "line" value must not crash parsing; it defaults to 0.
+    bad_line_summary, bad_line_comments = client._parse_combined_response(
+        '{"summary": "ok", "comments": [{"file": "a.py", "line": "N/A", "comment": "z"}]}'
+    )
+    assert bad_line_summary == "ok"
+    assert bad_line_comments[0]["line"] == 0
 
 
 def test_call_openai_builds_expected_payload_and_validates_configuration(mocker) -> None:

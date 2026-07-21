@@ -30,7 +30,7 @@ class LLMError(Exception):
 SYSTEM_PROMPTS = {
     "quick": {
         "pt": (
-            "És um code reviewer experiente em .Net C#, TypeScript e SQL. Analisa o diff de código fornecido "
+            "És um code reviewer senior experiente. Analisa o diff de código fornecido "
             "e dá um review CONCISO e direto. Foca-te nos problemas mais críticos:\n"
             "- Bugs e erros lógicos\n"
             "- Problemas de segurança\n"
@@ -38,7 +38,7 @@ SYSTEM_PROMPTS = {
             "Formato: Lista de bullet points com o ficheiro e linha quando possível. "
         ),
         "en": (
-            "You are an experienced .Net C#, TypeScript and SQL code reviewer. Analyze the provided code diff "
+            "You are an experienced Senior Code Reviewer. Analyze the provided code diff "
             "and give a CONCISE review. Focus on critical issues:\n"
             "- Bugs and logic errors\n"
             "- Security issues\n"
@@ -48,7 +48,7 @@ SYSTEM_PROMPTS = {
     },
     "detailed": {
         "pt": (
-            "És um code reviewer experiente em .Net C#, TypeScript e SQL. Analisa o diff de código "
+            "És um code reviewer senior experiente. Analisa o diff de código "
             "fornecido e retorna apenas comentários inline.\n\n"
             "Formato de output — para cada problema encontrado, escreve exatamente:\n"
             "- Linha <número_linha>: <descrição do problema> \n\n"
@@ -60,7 +60,7 @@ SYSTEM_PROMPTS = {
             "- Sê específico, objetivo e conciso. Responde em português."
         ),
         "en": (
-            "You are an expert .Net C#, TypeScript e SQL code reviewer. Analyze the provided code and return only inline comments.\n\n"
+            "You are an experienced Senior Code Reviewer. Analyze the provided code and return only inline comments.\n\n"
             "Output format — for each issue found, output exactly:\n"
             "- Line <line_number>: <issue description>\n\n"
             "Rules:\n"
@@ -73,7 +73,7 @@ SYSTEM_PROMPTS = {
     },
     "security": {
         "pt": (
-            "És um especialista em segurança de aplicações .Net C#, TypeScript e SQL. Analisa o diff "
+            "És um especialista em segurança de aplicações. Analisa o diff "
             "de código fornecido com foco EXCLUSIVO em segurança.\n\n"
             "Procura por:\n"
             "- SQL Injection\n"
@@ -91,7 +91,7 @@ SYSTEM_PROMPTS = {
             "Responde em português."
         ),
         "en": (
-            "You are an application security .Net C#, TypeScript and SQL specialist. Analyze the "
+            "You are an application security. Analyze the "
             "provided code diff with EXCLUSIVE focus on security.\n\n"
             "Look for:\n"
             "- SQL Injection\n"
@@ -110,44 +110,69 @@ SYSTEM_PROMPTS = {
     },
 }
 
-# Special prompt for PR review with structured comments
+# Special prompt for PR review with a combined narrative summary + structured comments
 PR_COMMENT_PROMPT = {
     "pt": (
-        "Analisa o diff de código de um Pull Request e retorna os teus comentários em formato JSON estruturado.\n\n"
-        "Para CADA problema encontrado, retorna um objeto JSON com:\n"
-        '- "file": caminho do ficheiro (ex: "src/auth.py")\n'
-        '- "line": número da linha no diff (inteiro, ou 0 se geral)\n'
-        '- "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
-        '- "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
-        '- "reference": fonte ou referência para o problema (URL de documentação, padrão ou princípio). Importante: incluir SEMPRE uma referência relevante.\n\n'
+        "Analisa o diff de código de um Pull Request e retorna a tua resposta num único objeto JSON "
+        "com dois campos:\n"
+        '- "summary": um resumo narrativo do review, em texto (string). Se não encontrares problemas, '
+        'escreve algo como "Nenhum problema encontrado."\n'
+        '- "comments": um array de objetos, um por cada problema encontrado, com:\n'
+        '  - "file": caminho do ficheiro (ex: "src/auth.py")\n'
+        '  - "line": número da linha no diff (inteiro, ou 0 se geral)\n'
+        '  - "type": tipo de issue ("bug", "security", "performance", "style", "suggestion", "praise")\n'
+        '  - "comment": descrição direta do problema em português, sem saudações e sem emojis\n'
+        '  - "suggestion": sugestão de correção (opcional, string vazia se não aplicável)\n'
+        '  - "reference": fonte ou referência para o problema (URL de documentação, padrão ou princípio). '
+        'Importante: incluir SEMPRE uma referência relevante.\n\n'
         "No campo 'comment', escreve de forma objetiva e curta. "
         "Não uses introduções como 'Olá' ou 'Como code reviewer sénior'.\n"
         "No campo 'reference', inclui uma fonte confiável, padrão ou link para documentação relevante.\n\n"
-        "Responde APENAS com um JSON array válido. Exemplo:\n"
-        '[\n'
-        '  {\n'
-        '    "file": "src/auth.py",\n'
-        '    "line": 42,\n'
-        '    "type": "security",\n'
-        '    "comment": "Password armazenada em texto simples sem hashing",\n'
-        '    "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
-        '    "reference": "OWASP - Password Storage Cheat Sheet"\n'
-        '  }\n'
-        ']\n\n'
+        "Responde APENAS com um JSON object válido. Exemplo:\n"
+        '{\n'
+        '  "summary": "Resumo narrativo curto do review...",\n'
+        '  "comments": [\n'
+        '    {\n'
+        '      "file": "src/auth.py",\n'
+        '      "line": 42,\n'
+        '      "type": "security",\n'
+        '      "comment": "Password armazenada em texto simples sem hashing",\n'
+        '      "suggestion": "Usar bcrypt ou argon2 para hash de passwords",\n'
+        '      "reference": "OWASP - Password Storage Cheat Sheet"\n'
+        '    }\n'
+        '  ]\n'
+        '}\n\n'
     ),
     "en": (
-        "Analyze the Pull Request code diff and return your comments in structured JSON format.\n\n"
-        "For EACH issue found, return a JSON object with:\n"
-        '- "file": file path (e.g., "src/auth.py")\n'
-        '- "line": line number in diff (integer, or 0 if general)\n'
-        '- "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
-        '- "comment": direct description of the issue, with no greetings and no emojis\n'
-        '- "suggestion": fix suggestion (optional, empty string if not applicable)\n'
-        '- "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
+        "Analyze the Pull Request code diff and return your response as a single JSON object with two "
+        "fields:\n"
+        '- "summary": a narrative text summary of the review (string). If no issues are found, write '
+        'something like "No issues found."\n'
+        '- "comments": an array of objects, one per issue found, with:\n'
+        '  - "file": file path (e.g., "src/auth.py")\n'
+        '  - "line": line number in diff (integer, or 0 if general)\n'
+        '  - "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
+        '  - "comment": direct description of the issue, with no greetings and no emojis\n'
+        '  - "suggestion": fix suggestion (optional, empty string if not applicable)\n'
+        '  - "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation '
+        'URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
         "In 'comment', use a short and objective tone. "
         "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
         "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
+        "Respond ONLY with a valid JSON object. Example:\n"
+        '{\n'
+        '  "summary": "Short narrative summary of the review...",\n'
+        '  "comments": [\n'
+        '    {\n'
+        '      "file": "src/auth.py",\n'
+        '      "line": 42,\n'
+        '      "type": "security",\n'
+        '      "comment": "Password stored in plain text without hashing",\n'
+        '      "suggestion": "Use bcrypt or argon2 to hash passwords",\n'
+        '      "reference": "OWASP - Password Storage Cheat Sheet"\n'
+        '    }\n'
+        '  ]\n'
+        '}\n\n'
     ),
 }
 
@@ -188,10 +213,11 @@ def get_pr_comment_prompt(language: str) -> str:
     If the language key is not present, ``"pt"`` (Portuguese) is used as the
     default.
 
-    The returned prompt instructs the LLM to produce a valid JSON array where
-    each element represents a single review comment with the fields
-    ``file``, ``line``, ``type``, ``comment``, ``suggestion``,
-    and ``reference``.
+    The returned prompt instructs the LLM to produce a single valid JSON
+    object with a ``"summary"`` field (narrative review text) and a
+    ``"comments"`` field (array of review comment objects, each with the
+    fields ``file``, ``line``, ``type``, ``comment``, ``suggestion``,
+    and ``reference``).
 
     Args:
         language: Response language code — ``"en"`` for English,
@@ -211,7 +237,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     * Only added lines (``+``) appear in the diff section.
     * A ``### FULL_FILE_CONTEXT_START: <path> ###`` /
       ``### FULL_FILE_CONTEXT_END ###`` block is embedded in the payload for
-      each changed file, containing the complete old-version (before changes)
+      each changed file, containing the complete new-version (after changes)
       file content as **read-only** background.
     * The review must focus **exclusively** on the changed lines (``+``); the
       full-file section exists only to prevent the model from hallucinating
@@ -251,7 +277,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
         if language == "en":
             return (
                 "Review scope: diff_only. The diff contains only added lines (+) — context and deletions were removed. "
-                "A full file content section (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
+                "The complete new-version file content, after the changes (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
                 "is provided for each file as read-only context. "
                 "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines (marked + in the diff). "
                 "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes. "
@@ -260,8 +286,7 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
             )
         return (
             "Ambito de review: diff_only. O diff contém apenas linhas adicionadas (+) — contexto e eliminações foram removidos. "
-            "Uma secção com o conteúdo completo do ficheiro (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) "
-            "é fornecida como contexto de leitura. "
+            "É fornecido o conteúdo completo do ficheiro na versão nova, depois das alterações (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) como contexto de leitura. "
             "Usa-a para compreender o código envolvente, mas foca o teu review EXCLUSIVAMENTE nas linhas alteradas (marcadas com + no diff). "
             "NÃO reportes problemas em linhas não alteradas, exceto se afetarem diretamente a correção das alterações. "
             "Para cada problema, DEVE ser fornecido file e line válidos (>0) para comentário inline. "
@@ -271,14 +296,14 @@ def get_scope_guidance(review_scope: str, language: str, structured: bool = Fals
     if language == "en":
         return (
             "Review scope: diff_only. The diff contains only added lines (+). "
-            "A full file content section (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
+            "The new-version (post-change) full file content (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
             "is provided for each file as read-only context. "
             "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines. "
             "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes."
         )
     return (
         "Ambito de review: diff_only. O diff contém apenas linhas adicionadas (+). "
-        "Uma secção com o conteúdo completo do ficheiro (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) "
+        "Uma secção com o conteúdo completo do ficheiro na versão nova, após as alterações (entre os marcadores ### FULL_FILE_CONTEXT_START e ### FULL_FILE_CONTEXT_END) "
         "é fornecida como contexto de leitura. "
         "Usa-a para compreender o código envolvente, mas foca o teu review EXCLUSIVAMENTE nas linhas alteradas. "
         "NÃO reportes problemas em linhas não alteradas, exceto se afetarem diretamente a correção das alterações."
@@ -361,80 +386,30 @@ class LLMClient:
         except Exception:
             return ""
 
-    def review(self, diff: str, files_summary: list[dict],
-               context: str = "", review_scope: str = "diff_only") -> str:
+    def review_pr(self, diff: str, files_summary: list[dict],
+                  context: str = "", review_scope: str = "diff_only") -> tuple[str, list[dict]]:
         """
-        Sends the diff to the LLM and returns the review as text.
-        """
-        base_prompt = get_system_prompt(
-            self.config.verbosity,
-            self.config.review_language,
-        )
-        custom_prompt = self._load_custom_prompt_text()
+        Sends the diff to the LLM in a single call and returns both the
+        narrative review text and the structured PR comments, parsed from one
+        combined JSON response.
 
-        # filter custom_prompt sections by the languages/extensions actually changed
-        if custom_prompt:
-            file_paths = [f.get("file") for f in files_summary]
-            active_langs = detect_langs(file_paths)
-            custom_prompt = filter_prompt_by_langs(custom_prompt, active_langs) # can return an empty list
+        This replaces the previous two-call approach (separate narrative and
+        structured-comments requests), halving the diff/context payload sent
+        to the LLM per PR review.
 
-        scope_guidance = get_scope_guidance(
-            review_scope=review_scope,
-            language=self.config.review_language,
-            structured=False,
-        )
+        Args:
+            diff: Unified diff (or filtered/truncated diff) to review.
+            files_summary: List of dicts with 'file', 'additions', 'deletions'.
+            context: Additional free-text context supplied by the user.
+            review_scope: "diff_only" (default) or "full_code".
 
-        if custom_prompt:
-            system_prompt = (
-                f"{base_prompt}\n\n"
-                f"{scope_guidance}\n\n"
-                "---\n"
-                "Custom user instructions (follow with priority):\n"
-                f"{custom_prompt}"
-            )
-            merged_context = (
-                f"{context}\n\n[Custom context loaded from {self.config.custom_prompt_file}]"
-                if context else
-                f"[Custom context loaded from {self.config.custom_prompt_file}]"
-            )
-        else:
-            system_prompt = f"{base_prompt}\n\n{scope_guidance}"
-            merged_context = context
-
-        user_message = build_user_message(diff, files_summary, merged_context)
-        self._dump_prompt_debug(system_prompt, user_message)
-
-        provider = self.config.llm_provider.lower()
-
-        if provider == "openai":
-            return self._call_openai(system_prompt, user_message)
-        elif provider == "azure_openai":
-            return self._call_openai(system_prompt, user_message, azure=True)
-        elif provider == "gemini":
-            return self._call_gemini(system_prompt, user_message)
-        elif provider == "claude":
-            return self._call_claude(system_prompt, user_message)
-        elif provider == "ollama":
-            return self._call_ollama(system_prompt, user_message)
-        elif provider == "copilot":
-            return self._call_copilot(system_prompt, user_message)
-        elif provider == "bedrock":
-            return self._call_bedrock(system_prompt, user_message)
-        else:
-            raise LLMError(
-                f"Unsupported provider: '{provider}'.\n"
-                "Available providers: openai, azure_openai, gemini, claude, ollama, copilot, bedrock"
-            )
-
-    def review_pr_structured(self, diff: str, files_summary: list[dict],
-                             context: str = "", review_scope: str = "diff_only") -> list[dict]:
-        """
-        Sends the diff to the LLM and returns structured PR comments.
-        
         Returns:
-            List of dicts with keys: file, line, type, comment, suggestion
+            Tuple of (review_text, structured_comments), where structured_comments
+            is a list of dicts with keys: file, line, type, comment, suggestion,
+            reference.
         """
-        base_prompt = get_pr_comment_prompt(self.config.review_language)
+        base_prompt = get_system_prompt(self.config.verbosity, self.config.review_language)
+        json_schema_prompt = get_pr_comment_prompt(self.config.review_language)
         custom_prompt = self._load_custom_prompt_text()
 
         # filter custom_prompt sections by the languages/extensions actually changed
@@ -449,10 +424,11 @@ class LLMClient:
             structured=True,
         )
 
+        combined_base = f"{base_prompt}\n\n{json_schema_prompt}\n\n{scope_guidance}"
+
         if custom_prompt:
             system_prompt = (
-                f"{base_prompt}\n\n"
-                f"{scope_guidance}\n\n"
+                f"{combined_base}\n\n"
                 "---\n"
                 "Custom user instructions (follow with priority):\n"
                 f"{custom_prompt}"
@@ -463,7 +439,7 @@ class LLMClient:
                 f"[Custom context loaded from {self.config.custom_prompt_file}]"
             )
         else:
-            system_prompt = f"{base_prompt}\n\n{scope_guidance}"
+            system_prompt = combined_base
             merged_context = context
 
         user_message = build_user_message(diff, files_summary, merged_context)
@@ -486,13 +462,23 @@ class LLMClient:
         elif provider == "bedrock":
             raw = self._call_bedrock(system_prompt, user_message)
         else:
-            raise LLMError(f"Unsupported provider: '{provider}'")
+            raise LLMError(
+                f"Unsupported provider: '{provider}'.\n"
+                "Available providers: openai, azure_openai, gemini, claude, ollama, copilot, bedrock"
+            )
 
-        return self._parse_structured_comments(raw)
+        return self._parse_combined_response(raw)
 
-    def _parse_structured_comments(self, raw_response: str) -> list[dict]:
-        """Parses the LLM JSON response."""
-        # Try to extract JSON from possible markdown
+    def _extract_json_block(self, raw_response: str) -> str:
+        """Strips markdown code fences and isolates the outer JSON object.
+
+        Args:
+            raw_response: Raw text returned by the LLM, possibly wrapped in a
+                markdown code fence (```json ... ```` or ``` ... ````).
+
+        Returns:
+            The substring most likely to contain a valid JSON object.
+        """
         text = raw_response.strip()
         if text.startswith("```"):
             # Remove markdown code blocks
@@ -507,39 +493,62 @@ class LLMClient:
                     json_lines.append(line)
             text = "\n".join(json_lines).strip()
 
-        # Try to find JSON array
-        start = text.find("[")
-        end = text.rfind("]")
+        # Try to find JSON object
+        start = text.find("{")
+        end = text.rfind("}")
         if start != -1 and end != -1:
             text = text[start:end + 1]
 
-        try:
-            comments = json.loads(text)
-            if not isinstance(comments, list):
-                comments = [comments]
-        except json.JSONDecodeError:
-            # Fallback: return as a general comment
-            return [{
-                "file": "",
-                "line": 0,
-                "type": "suggestion",
-                "comment": raw_response,
-                "suggestion": "",
-                "reference": "",
-            }]
+        return text
 
-        # Validate and normalize each comment
-        validated = []
-        for c in comments:
-            validated.append({
+    def _parse_combined_response(self, raw_response: str) -> tuple[str, list[dict]]:
+        """Parses the combined LLM response into (summary, comments).
+
+        Falls back to treating the entire raw response as the summary (with an
+        empty comments list) when the response is not valid JSON or is not a
+        JSON object, mirroring the previous fallback behavior for malformed
+        structured responses.
+
+        Args:
+            raw_response: Raw text returned by the LLM.
+
+        Returns:
+            Tuple of (summary, comments) where comments is a list of dicts with
+            keys: file, line, type, comment, suggestion, reference.
+        """
+        text = self._extract_json_block(raw_response)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return raw_response, []
+
+        if not isinstance(data, dict):
+            return raw_response, []
+
+        summary = str(data.get("summary", "")).strip()
+        raw_comments = data.get("comments", [])
+        if not isinstance(raw_comments, list):
+            raw_comments = []
+
+        comments = []
+        for c in raw_comments:
+            if not isinstance(c, dict):
+                continue
+            try:
+                line = int(c.get("line", 0))
+            except (TypeError, ValueError):
+                line = 0
+            comments.append({
                 "file": str(c.get("file", "")),
-                "line": int(c.get("line", 0)),
+                "line": line,
                 "type": str(c.get("type", "suggestion")),
                 "comment": str(c.get("comment", "")),
                 "suggestion": str(c.get("suggestion", "")),
                 "reference": str(c.get("reference", "")),
             })
-        return validated
+
+        return summary or raw_response, comments
 
     # ------------------------------------------------------------------
     # OpenAI / Azure OpenAI

@@ -276,35 +276,6 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _dump_debug_log(pr_id: int, label: str, content: str, path: str = "") -> str:
-    """
-    Appends a labeled, timestamped section to a debug log file.
-
-    Used to record exactly what is sent to the LLM (diff and full
-    prompt/context) for troubleshooting purposes. The log file may contain
-    source code and PR content, so it should only be enabled explicitly
-    (``--debug-dump``) and never committed to version control.
-
-    Args:
-        pr_id: Pull Request ID (used to build the default file name).
-        label: Section title (e.g., "DIFF SENT TO LLM").
-        content: Text content to append.
-        path: Optional custom log file path. Defaults to
-            ``logs/pr_<id>_debug.log``.
-
-    Returns:
-        The path of the log file that was written to.
-    """
-    log_path = path or os.path.join("logs", f"pr_{pr_id}_debug.log")
-    log_dir = os.path.dirname(log_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"\n{'=' * 80}\n[{label}] {datetime.now().isoformat()}\n{'=' * 80}\n")
-        f.write(content + "\n")
-    return log_path
-
-
 def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
                            pr_details: dict, review_text: str,
                            was_truncated: bool) -> None:
@@ -446,6 +417,12 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # Show PR details
     print(formatter.format_pr_details(pr_details))
 
+    if config.debug_dump and not config.debug_dump_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config.debug_dump_file = os.path.join("logs", f"pr_{pr_id}_{timestamp}_debug.log")
+        os.makedirs(os.path.dirname(config.debug_dump_file), exist_ok=True)
+        print(formatter.format_info(f"🐛 Debug dump enabled: {config.debug_dump_file}"))
+
     # --- Get PR diff ---
     print(formatter.format_progress("Getting Pull Request diff"))
 
@@ -521,12 +498,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             f"Diff truncated to {config.max_diff_lines} lines per file."
         ))
 
-    if config.debug_dump:
-        log_path = _dump_debug_log(
-            pr_id, "DIFF SENT TO LLM", diff_truncated, config.debug_dump_file
-        )
-        print(formatter.format_info(f"🐛 Debug: diff dumped to {log_path}"))
-
     # --- Perform structured review ---
     progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")
     progress.start()
@@ -534,17 +505,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     try:
         llm = LLMClient(config)
-
-        # Get general review as text
-        review_text = llm.review(
-            diff=diff_truncated,
-            files_summary=files_summary,
-            context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
-        )
-
-        # Get structured comments to post
-        structured_comments = llm.review_pr_structured(
+        review_text, structured_comments = llm.review_pr(
             diff=diff_truncated,
             files_summary=files_summary,
             context=getattr(args, "context", ""),
