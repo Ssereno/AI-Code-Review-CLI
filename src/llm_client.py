@@ -17,6 +17,7 @@ import json
 import os
 
 from .config import ReviewConfig
+from .prompt_utils import detect_langs, filter_prompt_by_langs
 
 
 class LLMError(Exception):
@@ -300,6 +301,12 @@ class LLMClient:
         base_prompt = get_system_prompt(self.config.verbosity)
         json_schema_prompt = PR_COMMENT_PROMPT
         custom_prompt = self._load_custom_prompt_text()
+
+        # filter custom_prompt sections by the languages/extensions actually changed
+        if custom_prompt:
+            file_paths = [f.get("file") for f in files_summary]
+            active_langs = detect_langs(file_paths)
+            custom_prompt = filter_prompt_by_langs(custom_prompt, active_langs) # can return an empty list
 
         scope_guidance = get_scope_guidance(
             review_scope=review_scope,

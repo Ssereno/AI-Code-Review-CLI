@@ -14,7 +14,6 @@ import subprocess
 import os
 from typing import Optional
 
-
 class GitError(Exception):
     """Exception for Git-related errors."""
     pass
