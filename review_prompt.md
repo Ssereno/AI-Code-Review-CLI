@@ -31,15 +31,9 @@
 
 <!-- lang: cs -->
 ## Tests
-- Logic changes require added/updated tests.
+- Business logic changes require added/updated tests.
 - Tests should verify behavior, not implementation details.
-- Cover edge cases (nulls, empty lists, boundary values).
-- New/modified `[TestMethod]`s must have XML `<summary>` + `<TestCaseID>` matching the method name.
-- `Setup()` must have matching `TearDown()` in `finally` or `[TestCleanup]`/`[ClassCleanup]` - not as the last line (skipped on assertion failure).
-
-<!-- lang: cs,html,ts -->
-## UI Automation / Testability (Selenium / E2E)
-- Interactive elements (buttons, inputs, links, dropdowns, checkboxes, etc.) should expose a stable `data-testid` (or `data-qa`) attribute for reliable Selenium/CSS-selector targeting in tests.
+- Tests should cover edge cases (nulls, empty lists, boundary values).
 
 <!-- lang: cs -->
 ## C#
