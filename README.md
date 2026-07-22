@@ -89,7 +89,6 @@ tfs:
   # ca_bundle: C:/certs/corporate-root-ca.pem
 
 review:
-  language: pt
   verbosity: detailed
   scope: diff_only
   custom_prompt_file: review_prompt.md

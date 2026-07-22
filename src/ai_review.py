@@ -858,7 +858,6 @@ def _show_config(config: ReviewConfig) -> None:
     print(f"  {c.CYAN}API Key:{c.RESET}       {'✅ Configured' if has_effective_key else '❌ Not configured'}")
     print(f"  {c.CYAN}Temperature:{c.RESET}   {config.temperature}")
     print(f"  {c.CYAN}Max Tokens:{c.RESET}    {config.max_tokens}")
-    print(f"  {c.CYAN}Language:{c.RESET}      {config.review_language}")
     print(f"  {c.CYAN}Verbosity:{c.RESET}     {config.verbosity}")
     print(f"  {c.CYAN}Format:{c.RESET}        {config.output_format}")
     print(f"\n  {c.CYAN}TFS URL:{c.RESET}      {config.tfs_base_url or '(not configured)'}")

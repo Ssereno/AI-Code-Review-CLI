@@ -85,7 +85,6 @@ class ReviewConfig:
     tfs_repository: str = ""                # Default repository (empty = all)
 
     # --- Review -------------------------------------------------------
-    review_language: str = "pt"             # Review language (pt/en)
     verbosity: str = "detailed"             # "quick" | "detailed" | "security"
     review_scope: str = "diff_only"         # "diff_only" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
@@ -211,7 +210,6 @@ class ReviewConfig:
             "tfs_ca_bundle": ("tfs", "ca_bundle"),
             "tfs_repository": ("tfs", "repository"),
             # Review
-            "review_language": ("review", "language"),
             "verbosity": ("review", "verbosity"),
             "review_scope": ("review", "scope"),
             "max_diff_files": ("review", "max_diff_files"),
