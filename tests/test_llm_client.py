@@ -258,9 +258,9 @@ def test_review_omits_custom_instructions_header_when_filter_empties_prompt(mock
     )
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value='{"summary": "review text", "comments": []}')
 
-    client.review("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
+    client.review_pr("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
 
     system_prompt, user_message = openai.call_args.args[:2]
     assert "Custom user instructions" not in system_prompt
@@ -285,9 +285,9 @@ def test_review_filters_custom_prompt_sections_by_changed_extensions(mocker, tmp
     )
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value='{"summary": "review text", "comments": []}')
 
-    client.review("+code", [{"file": "app.py", "additions": 1, "deletions": 0}])
+    client.review_pr("+code", [{"file": "app.py", "additions": 1, "deletions": 0}])
 
     system_prompt, _ = openai.call_args.args[:2]
     assert "General" in system_prompt
@@ -310,9 +310,9 @@ def test_review_keeps_only_all_sections_when_no_matching_extension(mocker, tmp_p
     )
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value='{"summary": "review text", "comments": []}')
 
-    client.review("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
+    client.review_pr("+code", [{"file": "component.ts", "additions": 1, "deletions": 0}])
 
     system_prompt, _ = openai.call_args.args[:2]
     assert "General" in system_prompt
@@ -334,9 +334,9 @@ def test_review_includes_multiple_extension_sections(mocker, tmp_path: Path) -> 
     )
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value='{"summary": "review text", "comments": []}')
 
-    client.review(
+    client.review_pr(
         "+code",
         [
             {"file": "foo.component.ts", "additions": 1, "deletions": 0},
@@ -355,9 +355,9 @@ def test_review_without_lang_tags_keeps_full_custom_prompt(mocker, tmp_path: Pat
     prompt_file.write_text("Always mention tests", encoding="utf-8")
     config = make_llm_config(custom_prompt_file=str(prompt_file))
     client = LLMClient(config)
-    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value="review text")
+    openai = mocker.patch("src.llm_client.LLMClient._call_openai", return_value='{"summary": "review text", "comments": []}')
 
-    client.review("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
+    client.review_pr("+code", [{"file": "a.py", "additions": 1, "deletions": 0}])
 
     system_prompt, _ = openai.call_args.args[:2]
     assert "Always mention tests" in system_prompt
