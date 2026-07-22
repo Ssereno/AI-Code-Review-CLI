@@ -17,6 +17,14 @@ def test_get_effective_model_prefers_explicit_value() -> None:
     assert config.get_effective_model() == "custom-model"
 
 
+def test_review_config_has_no_review_language_attribute() -> None:
+    """Regression: the configurable review language feature was removed."""
+    config = ReviewConfig()
+
+    assert hasattr(config, "review_language") is False
+    assert "review_language" not in ReviewConfig.__dataclass_fields__
+
+
 @pytest.mark.parametrize(
     ("provider", "field", "expected"),
     [
@@ -171,7 +179,6 @@ tfs:
   ca_bundle: ~/ca.pem
   repository: repo-a
 review:
-  language: en
   verbosity: quick
   scope: full_code
   max_diff_files: 12
@@ -215,7 +222,6 @@ output:
     assert config.tfs_verify_ssl is False
     assert config.tfs_ca_bundle == "~/ca.pem"
     assert config.tfs_repository == "repo-a"
-    assert config.review_language == "en"
     assert config.verbosity == "quick"
     assert config.review_scope == "full_code"
     assert config.max_diff_files == 12
