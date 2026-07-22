@@ -52,19 +52,6 @@ This copies two bundled templates:
 - **`config.yaml`** — all available options with inline documentation
 - **`review_prompt.md`** — default review style rules, injected into every LLM prompt
 
-```text
-✅ config.yaml created at: /home/user/my-project/config.yaml
-✅ review_prompt.md created at: /home/user/my-project/review_prompt.md
-   Edit them to add your credentials, preferences and review rules.
-```
-
-If either file already exists you will be prompted individually before it is overwritten:
-
-```text
-config.yaml already exists in the current directory.
-Overwrite? [y/N]
-```
-
 The tool looks for `config.yaml` in the **current working directory** at runtime. You can also pass a different path with `--config`:
 
 ```bash
@@ -119,23 +106,13 @@ output:
 | `diff_only` | Default. Unified diff (changed lines only) + full file content as read-only context. |
 | `full_code` | All lines of the new file version, every line prefixed with `+`. No baseline. |
 
-#### `diff_only` — diff with full-file context (default)
+#### `diff_only` — diff with context (default)
 
 ```yaml
 review:
   scope: diff_only
   scope: full_code
 ```
-
-When `diff_only` is active, the tool:
-
-1. Generates a standard unified diff (added/removed lines with 3 lines of surrounding context) for each changed file.
-2. Appends the **complete new-version file content** as a clearly-marked, read-only context block immediately after the diff for that file:
-3. Strips all context lines and deleted lines (`-`) before sending to the LLM, so only added lines (`+`) and structural headers remain in the diff section.
-4. Instructs the LLM (via the system prompt) to **use the full-file block as read-only background** and to focus the review exclusively on the `+` lines.
-
-#### `full_code` — entire new file as added lines
-Every line of the new file version is prefixed with `+` and sent without a `-` baseline. The LLM receives the complete content and is asked to review only the new code. This is more expensive and slower but may catch issues in unchanged lines that are affected by the changes.
 
 ### Filter by File Extension
 
