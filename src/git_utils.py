@@ -284,32 +284,37 @@ class GitUtils:
     # ------------------------------------------------------------------
     def filter_diff_additions_only(self, diff: str) -> str:
         """
-        Removes context lines and deleted lines (-) from the diff.
-        Keeps only added lines (+) and structural headers needed for the LLM.
+        Removes deleted lines (-) from the diff, keeping context lines and added lines.
+        Structural headers are always preserved.
 
         Lines kept:
             - ``diff --git ...``
             - ``--- a/...``
             - ``+++ b/...``
             - ``@@ ... @@``
-            - ``+ <content>``
+            - ``+ <content>`` (added lines)
+            - `` <content>`` (context lines — unchanged surrounding code)
+
+        Lines removed:
+            - ``- <content>`` (deleted lines)
+            - ``\\ No newline ...`` markers
 
         FULL_FILE_CONTEXT blocks — delimited by
         ``### FULL_FILE_CONTEXT_START: <path> ###`` and
         ``### FULL_FILE_CONTEXT_END ###`` — are preserved in their entirety.
         These blocks are appended by
         :py:meth:`TFSClient._build_unified_diff_part` and carry the complete
-        new-version file content as read-only background for the LLM.  Every
-        line between the sentinel markers is kept, regardless of whether it
-        starts with ``+``, ``-``, or a space.
+        new-version file content (with line numbers) as read-only background
+        for the LLM.  Every line between the sentinel markers is kept,
+        regardless of whether it starts with ``+``, ``-``, or a space.
 
         Args:
             diff: Raw unified diff string, possibly containing
                 FULL_FILE_CONTEXT blocks.
 
         Returns:
-            Filtered diff string with context/deleted lines stripped but
-            FULL_FILE_CONTEXT blocks intact.
+            Filtered diff string with deleted lines stripped but context lines
+            and FULL_FILE_CONTEXT blocks intact.
         """
         result = []
         in_context_block = False
@@ -331,9 +336,10 @@ class GitUtils:
                 or line.startswith("+++ ")
                 or line.startswith("@@")
                 or (line.startswith("+") and not line.startswith("+++"))
+                or line.startswith(" ")  # context lines — unchanged surrounding code
             ):
                 result.append(line)
-            # Context lines, deleted lines and '\ No newline' markers are discarded.
+            # Deleted lines (-) and '\\ No newline' markers are discarded.
         return "\n".join(result)
 
     def _split_diff_sections(self, diff: str) -> tuple[list[list[str]], bool]:

@@ -179,7 +179,7 @@ tfs:
   ca_bundle: ~/ca.pem
   repository: repo-a
 review:
-  verbosity: quick
+  verbosity: security
   scope: full_code
   max_diff_files: 12
   max_diff_lines: 456
@@ -222,7 +222,7 @@ output:
     assert config.tfs_verify_ssl is False
     assert config.tfs_ca_bundle == "~/ca.pem"
     assert config.tfs_repository == "repo-a"
-    assert config.verbosity == "quick"
+    assert config.verbosity == "security"
     assert config.review_scope == "full_code"
     assert config.max_diff_files == 12
     assert config.max_diff_lines == 456

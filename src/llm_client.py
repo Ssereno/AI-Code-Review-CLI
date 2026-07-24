@@ -27,7 +27,7 @@ class LLMError(Exception):
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
-# Maps each verbosity level ("quick", "detailed", "security") to its
+# Maps each verbosity level ("detailed", "security") to its
 # English-only system prompt.
 #
 # Type:
@@ -38,14 +38,6 @@ class LLMError(Exception):
 #     get_system_prompt: Resolves a prompt for a given verbosity, with a
 #     fallback to "detailed" when the key is not recognised.
 SYSTEM_PROMPTS = {
-    "quick": (
-        "You are an experienced Senior Code Reviewer. Analyze the provided code diff "
-        "and give a CONCISE review. Focus on critical issues:\n"
-        "- Bugs and logic errors\n"
-        "- Security issues\n"
-        "- Major performance problems\n\n"
-        "Format: Bullet points with file and line when possible. "
-    ),
     "detailed": (
         "You are an experienced Senior Code Reviewer. Analyze the provided code and return only inline comments.\n\n"
         "Output format — for each issue found, output exactly:\n"
@@ -134,7 +126,7 @@ def get_system_prompt(verbosity: str) -> str:
     When no issues are found the expected output is ``No issues found.``
 
     Args:
-        verbosity: Review depth key — one of ``"quick"``, ``"detailed"``,
+        verbosity: Review depth key — one of ``"detailed"``
             or ``"security"``. Any unrecognised value falls back to
             ``"detailed"``.
 
@@ -149,14 +141,15 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
 
     For ``diff_only`` scope, the instructions inform the LLM that:
 
-    * Only added lines (``+``) appear in the diff section.
+    * Added lines are prefixed with ``+`` and context lines (unchanged code)
+      have no prefix. Deleted lines are not included.
     * A ``### FULL_FILE_CONTEXT_START: <path> ###`` /
       ``### FULL_FILE_CONTEXT_END ###`` block is embedded in the payload for
       each changed file, containing the complete new-version (after changes)
-      file content as **read-only** background.
+      file content with **1-based line numbers** as **read-only** background.
     * The review must focus **exclusively** on the changed lines (``+``); the
-      full-file section exists only to prevent the model from hallucinating
-      about the surrounding code.
+      full-file section exists only to provide a global view and authoritative
+      line numbers for the LLM.
 
     For ``full_code`` scope, the instructions inform the LLM that the diff
     represents the entire new file content (every line prefixed with ``+``)
@@ -182,21 +175,26 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
 
     if structured:
         return (
-            "Review scope: diff_only. The diff contains only added lines (+) — context and deletions were removed. "
-            "The complete new-version file content, after the changes (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
-            "is provided for each file as read-only context. "
-            "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines (marked + in the diff). "
-            "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes. "
+            "Review scope: diff_only. The diff contains added lines (marked +) and surrounding "
+            "context lines (unchanged code, no prefix). Deleted lines were removed. "
+            "The complete new-version file content with 1-based line numbers is provided for each file "
+            "between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers as read-only background. "
+            "Use the line numbers in FULL_FILE_CONTEXT as the authoritative reference when reporting issues. "
+            "Focus your review EXCLUSIVELY on the changed lines (marked + in the diff). "
+            "Do NOT report issues in context or unchanged lines unless they directly affect the correctness of the changes. "
             "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
             "Do not emit general problem comments without file/line."
         )
 
     return (
-        "Review scope: diff_only. The diff contains only added lines (+). "
-        "The new-version (post-change) full file content (between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
-        "is provided for each file as read-only context. "
-        "Use it to understand the surrounding code, but focus your review EXCLUSIVELY on the changed lines. "
-        "Do NOT report issues in unchanged lines unless they directly affect the correctness of the changes."
+        "Review scope: diff_only. The diff contains added lines (marked +) and surrounding "
+        "context lines (unchanged code, no prefix). Deleted lines were removed. "
+        "The complete new-version file content with 1-based line numbers "
+        "(between ### FULL_FILE_CONTEXT_START and ### FULL_FILE_CONTEXT_END markers) "
+        "is provided for each file as read-only background. "
+        "Use the line numbers in FULL_FILE_CONTEXT as the authoritative reference when reporting issues. "
+        "Focus your review EXCLUSIVELY on the changed lines. "
+        "Do NOT report issues in context or unchanged lines unless they directly affect the correctness of the changes."
     )
 
 

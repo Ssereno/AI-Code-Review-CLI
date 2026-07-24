@@ -13,7 +13,6 @@ Usage:
     python ai_review.py list-prs         # List active Pull Requests
 
 Options:
-    --quick                              # Quick and concise review
     --detailed                           # Detailed review (default)
     --security                           # Security-focused review
     --review-scope <diff_only|full_code> # Review scope (default: diff_only)
@@ -216,10 +215,6 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     """Adds global options to a subparser."""
 
     group_review = parser.add_argument_group("Review Options")
-    group_review.add_argument(
-        "--quick", "-q", action="store_const", dest="verbosity",
-        const="quick", help="Quick and concise review"
-    )
     group_review.add_argument(
         "--detailed", "-d", action="store_const", dest="verbosity",
         const="detailed", help="Detailed review (default)"
@@ -834,17 +829,16 @@ def _ask_verbosity() -> str:
     """Asks for the verbosity mode."""
     c = Colors
     print(f"\n{c.BOLD}Review mode:{c.RESET}")
-    print(f"  {c.CYAN}1{c.RESET}) Quick")
-    print(f"  {c.CYAN}2{c.RESET}) Detailed")
-    print(f"  {c.CYAN}3{c.RESET}) Security")
+    print(f"  {c.CYAN}1{c.RESET}) Detailed")
+    print(f"  {c.CYAN}2{c.RESET}) Security")
 
     try:
-        mode_choice = input(f"{c.BOLD}Choose [1-3, default=2]: {c.RESET}").strip()
+        mode_choice = input(f"{c.BOLD}Choose [1-2, default=1]: {c.RESET}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\n")
         return "detailed"
 
-    verbosity_map = {"1": "quick", "2": "detailed", "3": "security"}
+    verbosity_map = {"1": "detailed", "2": "security"}
     return verbosity_map.get(mode_choice, "detailed")
 
 
