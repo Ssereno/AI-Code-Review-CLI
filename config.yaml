@@ -71,13 +71,14 @@ tfs:
 # ---------------------------------------------------------------------------
 # Review Preferences
 # ---------------------------------------------------------------------------
-  # Default verbosity: "quick", "detailed" or "security"
+review:
+  # Default verbosity: "detailed" or "security"
   verbosity: detailed
 
   # Review scope:
   #   diff_only (default): focuses only on differences introduced in the PR
   #   full_code: allows full code review of changed files
-  scope: full_code
+  scope: diff_only
 
   # Markdown file with custom rules/context for the prompt
   # The content of this file is injected into LLM instructions on each review
@@ -118,3 +119,7 @@ output:
 
   # Terminal colors
   color: true
+
+debug:
+  dump: false
+  dump_file: "logs/debug.log"

@@ -85,7 +85,7 @@ class ReviewConfig:
     tfs_repository: str = ""                # Default repository (empty = all)
 
     # --- Review -------------------------------------------------------
-    verbosity: str = "detailed"             # "quick" | "detailed" | "security"
+    verbosity: str = "detailed"             # "detailed" | "security"
     review_scope: str = "diff_only"         # "diff_only" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
@@ -302,10 +302,10 @@ class ReviewConfig:
                     "  Configure bedrock.access_key_id when secret_access_key is set."
                 )
 
-        if self.verbosity not in ("quick", "detailed", "security"):
+        if self.verbosity not in ("detailed", "security"):
             issues.append(
                 f"Invalid verbosity: '{self.verbosity}'. "
-                "Use 'quick', 'detailed' or 'security'."
+                "Use 'detailed' or 'security'."
             )
 
         if self.review_scope not in ("diff_only", "full_code"):

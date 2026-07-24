@@ -249,7 +249,7 @@ def test_filter_diff_additions_only_preserves_full_file_context_block() -> None:
         "--- a/src/app.py",
         "+++ b/src/app.py",
         "@@ -1,2 +1,2 @@",
-        " this_context_line_outside",      # context — must be stripped
+        " this_context_line_outside",      # context — must now be KEPT
         "-deleted_line_outside",            # deletion — must be stripped
         "+added_line_outside",              # addition — must be kept
         "### FULL_FILE_CONTEXT_START: /src/app.py ###",
@@ -262,8 +262,8 @@ def test_filter_diff_additions_only_preserves_full_file_context_block() -> None:
 
     filtered = instance.filter_diff_additions_only(diff)
 
-    assert "this_context_line_outside" not in filtered
-    assert "deleted_line_outside" not in filtered
+    assert "this_context_line_outside" in filtered       # context lines are now kept
+    assert "deleted_line_outside" not in filtered        # deletions are still stripped
     assert "+added_line_outside" in filtered
     assert "### FULL_FILE_CONTEXT_START: /src/app.py ###" in filtered
     assert "raw_context_inside" in filtered
@@ -297,8 +297,8 @@ def test_filter_diff_additions_only_handles_multiple_full_file_context_blocks() 
     assert "+line_b" in filtered
 
 
-def test_filter_diff_additions_only_without_context_block_strips_context_and_deletions() -> None:
-    """Without FULL_FILE_CONTEXT blocks the method must still strip context and deletion lines."""
+def test_filter_diff_additions_only_without_context_block_keeps_context_strips_deletions() -> None:
+    """Without FULL_FILE_CONTEXT blocks the method must keep context lines and strip deletion lines."""
     instance = make_git_utils()
     diff = "\n".join([
         "diff --git a/src/app.py b/src/app.py",
@@ -310,18 +310,18 @@ def test_filter_diff_additions_only_without_context_block_strips_context_and_del
     filtered = instance.filter_diff_additions_only(diff)
 
     assert "+added_line" in filtered
-    assert "context_line" not in filtered
-    assert "removed_line" not in filtered
+    assert "context_line" in filtered       # context lines are now kept
+    assert "removed_line" not in filtered   # deletions are still stripped
 
 
 def test_filter_diff_additions_only_context_block_ends_before_next_diff_section() -> None:
-    """The section after ### FULL_FILE_CONTEXT_END ### must revert to normal filtering."""
+    """The section after ### FULL_FILE_CONTEXT_END ### must revert to normal filtering (keep context, strip deletions)."""
     instance = make_git_utils()
     diff = "\n".join([
         "### FULL_FILE_CONTEXT_START: /src/a.py ###",
         "inside_block",
         "### FULL_FILE_CONTEXT_END ###",
-        " outside_context_line",   # context — must be stripped after block ends
+        " outside_context_line",   # context — must be KEPT after block ends
         "-outside_deleted",         # deletion — must be stripped after block ends
         "+outside_added",           # addition — must be kept
     ])
@@ -329,6 +329,6 @@ def test_filter_diff_additions_only_context_block_ends_before_next_diff_section(
     filtered = instance.filter_diff_additions_only(diff)
 
     assert "inside_block" in filtered
-    assert "outside_context_line" not in filtered
+    assert "outside_context_line" in filtered   # context is now kept
     assert "outside_deleted" not in filtered
     assert "+outside_added" in filtered

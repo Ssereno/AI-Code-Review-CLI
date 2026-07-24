@@ -88,7 +88,7 @@ def test_build_parser_parses_pr_review_options() -> None:
         "pr-review",
         "42",
         "--dry-run",
-        "--quick",
+        "--security",
         "--review-scope",
         "full_code",
         "--max-diff-files",
@@ -100,7 +100,7 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.command == "pr-review"
     assert args.pr_id == 42
     assert args.dry_run is True
-    assert args.verbosity == "quick"
+    assert args.verbosity == "security"
     assert args.review_scope == "full_code"
     assert args.max_diff_files == 3
     assert args.output == "review.md"
@@ -333,7 +333,7 @@ def test_select_comments_to_post_respects_individual_answers(mocker) -> None:
 
 @pytest.mark.parametrize(
     ("choice", "expected"),
-    [("1", "quick"), ("2", "detailed"), ("3", "security"), ("", "detailed"), ("99", "detailed")],
+    [("1", "detailed"), ("2", "security"), ("", "detailed"), ("99", "detailed")],
 )
 def test_ask_verbosity(choice: str, expected: str, mocker) -> None:
     """It should map menu choices to supported verbosity values."""

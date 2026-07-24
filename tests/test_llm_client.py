@@ -89,7 +89,7 @@ def make_llm_config(**changes: object) -> ReviewConfig:
 
 def test_prompt_helpers_select_expected_language_and_scope() -> None:
     """It should select prompts and scope guidance consistently."""
-    assert "code reviewer" in get_system_prompt("quick").lower()
+    assert "code reviewer" in get_system_prompt("detailed").lower()
     assert "JSON" in PR_COMMENT_PROMPT
     assert "full_code" in get_scope_guidance("full_code")
     assert "file and line" in get_scope_guidance("diff_only", structured=True).lower()
@@ -104,7 +104,7 @@ def test_get_pr_comment_prompt_function_removed() -> None:
 def test_get_system_prompt_and_get_scope_guidance_reject_language_kwarg() -> None:
     """Regression: language parameter was removed from both prompt helpers."""
     with pytest.raises(TypeError):
-        get_system_prompt("quick", language="pt")  # type: ignore[call-arg]
+        get_system_prompt("detailed", language="pt")  # type: ignore[call-arg]
 
     with pytest.raises(TypeError):
         get_scope_guidance("diff_only", structured=False, language="pt")  # type: ignore[call-arg]
@@ -115,9 +115,9 @@ def test_get_system_prompt_and_get_scope_guidance_reject_language_kwarg() -> Non
 # SYSTEM_PROMPTS / get_system_prompt — Phase 1 change validation
 # ---------------------------------------------------------------------------
 
-def test_get_system_prompt_quick_returns_non_empty_string() -> None:
-    """quick prompt must return a non-empty string."""
-    prompt = get_system_prompt("quick")
+def test_get_system_prompt_detailed_returns_non_empty_string() -> None:
+    """detailed prompt must return a non-empty string."""
+    prompt = get_system_prompt("detailed")
     assert isinstance(prompt, str)
     assert len(prompt.strip()) > 0
 

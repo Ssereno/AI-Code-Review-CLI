@@ -354,7 +354,7 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
 # ---------------------------------------------------------------------------
 
 def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None:
-    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with the new (source branch, post-change) file content."""
+    """_build_unified_diff_part must append FULL_FILE_CONTEXT markers with numbered new-version file content."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -373,6 +373,9 @@ def test_build_unified_diff_part_appends_full_file_context_block(mocker) -> None
     assert "new line two" in context_block
     assert "old line" not in context_block
     assert "### FULL_FILE_CONTEXT_END ###" in joined
+    # Lines must be prefixed with 1-based line numbers
+    assert "   1: new line one" in context_block
+    assert "   2: new line two" in context_block
     # Context block must appear after the diff headers
     assert joined.index("### FULL_FILE_CONTEXT_START") > joined.index("diff --git")
 
@@ -416,7 +419,7 @@ def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:
 
 def test_build_unified_diff_part_context_block_uses_new_file_path(mocker) -> None:
     """The FULL_FILE_CONTEXT_START marker must reference the new file path (file_path), not original_path,
-    and the block content must be the new (renamed) file's content."""
+    and the block content must be the new (renamed) file's content with 1-based line numbers."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get_file_content",
@@ -434,6 +437,7 @@ def test_build_unified_diff_part_context_block_uses_new_file_path(mocker) -> Non
     assert "### FULL_FILE_CONTEXT_START: /src/original.py ###" not in joined
     assert "new content" in context_block
     assert "old content" not in context_block
+    assert "   1: new content" in context_block
 
 
 def test_build_unified_diff_part_no_context_block_when_content_unavailable(mocker) -> None:

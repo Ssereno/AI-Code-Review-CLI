@@ -72,7 +72,7 @@ tfs:
 # Review Preferences
 # ---------------------------------------------------------------------------
 review:
-  # Default verbosity: "quick", "detailed" or "security"
+  # Default verbosity: "detailed" or "security"
   verbosity: detailed
 
   # Review scope:

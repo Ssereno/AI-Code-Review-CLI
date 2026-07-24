@@ -526,10 +526,13 @@ class TFSClient:
         # complete resulting file so it can correctly understand line numbers
         # and surrounding code for the added lines, avoiding confusion from
         # showing stale pre-change content.
+        # Lines are numbered (1-based) so the LLM can use them as the
+        # authoritative reference when reporting issue positions.
         # delete is excluded automatically because new_lines is empty for deleted files.
         if new_lines:
             result.append(f"### FULL_FILE_CONTEXT_START: {file_path} ###")
-            result.extend(new_lines)
+            for i, line in enumerate(new_lines, start=1):
+                result.append(f"{i:4d}: {line}")
             result.append("### FULL_FILE_CONTEXT_END ###")
 
         return result
