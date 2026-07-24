@@ -11,6 +11,7 @@ build/
 .eggs/
 pip-wheel-metadata/
 MANIFEST
+.agents
 
 # Virtual environments
 .venv/

@@ -71,10 +71,6 @@ tfs:
 # ---------------------------------------------------------------------------
 # Review Preferences
 # ---------------------------------------------------------------------------
-review:
-  # Language: "pt" or "en"
-  language: en
-
   # Default verbosity: "quick", "detailed" or "security"
   verbosity: detailed
 
