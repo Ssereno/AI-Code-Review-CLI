@@ -383,4 +383,106 @@ review:
         )
     )
 
-    assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
+    assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
+
+
+def test_load_overrides_yaml_with_env_vars(mocker, temp_config_file, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment variables should override values from config.yaml."""
+    path = temp_config_file(
+        """
+tfs:
+  pat: yaml-pat
+bedrock:
+  access_key_id: yaml-key-id
+  secret_access_key: yaml-secret
+llm:
+  provider: openai
+""".strip()
+    )
+    mocker.patch("src.config._find_file", return_value=path)
+    monkeypatch.setenv("TFS_PAT", "env-pat")
+    monkeypatch.setenv("BEDROCK_ACCESS_KEY_ID", "env-key-id")
+    monkeypatch.setenv("BEDROCK_SECRET_ACCESS_KEY", "env-secret")
+
+    config = ReviewConfig.load()
+
+    assert config.tfs_pat == "env-pat"
+    assert config.bedrock_access_key_id == "env-key-id"
+    assert config.bedrock_secret_access_key == "env-secret"
+
+
+def test_load_uses_env_vars_when_config_missing(mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment variables should be used when no config file exists."""
+    mocker.patch("src.config._find_file", return_value=None)
+    monkeypatch.setenv("TFS_PAT", "env-pat")
+    monkeypatch.setenv("BEDROCK_ACCESS_KEY_ID", "env-key-id")
+    monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
+
+    config = ReviewConfig.load()
+
+    assert config.tfs_pat == "env-pat"
+    assert config.bedrock_access_key_id == "env-key-id"
+    assert config.bedrock_region == "us-east-1"
+
+
+def test_load_empty_env_var_does_not_override_yaml(mocker, temp_config_file, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty environment variables must not wipe out valid YAML values."""
+    path = temp_config_file(
+        """
+tfs:
+  pat: yaml-pat
+""".strip()
+    )
+    mocker.patch("src.config._find_file", return_value=path)
+    monkeypatch.setenv("TFS_PAT", "")
+
+    config = ReviewConfig.load()
+
+    assert config.tfs_pat == "yaml-pat"
+
+def test_load_env_vars_coerce_bool_int_float_and_list(mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-string fields should be coerced from environment variables."""
+    mocker.patch("src.config._find_file", return_value=None)
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setenv("MAX_TOKENS", "8192")
+    monkeypatch.setenv("TEMPERATURE", "0.5")
+    monkeypatch.setenv("TFS_VERIFY_SSL", "false")
+    monkeypatch.setenv("COLOR_OUTPUT", "0")
+    monkeypatch.setenv("AUTO_POST_COMMENTS", "yes")
+    monkeypatch.setenv("EXCLUDED_PATHS", "migrations, node_modules, tests/fixtures")
+    monkeypatch.setenv("FILE_EXTENSIONS_FILTER", ".py,.md")
+
+    config = ReviewConfig.load()
+
+    assert config.llm_provider == "claude"
+    assert config.max_tokens == 8192
+    assert config.temperature == 0.5
+    assert config.tfs_verify_ssl is False
+    assert config.color_output is False
+    assert config.auto_post_comments is True
+    assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
+    assert config.file_extensions_filter == [".py", ".md"]
+
+
+def test_load_env_vars_invalid_numeric_is_ignored(mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid numeric/boolean env values should be ignored instead of crashing."""
+    mocker.patch("src.config._find_file", return_value=None)
+    monkeypatch.setenv("MAX_TOKENS", "not-a-number")
+    monkeypatch.setenv("TFS_VERIFY_SSL", "maybe")
+
+    config = ReviewConfig.load()
+
+    assert config.max_tokens == 4096  # default
+    assert config.tfs_verify_ssl is True  # default
+
+
+def test_load_env_vars_supports_provider_aliases(mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider keys should be loadable via their conventional env var aliases."""
+    mocker.patch("src.config._find_file", return_value=None)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-env-key")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-env-token")
+
+    config = ReviewConfig.load()
+
+    assert config.openai_api_key == "openai-env-key"
+    assert config.github_token == "github-env-token"

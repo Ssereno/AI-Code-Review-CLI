@@ -8,7 +8,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 - Structured PR comments (inline + general summary)
 - `dry-run` mode to validate without posting
 - PR listing with filters (`list-prs`)
-- Configuration exclusively via `config.yaml`
+- Configuration via `config.yaml`, environment variables, or `.env` files
 - Providers LLM: OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - Diff filtering by **excluded path prefixes** (`excluded_paths`) and/or **file extensions** (`file_extensions_filter`)
 
@@ -42,11 +42,20 @@ This copies two bundled templates:
 - **`config.yaml`** — all available options with inline documentation
 - **`review_prompt.md`** — default review style rules, injected into every LLM prompt
 
-The tool looks for `config.yaml` in the **current working directory** at runtime. You can also pass a different path with `--config`:
+The tool resolves configuration in the following order of priority:
+
+1. CLI arguments (e.g., `--config`, `--provider`)
+2. Environment variables, including values from a `.env` file in the current working directory
+3. `config.yaml` in the current working directory
+4. Built-in defaults
+
+You can pass a different config path with `--config`:
 
 ```bash
 ai-review pr-review --config ~/configs/ai-review.yaml
 ```
+
+Environment variables are named by converting each YAML setting to `UPPER_SNAKE_CASE` — for example, `TFS_PAT`, `LLM_PROVIDER`, or `OPENAI_API_KEY`. See the [Configuration Guide](docs/configuration.md) for the full mapping, type coercion rules, and `.env` examples.
 
 If you plan to run the test suite locally, also install development dependencies:
 

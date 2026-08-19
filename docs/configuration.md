@@ -1,6 +1,46 @@
 # Configuration
 
-The tool is configured through a `config.yaml`file. You can generate a template file (along with the `review_prompt.md`) by running the `ai-review init` command.
+The tool is configured through a `config.yaml` file, environment variables, or a `.env` file. You can generate a template file (along with the `review_prompt.md`) by running the `ai-review init` command.
+
+## Configuration Sources and Priority
+
+The configuration is resolved from multiple sources, in the following order of priority (highest first):
+
+1. **CLI arguments** — values passed directly on the command line.
+2. **Environment variables** — variables set in the shell session. If `python-dotenv` is installed, values from a `.env` file in the working directory are also loaded into the environment and treated the same way.
+3. **`config.yaml`** — the YAML configuration file.
+4. **Built-in defaults** — used when a value is not provided by any other source.
+
+This means a value set as an environment variable (or in `.env`) will override the same value in `config.yaml`, and a CLI argument will override both.
+
+## Environment Variables
+
+Any configuration parameter can be set via an environment variable by converting the field name to `UPPER_SNAKE_CASE`. For example:
+
+- `llm_provider` → `LLM_PROVIDER`
+- `tfs_pat` → `TFS_PAT`
+
+### Type Coercion
+
+Environment variables are strings, so the tool automatically coerces them to the expected type:
+
+| Target Type | Accepted Formats                           | Example |
+|-------------|--------------------------------------------|----------------------------------|
+| `bool`      | `true`/`1`/`yes`/`y`, `false`/`0`/`no`/`n` | `TFS_VERIFY_SSL=false`           |
+| `int`       | Valid integer string | `MAX_TOKENS=8192`   |
+| `float`     | Valid float string | `TEMPERATURE=0.5`     |
+| `list`      | Comma-separated values                     | `FILE_EXTENSIONS_FILTER=.py,.md` |
+
+### Example `.env` file
+
+```bash
+# Azure DevOps credentials
+TFS_BASE_URL=https://dev.azure.com/myorg
+TFS_PAT=my-personal-access-token
+
+# LLM provider
+LLM_PROVIDER=openai
+```
 
 ## Configuration Parameters
 

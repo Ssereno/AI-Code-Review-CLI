@@ -44,3 +44,20 @@ bedrock:
   region: us-east-1
   profile: my-sso-profile
 ```
+
+## Using Environment Variables for Secrets
+
+To avoid storing secrets in `config.yaml`, set them as environment variables or place them in a `.env` file in the working directory:
+
+```bash
+TFS_PAT=my-personal-access-token
+OPENAI_API_KEY=sk-...
+```
+
+If you use a `.env` file, add it to `.gitignore` to prevent accidental commits:
+
+```gitignore
+.env
+```
+
+Environment variables take precedence over `config.yaml`, so you can keep non-sensitive settings in `config.yaml` and override credentials at runtime.

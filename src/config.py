@@ -1,12 +1,13 @@
 """
 Configuration Module - AI Code Review
 =======================================
-Manages system configuration exclusively from config.yaml.
+Manages system configuration from config.yaml, environment variables and .env files.
 
 Configuration priority:
 1. CLI arguments (highest priority)
-2. config.yaml file
-3. Default values
+2. Environment variables or .env file
+3. config.yaml file
+4. Default values
 
 Supported LLM providers:
 - openai      (GPT-4, GPT-4-turbo, GPT-4o)
@@ -30,6 +31,12 @@ try:
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
+
+try:
+    from dotenv import load_dotenv
+    _HAS_DOTENV = True
+except ImportError:
+    _HAS_DOTENV = False
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +159,24 @@ class ReviewConfig:
     def load(cls, config_path: Optional[str] = None) -> "ReviewConfig":
         """
         Loads configuration with the following priority:
-        1. config.yaml file
-        2. Default values
+        1. CLI arguments (highest priority)
+        2. Environment variables or .env file
+        3. config.yaml file
+        4. Default values
         """
         cfg = cls()
+
+        # --- Load .env file if python-dotenv is available ---
+        if _HAS_DOTENV:
+            load_dotenv()
 
         # --- Load config.yaml if it exists ---
         yaml_path = config_path or _find_file("config.yaml")
         if yaml_path and os.path.isfile(yaml_path):
             cfg._load_yaml(yaml_path)
+
+        # --- Override with environment variables ---
+        cfg._load_env_vars()
 
         # --- Resolve effective model and API key ---
         if not cfg.model:
@@ -247,6 +263,69 @@ class ReviewConfig:
                     break
             if val is not None:
                 setattr(self, attr, val)
+
+    def _load_env_vars(self) -> None:
+        """Override configuration values from environment variables.
+
+        Any environment variable matching the uppercase version of a dataclass
+        field name is applied automatically (e.g., ``TFS_PAT`` for
+        ``tfs_pat``). Provider-specific keys also support their conventional
+        environment variable names for convenience.
+        """
+        fields = ReviewConfig.__dataclass_fields__.keys()
+
+        # Automatic mapping: snake_case field -> UPPER_SNAKE_CASE env var.
+        env_mapping = {attr: attr.upper() for attr in fields}
+
+        # Conventional aliases for provider-specific API keys and URLs.
+        aliases = {
+            "openai_api_key": "OPENAI_API_KEY",
+            "gemini_api_key": "GEMINI_API_KEY",
+            "anthropic_api_key": "ANTHROPIC_API_KEY",
+            "ollama_base_url": "OLLAMA_BASE_URL",
+            "github_token": "GITHUB_TOKEN",
+        }
+        for attr, alias in aliases.items():
+            if alias not in os.environ:
+                continue
+            env_mapping[attr] = alias
+
+        for attr, env_name in env_mapping.items():
+            value = os.environ.get(env_name)
+            if value is None or value == "":
+                continue
+            coerced = self._coerce_env_value(attr, value)
+            if coerced is not None:
+                setattr(self, attr, coerced)
+
+    def _coerce_env_value(self, attr: str, value: str):
+        """Coerce an environment variable string to the dataclass field type."""
+        field_info = ReviewConfig.__dataclass_fields__.get(attr)
+        if field_info is None:
+            return value
+
+        target_type = field_info.type
+
+        if target_type is bool:
+            normalized = value.strip().lower()
+            if normalized in ("true", "1", "yes", "y"):
+                return True
+            if normalized in ("false", "0", "no", "n"):
+                return False
+            return None
+        if target_type is int:
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if target_type is float:
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        if target_type is list:
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     def validate(self) -> list[str]:
         """Validates the configuration and returns a list of warnings/errors."""
