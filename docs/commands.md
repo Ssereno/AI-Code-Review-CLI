@@ -1,7 +1,7 @@
 # Supported Commands and Options
 
 ```bash
-ai-review pr-review pr-review [pr_id]
+ai-review pr-review [pr_id]
 ```
 
 Options:
@@ -50,43 +50,43 @@ ai-review pr-review
 List PRs and select interactively:
 
 ```bash
-ai-review pr-review pr-review
+ai-review pr-review
 ```
 
 Review a specific PR:
 
 ```bash
-ai-review pr-review pr-review 42
+ai-review pr-review 42
 ```
 
 Dry-run:
 
 ```bash
-ai-review pr-review pr-review 42 --dry-run
+ai-review pr-review 42 --dry-run
 ```
 
 Full review of changed files (in addition to diff-focused review):
 
 ```bash
-ai-review pr-review pr-review 42 --review-scope full_code
+ai-review pr-review 42 --review-scope full_code
 ```
 
 Automatic posting (without confirmation):
 
 ```bash
-ai-review pr-review pr-review 42 --auto-post
+ai-review pr-review 42 --auto-post
 ```
 
 Filter PRs in interactive selection:
 
 ```bash
-ai-review pr-review pr-review --author "John Smith" --target-branch main
+ai-review pr-review --author "John Smith" --target-branch main
 ```
 
 Choose provider/model via CLI:
 
 ```bash
-ai-review pr-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
+ai-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
 ```
 
 ### List Pull Requests

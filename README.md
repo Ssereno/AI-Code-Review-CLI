@@ -11,7 +11,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 - Configuration exclusively via `config.yaml`
 - Providers LLM: OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - Diff filtering by **excluded path prefixes** (`excluded_paths`) and/or **file extensions** (`file_extensions_filter`)
-- Prompt token estimation with LiteLLM (`Total Prompt`)
+- Prompt token consumption estimation with LiteLLM (`Total Tokens`)
 
 ## Documentation
 
@@ -24,12 +24,6 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 
 ![Review Output Format Example](/imgs/review_output.png)
 
-During a PR review, the terminal also displays `Total Prompt`, an estimate of
-the input tokens in the complete payload sent to the configured provider. The
-provider comes from `llm.provider` and the model comes from `llm.model` or its
-default one. If LiteLLM cannot resolve the provider/model combination,
-the tool tries the model without a provider prefix and then uses local
-`tiktoken` as a final fallback.
 
 ## Installation
 
@@ -113,5 +107,5 @@ output:
 - `AI Review: List Active PRs`
 - `AI Review: Interactive Mode`
 
-## Licence
+## License
 This project is licensed under the Apache Licence 2.0 — see the [LICENSE](/License).
