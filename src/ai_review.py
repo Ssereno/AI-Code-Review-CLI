@@ -516,6 +516,16 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     elapsed = time.time() - start_time
     progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
 
+    token_estimate = getattr(llm, "last_token_estimate", None)
+    if token_estimate is not None and token_estimate.total_prompt_tokens is not None:
+        print(formatter.format_info(
+            f"Total Prompt: {token_estimate.total_prompt_tokens} tokens"
+        ))
+    else:
+        print(formatter.format_warning(
+            "Total Prompt: unavailable (LiteLLM and local tiktoken could not count the model)"
+        ))
+
     # --- Show structured comments preview ---
     print(formatter.format_structured_comments(
         structured_comments,
