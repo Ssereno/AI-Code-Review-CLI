@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """
 AI Code Review - Main Script
 ==============================

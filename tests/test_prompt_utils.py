@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """
 Tests for prompt_utils.py - language/extension based filtering of the custom review prompt.
 """

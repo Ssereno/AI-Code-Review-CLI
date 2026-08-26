@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """Tests for the AI review CLI workflow."""
 
 from __future__ import annotations

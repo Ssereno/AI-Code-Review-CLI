@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 from __future__ import annotations
 from dataclasses import dataclass
 

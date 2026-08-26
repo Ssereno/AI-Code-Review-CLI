@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 # AI Code Review - Internal modules
 from importlib.metadata import version, PackageNotFoundError
 
