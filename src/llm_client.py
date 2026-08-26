@@ -18,6 +18,7 @@ import os
 
 from .config import ReviewConfig
 from .prompt_utils import detect_langs, filter_prompt_by_langs
+from .token_estimator import TokenEstimate, TokenEstimator
 
 
 class LLMError(Exception):
@@ -317,6 +318,11 @@ class LLMClient:
 
     def __init__(self, config: ReviewConfig):
         self.config = config
+        self.last_token_estimate = TokenEstimate(
+            total_prompt_tokens=None,
+            model=config.get_effective_model(),
+            error="No review has been performed yet.",
+        )
 
     def _dump_prompt_debug(self, system_prompt: str, user_message: str) -> None:
         """
@@ -419,6 +425,15 @@ class LLMClient:
 
         user_message = build_user_message(diff, files_summary, merged_context)
         self._dump_prompt_debug(system_prompt, user_message)
+
+        self.last_token_estimate = TokenEstimator().estimate(
+            provider=self.config.llm_provider,
+            model=self.config.get_effective_model(),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
 
         provider = self.config.llm_provider.lower()
 
