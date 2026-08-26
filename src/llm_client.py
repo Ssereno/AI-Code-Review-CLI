@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """
 LLM Client Module - AI Code Review
 =====================================

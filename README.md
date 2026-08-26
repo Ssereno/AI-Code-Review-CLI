@@ -112,3 +112,6 @@ output:
 - `AI Review: PR (Dry-Run)`
 - `AI Review: List Active PRs`
 - `AI Review: Interactive Mode`
+
+## Licence
+This project is licensed under the Apache Licence 2.0 — see the [LICENSE](/License).

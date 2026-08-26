@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """Shared pytest fixtures for AI review tests."""
 
 from __future__ import annotations

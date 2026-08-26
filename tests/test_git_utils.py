@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """Tests for the Git utilities module."""
 
 from __future__ import annotations
@@ -153,4 +156,4 @@ def test_filter_diff_additions_only_without_context_block_keeps_context_strips_d
     assert "+added_line" in filtered
     assert "context_line" in filtered       # context lines are kept
     assert "removed_line" not in filtered   # deletions are stripped
-
+

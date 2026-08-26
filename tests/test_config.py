@@ -1,3 +1,6 @@
+# License: Apache-2.0
+# Copyright 2026 Sérgio Sereno
+
 """Tests for the configuration module."""
 
 from __future__ import annotations
@@ -383,4 +386,4 @@ review:
         )
     )
 
-    assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
+    assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
