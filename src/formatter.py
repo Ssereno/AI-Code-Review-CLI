@@ -297,7 +297,8 @@ class ReviewFormatter:
         lines = [f"\n{c.BOLD}📤 Comment posting results:{c.RESET}\n"]
 
         success_count = sum(1 for r in results if r.get("success"))
-        fail_count = len(results) - success_count
+        skipped_count = sum(1 for r in results if r.get("skipped"))
+        fail_count = len(results) - success_count - skipped_count
 
         for r in results:
             if r.get("success"):
@@ -322,6 +323,7 @@ class ReviewFormatter:
         lines.append(
             f"\n  {c.BOLD}Total: "
             f"{c.GREEN}{success_count} posted{c.RESET}, "
+            f"{c.YELLOW}{skipped_count} skipped{c.RESET}, "
             f"{c.RED}{fail_count} failed{c.RESET}"
         )
         return "\n".join(lines)

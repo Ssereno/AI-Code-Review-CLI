@@ -693,6 +693,7 @@ def test_post_inline_comment_requires_iterations(mocker) -> None:
 def test_post_review_comments_formats_and_routes_comments(mocker) -> None:
     """It should route inline and general comments and collect failures."""
     client = TFSClient(make_tfs_config())
+    mocker.patch("src.tfs_client.TFSClient.list_pr_threads", return_value=[])
     formatter = mocker.patch("src.tfs_client.TFSClient._format_review_comment", side_effect=lambda comment: f"TEXT:{comment['comment']}")
     inline = mocker.patch("src.tfs_client.TFSClient.post_inline_comment", return_value={"id": 1})
     general = mocker.patch("src.tfs_client.TFSClient.post_general_comment", side_effect=[{"id": 2}, TFSError("boom")])
@@ -713,6 +714,116 @@ def test_post_review_comments_formats_and_routes_comments(mocker) -> None:
     assert results[0]["success"] is True
     assert results[1]["success"] is True
     assert results[2]["success"] is False
+
+
+def test_list_pr_threads_returns_value_list(mocker) -> None:
+    """It should GET the PR threads endpoint and return the value list."""
+    client = TFSClient(make_tfs_config())
+    get_mock = mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        return_value={"value": [{"id": 1}, {"id": 2}]},
+    )
+
+    threads = client.list_pr_threads("repo-a", 7)
+
+    assert threads == [{"id": 1}, {"id": 2}]
+    path = get_mock.call_args.args[0]
+    assert path == "git/repositories/repo-a/pullrequests/7/threads"
+
+
+def test_comment_marker_is_stable_and_content_sensitive() -> None:
+    """It should produce a stable marker per location, ignoring comment text."""
+    client = TFSClient(make_tfs_config())
+    base = {"file": "src/app.py", "line": 3, "type": "bug", "comment": "x"}
+
+    assert client._comment_marker(base) == client._comment_marker(dict(base))
+    # Comment text is not part of the fingerprint.
+    assert client._comment_marker(base) == client._comment_marker(
+        {**base, "comment": "y"}
+    )
+    assert client._comment_marker(base) != client._comment_marker(
+        {**base, "line": 4}
+    )
+    assert client._comment_marker(base) != client._comment_marker(
+        {**base, "type": "security"}
+    )
+
+
+def test_extract_existing_markers_reads_all_threads() -> None:
+    """It should extract every fingerprint present in thread comments."""
+    client = TFSClient(make_tfs_config())
+    threads = [
+        {"comments": [{"content": "hi <!-- ai-review:abc123 -->"}]},
+        {"comments": [
+            {"content": "no marker here"},
+            {"content": "<!-- ai-review:summary -->"},
+        ]},
+    ]
+
+    assert client._extract_existing_markers(threads) == {"abc123", "summary"}
+
+
+def test_post_review_comments_skips_existing_and_dedupes_batch(mocker) -> None:
+    """It should skip already posted markers and dedupe within one batch."""
+    client = TFSClient(make_tfs_config())
+    duplicate = {"file": "src/app.py", "line": 3, "type": "bug", "comment": "dup"}
+    existing_marker = client._comment_marker(duplicate)
+    mocker.patch(
+        "src.tfs_client.TFSClient.list_pr_threads",
+        return_value=[{"comments": [
+            {"content": client._marker_html(existing_marker)}
+        ]}],
+    )
+    inline = mocker.patch(
+        "src.tfs_client.TFSClient.post_inline_comment", return_value={"id": 9}
+    )
+
+    new_comment = {"file": "src/app.py", "line": 5, "type": "bug", "comment": "new"}
+    results = client.post_review_comments(
+        "repo-a",
+        1,
+        [duplicate, new_comment, dict(new_comment)],
+    )
+
+    # First is skipped (already exists), second posted, third skipped (batch dedup).
+    assert results[0]["skipped"] is True
+    assert results[1]["success"] is True
+    assert results[2]["skipped"] is True
+    inline.assert_called_once()
+    posted_text = inline.call_args.args[4]
+    assert client._marker_html(client._comment_marker(new_comment)) in posted_text
+
+
+def test_post_general_comment_dedup_marker_skips_when_present(mocker) -> None:
+    """It should skip general comments whose dedup marker already exists."""
+    client = TFSClient(make_tfs_config())
+    post_mock = mocker.patch("src.tfs_client.TFSClient._post", return_value={"id": 5})
+    mocker.patch(
+        "src.tfs_client.TFSClient.list_pr_threads",
+        return_value=[{"comments": [{"content": "<!-- ai-review:summary -->"}]}],
+    )
+
+    result = client.post_general_comment(
+        "repo-a", 1, "summary body", dedup_marker="summary"
+    )
+
+    assert result["skipped"] is True
+    post_mock.assert_not_called()
+
+
+def test_post_general_comment_dedup_marker_posts_when_absent(mocker) -> None:
+    """It should append the marker and post when it is not already present."""
+    client = TFSClient(make_tfs_config())
+    post_mock = mocker.patch("src.tfs_client.TFSClient._post", return_value={"id": 5})
+    mocker.patch("src.tfs_client.TFSClient.list_pr_threads", return_value=[])
+
+    result = client.post_general_comment(
+        "repo-a", 1, "summary body", dedup_marker="summary"
+    )
+
+    assert result == {"id": 5}
+    _, payload = post_mock.call_args.args[:2]
+    assert "<!-- ai-review:summary -->" in payload["comments"][0]["content"]
 
 
 def test_repository_helpers_and_status_formatting(mocker) -> None:

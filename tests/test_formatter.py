@@ -201,7 +201,8 @@ def test_format_post_results_summarizes_statuses() -> None:
     assert "Skipped at c.py" in rendered
     assert "Failed at b.py" in rendered
     assert "1 posted" in rendered
-    assert "2 failed" in rendered
+    assert "1 skipped" in rendered
+    assert "1 failed" in rendered
 
 
 def test_spinner_frame_rotates_frames() -> None:

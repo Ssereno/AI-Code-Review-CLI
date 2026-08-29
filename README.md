@@ -12,6 +12,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 - Providers LLM: OpenAI, Azure OpenAI, Gemini, Claude, Ollama, GitHub Copilot, AWS Bedrock
 - Diff filtering by **excluded path prefixes** (`excluded_paths`) and/or **file extensions** (`file_extensions_filter`)
 - Prompt token consumption estimation with LiteLLM (`Total Tokens`)
+- Validation to ensure comments are not duplicated in re-runs (CI/CD Pipelines)
 
 ## Documentation
 
