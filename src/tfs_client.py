@@ -18,7 +18,9 @@ Works with both on-premises TFS and Azure DevOps Services.
 
 import base64
 import difflib
+import hashlib
 import os
+import re
 from typing import Optional
 
 from .config import ReviewConfig
@@ -34,6 +36,12 @@ class TFSClient:
     """Client for Azure DevOps / TFS REST API."""
 
     API_VERSION = "7.0"
+
+    # Hidden fingerprint marker embedded in AI-generated comments to detect
+    # and skip duplicates on pipeline re-runs. Rendered as an HTML comment,
+    # which Azure DevOps does not display in the PR UI.
+    MARKER_PREFIX = "ai-review:"
+    _MARKER_RE = re.compile(r"<!--\s*ai-review:([0-9a-zA-Z_]+)\s*-->")
 
     def __init__(self, config: ReviewConfig):
         self.config = config
@@ -617,20 +625,36 @@ class TFSClient:
     # Pull Requests - Comments
     # ==================================================================
     def post_general_comment(self, repository: str, pr_id: int,
-                             comment: str, status: str = "active") -> dict:
+                             comment: str, status: str = "active",
+                             dedup_marker: Optional[str] = None) -> dict:
         """
         Posts a general comment on a Pull Request (not associated with a file).
-        
+
         Args:
             repository: Repository name.
             pr_id: Pull Request ID.
             comment: Comment text (supports Markdown).
             status: Thread status - "active", "fixed", "wontFix",
                     "closed", "pending", "byDesign"
-            
+            dedup_marker: Optional stable identifier. When provided, a hidden
+                          fingerprint is appended to the comment and existing PR
+                          threads are checked first; if the same marker already
+                          exists, the comment is skipped instead of duplicated.
+
         Returns:
-            Created thread data.
+            Created thread data, or a ``{"skipped": True, ...}`` dict when the
+            comment was skipped due to an already existing marker.
         """
+        marker: Optional[str] = None
+        if dedup_marker is not None:
+            marker = self._general_marker(dedup_marker)
+            existing = self._extract_existing_markers(
+                self.list_pr_threads(repository, pr_id)
+            )
+            if marker in existing:
+                return {"skipped": True, "marker": marker}
+            comment = f"{comment}\n\n{self._marker_html(marker)}"
+
         path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
         data = {
             "comments": [
@@ -729,12 +753,28 @@ class TFSClient:
         comment_mode = (comment_mode or "structured").lower()
         use_inline_comments = comment_mode == "structured"
 
-        for c in comments:
-            # Build formatted comment text
-            text = self._format_review_comment(c)
+        # Load existing markers once to skip comments already posted in a
+        # previous run (deduplication is always active).
+        existing_markers = self._extract_existing_markers(
+            self.list_pr_threads(repository, pr_id)
+        )
 
+        for c in comments:
             file_path = c.get("file", "")
             line = c.get("line", 0)
+
+            marker = self._comment_marker(c)
+            if marker in existing_markers:
+                results.append({
+                    "skipped": True,
+                    "file": file_path,
+                    "line": line,
+                    "error": "duplicate (already posted)",
+                })
+                continue
+
+            # Build formatted comment text with the hidden fingerprint appended.
+            text = f"{self._format_review_comment(c)}\n\n{self._marker_html(marker)}"
 
             try:
                 if use_inline_comments and file_path and line > 0:
@@ -747,6 +787,8 @@ class TFSClient:
                     result = self.post_general_comment(
                         repository, pr_id, text
                     )
+                # Record the marker to avoid duplicates within the same batch.
+                existing_markers.add(marker)
                 results.append({
                     "success": True,
                     "file": file_path,
@@ -792,6 +834,86 @@ class TFSClient:
             parts.append(f"**Reference:** {reference}")
 
         return "\n".join(parts)
+
+    # ==================================================================
+    # Deduplication - hidden fingerprint markers
+    # ==================================================================
+    def list_pr_threads(self, repository: str, pr_id: int) -> list[dict]:
+        """
+        Lists all comment threads of a Pull Request.
+
+        Args:
+            repository: Repository name.
+            pr_id: Pull Request ID.
+
+        Returns:
+            List of thread dictionaries (empty list when none exist).
+        """
+        path = f"git/repositories/{repository}/pullrequests/{pr_id}/threads"
+        response = self._get(path)
+        return response.get("value", [])
+
+    def _comment_marker(self, comment: dict) -> str:
+        """
+        Builds a stable fingerprint for a structured review comment.
+
+        The hash is derived from the file, line and type so the same finding
+        location produces the same marker across runs, regardless of small
+        wording changes in the comment text.
+
+        Args:
+            comment: Structured comment with ``file``, ``line`` and ``type`` keys.
+
+        Returns:
+            Hexadecimal SHA-256 digest string.
+        """
+        payload = "|".join([
+            str(comment.get("file", "")),
+            str(comment.get("line", "")),
+            str(comment.get("type", "")),
+        ])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _general_marker(self, identifier: str) -> str:
+        """
+        Builds a stable marker for a general comment from a fixed identifier.
+
+        Args:
+            identifier: Stable identifier (e.g. ``"summary"``).
+
+        Returns:
+            Sanitized marker string usable inside the HTML comment.
+        """
+        return re.sub(r"[^0-9a-zA-Z_]", "_", identifier)
+
+    def _marker_html(self, marker: str) -> str:
+        """
+        Wraps a marker into a hidden HTML comment.
+
+        Args:
+            marker: Fingerprint value.
+
+        Returns:
+            HTML comment string invisible in the rendered PR.
+        """
+        return f"<!-- {self.MARKER_PREFIX}{marker} -->"
+
+    def _extract_existing_markers(self, threads: list[dict]) -> set[str]:
+        """
+        Extracts all fingerprint markers present in existing PR threads.
+
+        Args:
+            threads: Threads as returned by :meth:`list_pr_threads`.
+
+        Returns:
+            Set of marker values found across every comment.
+        """
+        markers: set[str] = set()
+        for thread in threads:
+            for comment in thread.get("comments", []) or []:
+                content = comment.get("content", "") or ""
+                markers.update(self._MARKER_RE.findall(content))
+        return markers
 
     def _status_to_int(self, status: str) -> int:
         """Converts status string to API integer."""
