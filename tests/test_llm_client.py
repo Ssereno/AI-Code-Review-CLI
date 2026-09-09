@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -606,7 +607,10 @@ def test_bedrock_boto3_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) 
     class FakeBedrockClient:
         """Stub Bedrock runtime client."""
 
+        last_converse_kwargs: dict[str, object] = {}
+
         def converse(self, **kwargs: object) -> dict:
+            FakeBedrockClient.last_converse_kwargs = kwargs
             return {"output": {"message": {"content": [{"text": "bedrock ok"}]}}}
 
     class FakeSession:
@@ -637,6 +641,12 @@ def test_bedrock_boto3_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) 
     )
     assert client._call_bedrock("sys", "user") == "bedrock ok"
     assert client._call_bedrock_boto3("us-east-1", "sys", "user") == "bedrock ok"
+
+    client.config.temperature = 99
+    assert client._call_bedrock_boto3("us-east-1", "sys", "user") == "bedrock ok"
+    assert FakeBedrockClient.last_converse_kwargs["inferenceConfig"] == {
+        "maxTokens": 256,
+    }
 
     class BrokenSession(FakeSession):
         """Session that raises provider-side failures."""
@@ -689,8 +699,8 @@ def test_call_bedrock_routing_dispatches_correct_method(mocker) -> None:
 
 
 def test_call_bedrock_bearer_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_call_bedrock_bearer should use Bearer auth, URL-encode the model ARN and parse content."""
-    model_arn = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet"
+    """_call_bedrock_bearer should use the provider-agnostic Converse API."""
+    model_arn = "arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-oss-120b-1:0"
     client = LLMClient(
         make_llm_config(
             llm_provider="bedrock",
@@ -703,15 +713,31 @@ def test_call_bedrock_bearer_success_and_errors(monkeypatch: pytest.MonkeyPatch)
     )
 
     # Success path: response parsed correctly, model ARN URL-encoded in URL
-    success_resp = FakeResponse(json_data={"content": [{"type": "text", "text": "bearer ok"}]})
+    success_resp = FakeResponse(
+        json_data={"output": {"message": {"content": [{"text": "bearer ok"}]}}}
+    )
     req_module = install_requests_raw(monkeypatch, success_resp)
     result = client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
     assert result == "bearer ok"
     call = req_module._calls[0]
     assert "arn%3Aaws%3Abedrock" in call["url"]  # ':' encoded as %3A
-    assert "anthropic.claude-3-sonnet" in call["url"]
+    assert "openai.gpt-oss-120b-1%3A0" in call["url"]
+    assert call["url"].endswith("/converse")
     assert call["headers"]["Authorization"] == "Bearer my-bearer-key"
     assert call["headers"]["Content-Type"] == "application/json"
+    payload = json.loads(call["data"])
+    assert "anthropic_version" not in payload
+    assert payload == {
+        "system": [{"text": "sys"}],
+        "messages": [{"role": "user", "content": [{"text": "user"}]}],
+        "inferenceConfig": {"temperature": 0.2, "maxTokens": 256},
+    }
+
+    client.config.temperature = 99
+    req_module = install_requests_raw(monkeypatch, success_resp)
+    assert client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user") == "bearer ok"
+    sentinel_payload = json.loads(req_module._calls[0]["data"])
+    assert sentinel_payload["inferenceConfig"] == {"maxTokens": 256}
 
     # 401 → specific authentication error message
     install_requests_raw(monkeypatch, FakeResponse(status_code=401))
@@ -724,12 +750,12 @@ def test_call_bedrock_bearer_success_and_errors(monkeypatch: pytest.MonkeyPatch)
         client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
 
     # Empty content list → Unexpected response error
-    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": []}))
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"output": {"message": {"content": []}}}))
     with pytest.raises(LLMError, match="Unexpected Bedrock response"):
         client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
 
     # Content items with no text type → Unexpected response error
-    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": [{"type": "image", "data": "..."}]}))
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"output": {"message": {"content": [{"image": {}}]}}}))
     with pytest.raises(LLMError, match="Unexpected Bedrock response"):
         client._call_bedrock_bearer("us-east-1", "my-bearer-key", "sys", "user")
 
@@ -741,18 +767,20 @@ def test_call_bedrock_bearer_success_and_errors(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_call_bedrock_sigv4 should add SigV4 headers and parse content correctly."""
+    """_call_bedrock_sigv4 should use Converse with correctly signed requests."""
     client = LLMClient(
         make_llm_config(
             llm_provider="bedrock",
             api_key="",
-            model="anthropic.claude-3-sonnet",
+            model="openai.gpt-oss-120b-1:0",
             bedrock_region="us-east-1",
             bedrock_access_key_id="AKID",
             bedrock_secret_access_key="secret",
         )
     )
-    success_resp = FakeResponse(json_data={"content": [{"type": "text", "text": "sigv4 ok"}]})
+    success_resp = FakeResponse(
+        json_data={"output": {"message": {"content": [{"text": "sigv4 ok"}]}}}
+    )
 
     # Success path: SigV4 headers present in request
     req_module = install_requests_raw(monkeypatch, success_resp)
@@ -763,6 +791,16 @@ def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) 
     assert "x-amz-date" in call["headers"]
     assert "x-amz-content-sha256" in call["headers"]
     assert "x-amz-security-token" not in call["headers"]
+    assert call["url"].endswith("/converse")
+    payload = json.loads(call["data"])
+    assert "anthropic_version" not in payload
+    assert payload["inferenceConfig"] == {"temperature": 0.2, "maxTokens": 256}
+
+    client.config.temperature = 99
+    req_module = install_requests_raw(monkeypatch, success_resp)
+    assert client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user") == "sigv4 ok"
+    sentinel_payload = json.loads(req_module._calls[0]["data"])
+    assert sentinel_payload["inferenceConfig"] == {"maxTokens": 256}
 
     # Session token is forwarded as x-amz-security-token
     req_module = install_requests_raw(monkeypatch, success_resp)
@@ -782,7 +820,7 @@ def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) 
         client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
 
     # Empty content → Unexpected response error
-    install_requests_raw(monkeypatch, FakeResponse(json_data={"content": []}))
+    install_requests_raw(monkeypatch, FakeResponse(json_data={"output": {"message": {"content": []}}}))
     with pytest.raises(LLMError, match="Unexpected Bedrock response"):
         client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
 

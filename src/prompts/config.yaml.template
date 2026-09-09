@@ -26,7 +26,7 @@ llm:
   # Maximum tokens in response
   max_tokens: 4096
 
-  # Temperature (0.0 = deterministic, 1.0 = creative)
+  # Temperature (0.0 = deterministic, 1.0 = creative, 99 omits it for all models that dont support this)
   temperature: 0.0
 
 # ---------------------------------------------------------------------------

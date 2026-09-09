@@ -13,7 +13,7 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 | `provider` | Provider to use (openai, gemini, claude, ollama, azure_openai, copilot, bedrock) | `openai` |
 | `model` | Model to use. Leave empty to use the provider's default. | `""` |
 | `max_tokens` | Maximum limit of tokens in the response. | `4096` |
-| `temperature` | Response temperature (0.0 = deterministic, 1.0 = creative). | `0.0` |
+| `temperature` | Response temperature (0.0 = deterministic, 1.0 = creative, 99 omits it for all models that dont support this). | `0.0` |
 
 ### Provider
 
