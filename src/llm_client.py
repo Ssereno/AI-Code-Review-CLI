@@ -591,8 +591,9 @@ class LLMClient:
                 {"role": "user", "content": user_message},
             ],
             "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
         }
+        if self.config.temperature != 99:
+            payload["temperature"] = self.config.temperature
 
         return self._http_openai_compatible(url, headers, payload)
 
@@ -637,10 +638,11 @@ class LLMClient:
                 "parts": [{"text": system_prompt}]
             },
             "generationConfig": {
-                "temperature": self.config.temperature,
                 "maxOutputTokens": self.config.max_tokens,
             },
         }
+        if self.config.temperature != 99:
+            payload["generationConfig"]["temperature"] = self.config.temperature
 
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=180)
@@ -715,12 +717,13 @@ class LLMClient:
         payload = {
             "model": model,
             "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
             "system": system_prompt,
             "messages": [
                 {"role": "user", "content": user_message},
             ],
         }
+        if self.config.temperature != 99:
+            payload["temperature"] = self.config.temperature
 
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=180)
@@ -793,9 +796,10 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            "temperature": self.config.temperature,
             "stream": False,
         }
+        if self.config.temperature != 99:
+            payload["temperature"] = self.config.temperature
 
         # Ollama does not require an API key, but we add max_tokens if configured
         if self.config.max_tokens:
@@ -912,8 +916,9 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            "temperature": self.config.temperature,
         }
+        if self.config.temperature != 99:
+            payload["temperature"] = self.config.temperature
 
         # Add max_tokens if configured (some Copilot models
         # may not support this parameter)
@@ -1028,7 +1033,7 @@ class LLMClient:
         system_prompt: str,
         user_message: str,
     ) -> str:
-        """Calls Bedrock InvokeModel using an HTTP Bearer token (long-term API key).
+        """Calls Bedrock Converse using an HTTP Bearer token (long-term API key).
 
         Args:
             region: AWS region, e.g. ``us-east-1``.
@@ -1051,14 +1056,19 @@ class LLMClient:
 
         # The model ARN contains ':' and '/' that must be URL-encoded in the path
         model_encoded = urllib.parse.quote(self.config.model, safe="")
-        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_encoded}/invoke"
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_encoded}/converse"
+
+        inference_config = {"maxTokens": self.config.max_tokens}
+        if self.config.temperature != 99:
+            inference_config["temperature"] = self.config.temperature
 
         payload = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}],
+            "system": [{"text": system_prompt}],
+            "messages": [{
+                "role": "user",
+                "content": [{"text": user_message}],
+            }],
+            "inferenceConfig": inference_config,
         }, separators=(",", ":"))
 
         headers = {
@@ -1084,10 +1094,9 @@ class LLMClient:
         except ValueError as exc:
             raise LLMError(f"Invalid JSON from Bedrock: {resp.text[:500]}") from exc
 
-        content = data.get("content", [])
+        content = data.get("output", {}).get("message", {}).get("content", [])
         text_parts = [
-            item["text"] for item in content
-            if item.get("type") == "text" and "text" in item
+            item["text"] for item in content if "text" in item
         ]
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
@@ -1103,7 +1112,7 @@ class LLMClient:
         system_prompt: str,
         user_message: str,
     ) -> str:
-        """Calls Bedrock InvokeModel with manual AWS SigV4 HMAC-SHA256 signing.
+        """Calls Bedrock Converse with manual AWS SigV4 HMAC-SHA256 signing.
 
         Equivalent to the C# BedrockLlmClient implementation.
 
@@ -1135,15 +1144,20 @@ class LLMClient:
 
         host = f"bedrock-runtime.{region}.amazonaws.com"
         model_encoded = urllib.parse.quote(self.config.model, safe="")
-        endpoint = f"https://{host}/model/{model_encoded}/invoke"
+        endpoint = f"https://{host}/model/{model_encoded}/converse"
         service = "bedrock"
 
+        inference_config = {"maxTokens": self.config.max_tokens}
+        if self.config.temperature != 99:
+            inference_config["temperature"] = self.config.temperature
+
         payload = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}],
+            "system": [{"text": system_prompt}],
+            "messages": [{
+                "role": "user",
+                "content": [{"text": user_message}],
+            }],
+            "inferenceConfig": inference_config,
         }, separators=(",", ":"))
 
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -1157,7 +1171,7 @@ class LLMClient:
         # Splitting by '/' and encoding each segment mirrors the C# SigV4 implementation.
         canonical_uri = "/".join(
             urllib.parse.quote(seg, safe="")
-            for seg in f"/model/{self.config.model}/invoke".split("/")
+            for seg in f"/model/{self.config.model}/converse".split("/")
         )
 
         headers_to_sign = {
@@ -1227,10 +1241,9 @@ class LLMClient:
         except ValueError as exc:
             raise LLMError(f"Invalid JSON from Bedrock: {resp.text[:500]}") from exc
 
-        content = data.get("content", [])
+        content = data.get("output", {}).get("message", {}).get("content", [])
         text_parts = [
-            item["text"] for item in content
-            if item.get("type") == "text" and "text" in item
+            item["text"] for item in content if "text" in item
         ]
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
@@ -1277,6 +1290,10 @@ class LLMClient:
             session = boto3.Session(**session_kwargs)
             client = session.client("bedrock-runtime", region_name=region)
 
+            inference_config = {"maxTokens": self.config.max_tokens}
+            if self.config.temperature != 99:
+                inference_config["temperature"] = self.config.temperature
+
             response = client.converse(
                 modelId=self.config.model,
                 system=[{"text": system_prompt}],
@@ -1286,10 +1303,7 @@ class LLMClient:
                         "content": [{"text": user_message}],
                     }
                 ],
-                inferenceConfig={
-                    "temperature": self.config.temperature,
-                    "maxTokens": self.config.max_tokens,
-                },
+                inferenceConfig=inference_config,
             )
 
             content = (
