@@ -324,8 +324,7 @@ class TFSClient:
         For ``diff_only`` scope (default), builds a standard unified diff for
         each changed file and appends an XML context block produced by
         :class:`~src.context_extractor.ContextExtractor` (one of
-        ``<enclosing_scopes>``, ``<file_skeleton>``, ``<sql_statement>``, or
-        ``<adaptive_diff>``).  The block is preserved verbatim by
+        ``<enclosing_scopes>`` or ``<adaptive_diff>``). The block is preserved verbatim by
         :py:meth:`GitUtils.filter_diff_additions_only` so the LLM receives
         structured scope context without consuming the entire file.
 
@@ -500,18 +499,15 @@ class TFSClient:
 
         Fetches the old version from the target branch and the new version
         from the source branch, then generates a standard unified diff with
-        3 lines of context using :py:mod:`difflib`.
+        5 lines of context using :py:mod:`difflib`.
 
         After the diff lines an XML context block is appended, produced by
         :class:`~src.context_extractor.ContextExtractor`:
 
-        * ``<enclosing_scopes>`` — the function(s)/method(s) enclosing
-          the changed lines (Scenario A: ≤ max_scope_blocks distinct blocks)
-        * ``<file_skeleton>`` — structural outline of the whole file
-          (Scenario B: > max_scope_blocks blocks, or scope exceeds max_scope_lines)
-        * ``<sql_statement>`` — the full SQL statement for SQL files
-        * ``<adaptive_diff>`` — surrounding context lines when AST parsing
-          is unavailable or the language is unsupported
+        * ``<enclosing_scopes>`` — the AST scope(s) enclosing the changed
+          lines when they fit the configured block and line limits
+        * ``<adaptive_diff>`` — surrounding context lines when AST extraction
+          is unavailable, unsupported, fails, or exceeds those limits
 
         The XML block is preserved verbatim by
         :py:meth:`GitUtils.filter_diff_additions_only`.
@@ -565,7 +561,7 @@ class TFSClient:
             fromfile=f"a{original_path}",
             tofile=f"b{file_path}",
             lineterm="",
-            n=3,
+            n=5,
         ))
 
         if not diff:
@@ -581,8 +577,8 @@ class TFSClient:
         raw_diff = list(diff)
         result = [f"diff --git a{original_path} b{file_path}"] + raw_diff
 
-        # Build the AST-based context block (Enclosing Scopes / File Skeleton /
-        # Adaptive Diff fallback) and append it after the diff section.
+        # Build the AST-based context block (Enclosing Scopes or Adaptive Diff
+        # fallback) and append it after the diff section.
         if new_lines:
             new_content = "\n".join(new_lines)
             file_diff_text = "\n".join(result)

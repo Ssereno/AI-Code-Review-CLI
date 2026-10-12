@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-review-ai-cli"
-version = "2.2.5"
+version = "2.2.6"
 description = "Automated AI-powered code review CLI for Azure DevOps / TFS Pull Requests"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,8 @@ dependencies = [
     "PyYAML>=6.0",
     "litellm>=1.40.0",
     "tiktoken>=0.7.0",
+    "tree-sitter>=0.20,<0.22",
+    "tree-sitter-languages>=1.10.2",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +35,6 @@ bedrock = ["boto3>=1.34.0"]
 openai = ["openai>=1.0.0"]
 gemini = ["google-generativeai>=0.3.0"]
 claude = ["anthropic>=0.18.0"]
-tree-sitter = ["tree-sitter-languages>=1.10.2"]
 all = [
     "boto3>=1.34.0",
     "litellm>=1.40.0",
@@ -41,7 +42,6 @@ all = [
     "openai>=1.0.0",
     "google-generativeai>=0.3.0",
     "anthropic>=0.18.0",
-    "tree-sitter-languages>=1.10.2",
 ]
 dev = [
     "pytest>=8.3.0",

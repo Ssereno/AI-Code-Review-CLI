@@ -91,9 +91,9 @@ review:
   max_diff_lines: 4500
 
   # Max changed logical blocks for Enclosing Scopes strategy (diff_only mode)
-  max_scope_blocks: 10
+  max_scope_blocks: 8
 
-  # Max lines in a single enclosing scope before falling back to file_skeleton
+  # Max lines in a single enclosing scope before falling back to Adaptive Diff
   # (prevents sending entire large classes to the LLM)
   max_scope_lines: 250
 

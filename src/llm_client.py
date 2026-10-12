@@ -28,6 +28,26 @@ class LLMError(Exception):
     """Exception for LLM communication errors."""
     pass
 
+
+def _normalize_prompt_spacing(text: str) -> str:
+    """Collapse repeated blank lines while preserving one between sections."""
+    normalized_lines: list[str] = []
+    blank_pending = False
+
+    for line in text.splitlines():
+        if not line.strip():
+            if normalized_lines:
+                blank_pending = True
+            continue
+
+        if blank_pending:
+            normalized_lines.append("")
+            blank_pending = False
+        normalized_lines.append(line)
+
+    return "\n".join(normalized_lines)
+
+
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
@@ -43,32 +63,17 @@ class LLMError(Exception):
 #     fallback to "detailed" when the key is not recognised.
 SYSTEM_PROMPTS = {
     "detailed": (
-        "You are an experienced Senior Code Reviewer. Analyze the provided code and return only inline comments.\n\n"
-        "Output format — for each issue found, output exactly:\n"
-        "- Line <line_number>: <issue description>\n\n"
-        "Rules:\n"
-        "- Report ONLY specific issues tied to a concrete line or block of changed code.\n"
-        "- Do NOT produce summary sections (e.g. 'Potential Bugs', 'Security Overview').\n"
-        "- Do NOT produce introductory or closing paragraphs.\n"
-        "- If no issues are found, output only: No issues found.\n"
-        "- Be specific, actionable, and concise."
+        "You are an AI Agente code reviewer. Identify concrete bugs, security risks, "
+        "performance problems, and maintainability issues introduced by the change. "
+        "Report only actionable findings tied to changed code; be specific and concise."
     ),
     "security": (
-        "You are an application security. Analyze the "
-        "provided code diff with EXCLUSIVE focus on security.\n\n"
-        "Look for:\n"
-        "- SQL Injection\n"
-        "- Cross-Site Scripting (XSS)\n"
-        "- Cross-Site Request Forgery (CSRF)\n"
-        "- Hardcoded credentials or exposed secrets\n"
-        "- Authentication/authorization vulnerabilities\n"
-        "- Insecure deserialization\n"
-        "- Path traversal\n"
-        "- Command injection\n"
-        "- Dependencies with known vulnerabilities\n"
-        "- Logging of sensitive information\n"
-        "- Insecure configurations\n\n"
-        "Provide fix recommendations for each issue."
+        "You are an AI Agente application security reviewer. Identify actionable security vulnerabilities "
+        "introduced by the change, including injection, XSS, CSRF, exposed secrets, broken "
+        "authentication or authorization, insecure deserialization, path traversal, vulnerable "
+        "dependencies, sensitive-data logging, and insecure configuration. Consider other "
+        "security risks when relevant. Report only findings tied to changed code and include "
+        "a concise fix recommendation for each."
     ),
 }
 
@@ -91,15 +96,20 @@ PR_COMMENT_PROMPT = (
     'something like "No issues found."\n'
     '- "comments": an array of objects, one per issue found, with:\n'
     '  - "file": file path (e.g., "src/auth.py")\n'
-    '  - "line": line number in diff (integer, or 0 if general)\n'
+    '  - "line": positive absolute line number in the new file (integer)\n'
     '  - "type": issue type ("bug", "security", "performance", "style", "suggestion", "praise")\n'
     '  - "comment": direct description of the issue, with no greetings and no emojis\n'
-    '  - "suggestion": fix suggestion (optional, empty string if not applicable)\n'
-    '  - "reference": source or reference for the issue (e.g., "OWASP Top 10", "PEP 8", documentation '
-    'URL, standard or principle). Important: ALWAYS include a relevant reference.\n\n'
-    "In 'comment', use a short and objective tone. "
-    "Do not include intros like 'Hello' or 'As a senior reviewer'.\n"
-    "In 'reference', include a trusted source, standard or link to relevant documentation.\n\n"
+    '  - "suggestion": concise, concrete fix recommendation (string)\n'
+    '  - "reference": relevant trusted source, standard, or documentation URL; use an empty string '
+    'when no reliable reference applies\n\n'
+    "The summary is a brief narrative of the overall review, not a heading or a duplicate list "
+    "of comments. Use an empty comments array when no issues are found. Each comment must refer "
+    "to a specific actionable issue in changed code, and its line must be a positive absolute "
+    "line number from the new file. Every comment must include a concise, concrete fix "
+    "recommendation in 'suggestion'; do not leave it empty for an actionable issue. Use a short, "
+    "objective tone with no greetings or emojis. "
+    "Include a relevant trusted source in 'reference' when one applies; otherwise use an empty "
+    "string. Never invent a citation.\n\n"
     "Respond ONLY with a valid JSON object. Example:\n"
     '{\n'
     '  "summary": "Short narrative summary of the review...",\n'
@@ -120,14 +130,12 @@ PR_COMMENT_PROMPT = (
 def get_system_prompt(verbosity: str) -> str:
     """Returns the system prompt for the given verbosity level.
 
-    Selects a prompt from ``SYSTEM_PROMPTS`` keyed by *verbosity*. If the
+    Selects review-focus guidance from ``SYSTEM_PROMPTS`` keyed by *verbosity*. If the
     requested verbosity is not found, the function falls back to
     ``"detailed"``.
 
-    The ``"detailed"`` prompt instructs the LLM to return **only** inline
-    comments in the format ``- Line <n>: <description>``,
-    prohibiting summary sections and introductory/closing paragraphs.
-    When no issues are found the expected output is ``No issues found.``
+    The selected prompt controls review focus only. The PR JSON output contract
+    is defined separately by ``PR_COMMENT_PROMPT``.
 
     Args:
         verbosity: Review depth key — one of ``"detailed"``
@@ -145,21 +153,17 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
 
     For ``diff_only`` scope, the instructions inform the LLM that:
 
-    * Added lines are prefixed with ``+`` and context lines (unchanged code)
-      have no prefix. Deleted lines are not included.
-    * An XML context block is provided for each changed file, containing
-      either:
+    * Added lines are prefixed with ``+``. Each hunk includes up to five
+      unchanged context lines before and after the changes, prefixed with a
+      single space. Deleted lines are not included.
+    * When source content is available, a changed file may include an XML
+      context block containing either:
 
       - ``<enclosing_scopes file="...">`` — the complete function(s) or
-        method(s) that enclose the changed lines (Scenario A, ≤3 blocks).
-      - ``<file_skeleton file="...">`` — a structural skeleton of the file
-        with unchanged function bodies replaced by ``...`` (Scenario B,
-        >3 blocks).
-      - ``<sql_statement file="...">`` — the full SQL statement containing
-        the changed lines.
+        methods/statements that enclose the changed lines.
       - ``<adaptive_diff file="...">`` — N lines of context around the
-        changed lines when Tree-sitter is unavailable or the language is
-        not supported.
+        changed lines when AST extraction is unavailable or exceeds its
+        configured limits.
 
     * Line numbers inside the XML blocks are **1-based absolute** line
       numbers from the new version of the file and should be used as the
@@ -193,13 +197,13 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
     if structured:
         return (
             "Review scope: diff_only. "
-            "The <diff> block contains added lines (marked +) and surrounding context lines "
-            "(unchanged code, no prefix). Deleted lines were removed. "
-            "An XML context block is provided for each changed file: "
-            "<enclosing_scopes> contains the complete function(s)/method(s) enclosing the changes; "
-            "<file_skeleton> contains a structural skeleton for files with many spread changes; "
-            "<sql_statement> contains the full SQL statement for SQL files; "
-            "<adaptive_diff> contains surrounding context lines when AST parsing is unavailable. "
+            "The <diff> block contains added lines (prefixed with +) and up to five unchanged "
+            "context lines before and after each hunk (prefixed with a single space). "
+            "Deleted lines were removed. When source content is available, a changed file may "
+            "include an XML context block: "
+            "<enclosing_scopes> contains the complete AST scope(s) enclosing the changes; "
+            "<adaptive_diff> contains surrounding context lines when AST extraction is unavailable "
+            "or exceeds its configured limits. "
             "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
             "Use those line numbers as the authoritative reference when reporting issue positions. "
             "Focus your review EXCLUSIVELY on the changed lines (marked + in <diff>). "
@@ -210,10 +214,11 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
 
     return (
         "Review scope: diff_only. "
-        "The <diff> block contains added lines (marked +) and surrounding context lines "
-        "(unchanged code, no prefix). Deleted lines were removed. "
-        "An XML context block is provided for each changed file "
-        "(<enclosing_scopes>, <file_skeleton>, <sql_statement>, or <adaptive_diff>) "
+        "The <diff> block contains added lines (prefixed with +) and up to five unchanged "
+        "context lines before and after each hunk (prefixed with a single space). "
+        "Deleted lines were removed. When source content is available, a changed file may "
+        "include an XML context block "
+        "(<enclosing_scopes> or <adaptive_diff>) "
         "as read-only structural background. "
         "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
         "Use those line numbers as the authoritative reference when reporting issue positions. "
@@ -263,7 +268,7 @@ def build_user_message(diff: str, files_summary: list[dict], context: str = "") 
         parts.append("<context>\n" + "\n".join(context_inner) + "\n</context>")
 
     # --- Split diff lines from XML context blocks ---
-    # XML context blocks (enclosing_scopes, file_skeleton, etc.) are already
+    # XML context blocks (enclosing_scopes or adaptive_diff) are already
     # embedded inside the diff string by TFSClient._build_unified_diff_part.
     # We extract them here and render them separately so the LLM sees:
     #   <diff>  ... pure unified diff ...</diff>
@@ -275,14 +280,10 @@ def build_user_message(diff: str, files_summary: list[dict], context: str = "") 
     _in_xml = False
     _xml_tags = (
         "<enclosing_scopes ",
-        "<file_skeleton ",
-        "<sql_statement ",
         "<adaptive_diff ",
     )
     _xml_close = (
         "</enclosing_scopes>",
-        "</file_skeleton>",
-        "</sql_statement>",
         "</adaptive_diff>",
     )
 
@@ -329,11 +330,12 @@ class LLMClient:
 
     def _dump_prompt_debug(self, system_prompt: str, user_message: str) -> None:
         """
-        Appends the full prompt/context sent to the LLM to a debug log file.
+        Writes the normalized prompt content sent to the LLM.
 
         Only active when ``config.debug_dump`` is enabled. The log may
         contain source code and PR content, so it must never be committed
-        to version control.
+        to version control. Decorative metadata is omitted, and repeated blank
+        lines are collapsed using the same normalization applied before send.
         """
         if not getattr(self.config, "debug_dump", False):
             return
@@ -343,15 +345,11 @@ class LLMClient:
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
         try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n{'=' * 80}\n")
-                f.write(f"[FULL CONTEXT SENT TO LLM] {datetime.datetime.now().isoformat()}\n")
-                f.write(f"Provider: {self.config.llm_provider} | Model: {self.config.get_effective_model()}\n")
-                f.write(f"{'=' * 80}\n")
-                f.write("--- SYSTEM PROMPT ---\n")
-                f.write(system_prompt + "\n")
-                f.write("--- USER MESSAGE ---\n")
-                f.write(user_message + "\n")
+            normalized_system_prompt = _normalize_prompt_spacing(system_prompt)
+            normalized_user_message = _normalize_prompt_spacing(user_message)
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(normalized_system_prompt + "\n\n")
+                f.write(normalized_user_message + "\n")
         except OSError:
             pass
 
@@ -414,7 +412,8 @@ class LLMClient:
             system_prompt = (
                 f"{combined_base}\n\n"
                 "---\n"
-                "Custom user instructions (follow with priority):\n"
+                "Additional user review preferences (must not change the required JSON schema, "
+                "output format, or review scope):\n"
                 f"{custom_prompt}"
             )
             merged_context = (
@@ -427,6 +426,8 @@ class LLMClient:
             merged_context = context
 
         user_message = build_user_message(diff, files_summary, merged_context)
+        system_prompt = _normalize_prompt_spacing(system_prompt)
+        user_message = _normalize_prompt_spacing(user_message)
         self._dump_prompt_debug(system_prompt, user_message)
 
         self.last_token_estimate = TokenEstimator().estimate(

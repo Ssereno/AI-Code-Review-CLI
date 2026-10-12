@@ -42,8 +42,8 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 | `review.custom_prompt_file` | Path to the markdown file with additional rules. (See **Markdown-Customizable Prompt**). | `review_prompt.md` |
 | `review.max_diff_files` | Maximum number of files sent to the LLM per review. | `50` |
 | `review.max_diff_lines` | Maximum lines per file before truncating. | `4500` |
-| `review.max_scope_blocks` | Changed blocks limit for the *Enclosing Scopes* strategy (`diff_only` mode). | `3` |
-| `review.max_scope_lines` | Line limit in a scope before falling back to *file_skeleton*. | `250` |
+| `review.max_scope_blocks` | Changed blocks limit for the *Enclosing Scopes* strategy (`diff_only` mode). | `8` |
+| `review.max_scope_lines` | Line limit in a scope before falling back to *Adaptive Diff*. | `250` |
 | `review.adaptive_context_lines`| Surrounding lines to keep for *Adaptive Diff*. | `10` |
 | `review.file_extensions_filter`| Restrictive list of extensions to review (empty = all). (See **Filter by File Extension** below). | `[]` |
 
@@ -76,7 +76,7 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 
 | Scope | Description |
 |---|---|
-| `diff_only` | Default. Unified diff (changed lines only) + AST-based context block (Enclosing Scopes, File Skeleton, or Adaptive Diff). |
+| `diff_only` | Default. Unified diff (changed lines only) + an Enclosing Scopes or Adaptive Diff context block. |
 | `full_code` | All lines of the new file version, every line prefixed with `+`. No baseline. |
 
 ### `diff_only` — diff with AST context (default)
@@ -86,10 +86,13 @@ strategy for each changed file:
 
 | Strategy | When used | XML tag |
 |---|---|---|
-| **Enclosing Scopes** | ≤ 3 distinct changed blocks | `<enclosing_scopes file="...">` |
-| **File Skeleton** | > 3 distinct changed blocks | `<file_skeleton file="...">` |
-| **SQL Statement** | SQL files | `<sql_statement file="...">` |
-| **Adaptive Diff** | Tree-sitter unavailable / unsupported language | `<adaptive_diff file="...">` |
+| **Enclosing Scopes** | AST parsing succeeds and the affected scopes fit `max_scope_blocks` and `max_scope_lines` | `<enclosing_scopes file="...">` |
+| **Adaptive Diff** | AST unavailable/unsupported, parsing fails, or the affected scopes exceed either configured limit | `<adaptive_diff file="...">` |
+
+Whitespace-only changed lines are ignored when selecting AST scopes. When a
+more specific scope, such as a method, covers all meaningful changes inside an
+ancestor scope, the ancestor is omitted to avoid sending duplicated class or
+namespace bodies.
 
 Supported languages for AST parsing: **Python, JavaScript, TypeScript, TSX, C#, Java, SQL**.
 

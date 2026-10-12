@@ -106,6 +106,32 @@ def test_truncate_diff_without_sections_and_summary(sample_diff: str) -> None:
     ]
 
 
+def test_truncate_diff_preserves_ast_context_block() -> None:
+    """Per-file truncation must retain the complete trailing context block."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1,4 +1,4 @@",
+        "+line one",
+        "+line two",
+        "+line three",
+        '<enclosing_scopes file="src/app.py">',
+        "   1: def example():",
+        "   2:     return True",
+        "</enclosing_scopes>",
+    ])
+
+    truncated, changed = instance.truncate_diff_per_file(diff, max_lines=5)
+
+    assert changed is True
+    assert "TRUNCATED IN THIS FILE" in truncated
+    assert '<enclosing_scopes file="src/app.py">' in truncated
+    assert "   2:     return True" in truncated
+    assert truncated.rstrip().endswith("</enclosing_scopes>")
+
+
 
 def test_filter_diff_additions_only_preserves_xml_context_blocks() -> None:
     """Lines inside XML context blocks (<enclosing_scopes>, etc) must be kept verbatim, regardless of prefix."""

@@ -542,6 +542,37 @@ def test_build_diff_parts_and_file_content(mocker) -> None:
     assert "No textual differences detected" in no_text[-1]
 
 
+def test_build_unified_diff_part_uses_five_context_lines(mocker) -> None:
+    """Unified diff hunks must include five unchanged lines on each side."""
+    client = TFSClient(make_tfs_config())
+    old_lines = [f"line {number}" for number in range(1, 16)]
+    new_lines = old_lines.copy()
+    new_lines[7] = "changed line 8"
+    mocker.patch(
+        "src.tfs_client.TFSClient._get_file_content",
+        side_effect=["\n".join(old_lines), "\n".join(new_lines)],
+    )
+    mocker.patch.object(
+        client._context_extractor,
+        "extract",
+        return_value=("adaptive_diff", ""),
+    )
+
+    result = client._build_unified_diff_part(
+        "repo-a",
+        "/a.py",
+        "/a.py",
+        "edit",
+        "refs/heads/feature",
+        "refs/heads/main",
+    )
+
+    assert " line 3" in result
+    assert " line 13" in result
+    assert " line 2" not in result
+    assert " line 14" not in result
+
+
 # ---------------------------------------------------------------------------
 # _build_unified_diff_part — XML context block
 # ---------------------------------------------------------------------------
@@ -561,7 +592,7 @@ def test_build_unified_diff_part_appends_xml_context_block(mocker) -> None:
     joined = "\n".join(result)
 
     # Must contain an XML context block (adaptive_diff for short files without Tree-sitter)
-    _xml_tags = ("<enclosing_scopes", "<file_skeleton", "<adaptive_diff", "<sql_statement")
+    _xml_tags = ("<enclosing_scopes", "<adaptive_diff")
     assert any(tag in joined for tag in _xml_tags), "Expected an XML context block"
     assert "new line one" in joined
     assert "new line two" in joined
@@ -591,7 +622,7 @@ def test_build_unified_diff_part_context_block_present_on_add(mocker) -> None:
     )
     joined = "\n".join(result)
 
-    _xml_tags = ("<enclosing_scopes", "<file_skeleton", "<adaptive_diff", "<sql_statement")
+    _xml_tags = ("<enclosing_scopes", "<adaptive_diff")
     assert any(tag in joined for tag in _xml_tags), "Expected XML context block"
     assert "new content" in joined
     assert "FULL_FILE_CONTEXT_START" not in joined
@@ -618,7 +649,7 @@ def test_build_unified_diff_part_no_context_block_on_delete(mocker) -> None:
 
     assert "FULL_FILE_CONTEXT_START" not in joined
     assert "FULL_FILE_CONTEXT_END" not in joined
-    _xml_tags = ("<enclosing_scopes", "<file_skeleton", "<adaptive_diff", "<sql_statement")
+    _xml_tags = ("<enclosing_scopes", "<adaptive_diff")
     assert not any(tag in joined for tag in _xml_tags), "No context block expected for delete"
 
 
@@ -660,7 +691,7 @@ def test_build_unified_diff_part_no_context_block_when_content_unavailable(mocke
 
     assert "FULL_FILE_CONTEXT_START" not in joined
     assert "FULL_FILE_CONTEXT_END" not in joined
-    _xml_tags = ("<enclosing_scopes", "<file_skeleton", "<adaptive_diff", "<sql_statement")
+    _xml_tags = ("<enclosing_scopes", "<adaptive_diff")
     assert not any(tag in joined for tag in _xml_tags), "No context block expected when content is unavailable"
 
 

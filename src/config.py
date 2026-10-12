@@ -92,8 +92,8 @@ class ReviewConfig:
     review_scope: str = "diff_only"         # "diff_only" | "full_code"
     max_diff_files: int = 50                 # Max diff files sent to LLM
     max_diff_lines: int = 2000              # Max diff lines
-    max_scope_blocks: int = 3               # Max changed blocks for Enclosing Scopes strategy
-    max_scope_lines: int = 250              # Max lines in a single scope block before fallback to file_skeleton
+    max_scope_blocks: int = 8               # Max changed blocks for Enclosing Scopes strategy
+    max_scope_lines: int = 250              # Max lines in a scope before Adaptive Diff fallback
     adaptive_context_lines: int = 10        # Context lines for Adaptive Diff fallback
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)  # File extensions to include (empty = all)
