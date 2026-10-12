@@ -100,7 +100,7 @@ class GitUtils:
             - ``@@ ... @@``
             - ``+ <content>`` (added lines)
             - `` <content>`` (context lines — unchanged surrounding code)
-            - Lines inside XML context blocks (``<enclosing_scopes>``, ``<file_skeleton>``, etc.)
+            - Lines inside XML context blocks (``<enclosing_scopes>`` or ``<adaptive_diff>``)
 
         Lines removed:
             - ``- <content>`` (deleted lines)
@@ -114,8 +114,8 @@ class GitUtils:
         """
         result = []
         in_xml_block = False
-        _xml_start_tags = ("<enclosing_scopes", "<file_skeleton", "<adaptive_diff", "<sql_statement")
-        _xml_end_tags = ("</enclosing_scopes>", "</file_skeleton>", "</adaptive_diff>", "</sql_statement>")
+        _xml_start_tags = ("<enclosing_scopes", "<adaptive_diff")
+        _xml_end_tags = ("</enclosing_scopes>", "</adaptive_diff>")
 
         for line in diff.split("\n"):
             if any(line.startswith(tag) for tag in _xml_start_tags):
@@ -204,7 +204,7 @@ class GitUtils:
 
     def truncate_diff_per_file(self, diff: str, max_lines: int = 2000) -> tuple[str, bool]:
         """
-        Truncates the diff per file if it exceeds the maximum lines per section.
+        Truncates diff lines per file while preserving complete XML context blocks.
         Falls back to global truncation if no file sections are present.
         
         Returns:
@@ -227,18 +227,30 @@ class GitUtils:
         truncated_any = False
         output_sections: list[str] = []
         for section in sections:
-            if len(section) <= max_lines:
+            xml_start = next(
+                (
+                    index
+                    for index, line in enumerate(section)
+                    if line.startswith(("<enclosing_scopes", "<adaptive_diff"))
+                ),
+                len(section),
+            )
+            diff_lines = section[:xml_start]
+            context_lines = section[xml_start:]
+
+            if len(diff_lines) <= max_lines:
                 output_sections.append("\n".join(section))
                 continue
 
             truncated_any = True
-            omitted = len(section) - max_lines
-            part = "\n".join(section[:max_lines])
-            part += (
-                f"\n... [TRUNCATED IN THIS FILE: {omitted} lines omitted. "
-                f"Original section: {len(section)} lines] ..."
+            omitted = len(diff_lines) - max_lines
+            truncated_section = diff_lines[:max_lines]
+            truncated_section.append(
+                f"... [TRUNCATED IN THIS FILE: {omitted} diff lines omitted. "
+                f"Original diff section: {len(diff_lines)} lines] ..."
             )
-            output_sections.append(part)
+            truncated_section.extend(context_lines)
+            output_sections.append("\n".join(truncated_section))
 
         return "\n".join(output_sections), truncated_any
 

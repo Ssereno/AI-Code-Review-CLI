@@ -11,62 +11,26 @@
 # ---------------------------------------------------------------------------
 # Available providers: "openai", "gemini", "claude", "ollama", "azure_openai", "copilot", "bedrock"
 llm:
-  provider: openai
-
-  # Model to use (empty = provider default)
-  # Examples:
-  #   openai:  gpt-4o, gpt-4-turbo, gpt-4
-  #   gemini:  gemini-1.5-pro, gemini-pro, gemini-2.0-flash
-  #   claude:  claude-3-5-sonnet-latest, claude-3-opus-latest, claude-3-haiku-20240307
-  #   ollama:  llama3, codellama, mistral, deepseek-coder
-  #   copilot: gpt-4o, gpt-4o-mini, o1, o1-mini, claude-3.5-sonnet
-  #   bedrock: anthropic.claude-3-5-sonnet-20240620-v1:0, meta.llama3-70b-instruct-v1:0
-  model: ""
-
+  provider: bedrock
+  model: gpt-5.6-terra
   # Maximum tokens in response
   max_tokens: 4096
+  # Temperature (0.0 = deterministic, 1.0 = creative, 99 = ignore)
+  temperature: 99
 
-  # Temperature (0.0 = deterministic, 1.0 = creative)
-  temperature: 0.0
-
-# ---------------------------------------------------------------------------
-# Provider credentials — fill in the block for your chosen provider
-# ---------------------------------------------------------------------------
-
-# openai:
-#   api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxx
-
-# gemini:
-#   api_key: AIzaxxxxxxxxxxxxxxxxxxxxxxxx
-
-# claude:
-#   api_key: sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
-
-# ollama:
-#   base_url: http://localhost:11434
-
-# copilot:
-#   github_token: ghp_xxxxxxxxxxxxxxxxxxxxxxxx
-
-# bedrock:
-#   region: us-east-1
-#   profile: default
-#   # access_key_id and secret_access_key are optional if using IAM roles or AWS CLI profile
-#   access_key_id:
-#   secret_access_key:
-#   session_token:
-
+bedrock:
+  region: eu-north-1
+  access_key_id: ""
 # ---------------------------------------------------------------------------
 # TFS / Azure DevOps Configuration
 # ---------------------------------------------------------------------------
 tfs:
-  base_url: https://dev.azure.com/your-org   # or https://tfs.company.com/tfs
-  collection: DefaultCollection
-  project: your-project
-  pat: your-personal-access-token
-  verify_ssl: true
-  # ca_bundle: C:/certs/corporate-root-ca.pem   # optional corporate CA
-  # repository:                                  # optional default repo filter
+  base_url: ""
+  collection:  ""
+  project:  ""
+  pat:  ""
+  verify_ssl: false
+  repository: ""
 
 # ---------------------------------------------------------------------------
 # Review Preferences
@@ -88,14 +52,14 @@ review:
   max_diff_files: 50
 
   # Limit of diff lines per file (larger sections are truncated)
-  max_diff_lines: 4500
+  max_diff_lines: 4000
 
   # Max changed logical blocks for Enclosing Scopes strategy (diff_only mode)
   max_scope_blocks: 8
 
-  # Max lines in a single enclosing scope before falling back to file_skeleton
+  # Max lines in a single enclosing scope before falling back to Adaptive Diff
   # (prevents sending entire large classes to the LLM)
-  max_scope_lines: 250
+  max_scope_lines: 500
 
   # Surrounding lines to keep for Adaptive Diff fallback (diff_only mode)
   adaptive_context_lines: 10
@@ -137,5 +101,5 @@ output:
   color: true
 
 debug:
-  dump: false
+  dump: true
   dump_file: "logs/debug.log"

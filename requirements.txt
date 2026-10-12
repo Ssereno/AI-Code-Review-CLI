@@ -9,6 +9,8 @@ PyYAML>=6.0               # Leitura de ficheiros de configuração YAML
 boto3>=1.34.0             # Integração com AWS Bedrock
 litellm>=1.40.0           # Estimativa de tokens do prompt enviado ao LLM
 tiktoken>=0.7.0           # Fallback local para contagem de tokens
+tree-sitter>=0.20,<0.22   # API compatível com tree-sitter-languages
+tree-sitter-languages>=1.10.2  # Parsers AST para C#, Java, JS, TS, Python e SQL
 
 # --- Providers LLM (instalar conforme necessidade) ---
 # Nota: Todos os providers funcionam via requests (HTTP directo).
@@ -26,8 +28,3 @@ tiktoken>=0.7.0           # Fallback local para contagem de tokens
 # --- Opcionais (melhorias de UX) ---
 # rich>=13.0.0             # Formatação avançada de terminal
 # colorama>=0.4.6          # Cores no terminal Windows
-
-# --- Tree-sitter (opcional — extração de contexto AST) ---
-# Usado em src/context_extractor.py para Enclosing Scopes e File Skeletons.
-# Se não instalado, o módulo faz fallback automático para Adaptive Diff.
-# tree-sitter-languages>=1.10.2  # Parsers pré-compilados para C#, Java, JS, TS, Python, SQL

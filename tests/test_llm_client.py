@@ -15,7 +15,7 @@ import pytest
 
 from src.config import ReviewConfig
 from src import llm_client
-from src.llm_client import LLMClient, LLMError, build_user_message, get_scope_guidance, get_system_prompt, PR_COMMENT_PROMPT
+from src.llm_client import LLMClient, LLMError, _normalize_prompt_spacing, build_user_message, get_scope_guidance, get_system_prompt, PR_COMMENT_PROMPT
 
 
 class FakeResponse:
@@ -126,19 +126,28 @@ def test_get_system_prompt_detailed_returns_non_empty_string() -> None:
     assert len(prompt.strip()) > 0
 
 
-def test_get_system_prompt_detailed_enforces_inline_comment_format() -> None:
-    """detailed must specify the inline comment output format after Phase 1."""
+def test_get_system_prompt_detailed_describes_review_focus() -> None:
+    """detailed must describe review focus without defining a competing output format."""
     prompt = get_system_prompt("detailed")
-    # Must instruct the LLM to return only inline comments
-    assert "inline comments" in prompt.lower()
-    # Must include the exact per-line format marker
-    assert "Line <line_number>" in prompt
+    assert "bugs" in prompt
+    assert "changed code" in prompt
+    assert "JSON" not in prompt
 
 
-def test_get_system_prompt_detailed_forbids_summary_sections() -> None:
-    """detailed must explicitly forbid summary sections after Phase 1."""
+def test_pr_comment_prompt_defines_stable_json_contract() -> None:
+    """The PR prompt must retain the exact top-level and comment field names."""
+    from src.llm_client import PR_COMMENT_PROMPT
+
+    for field in ('"summary"', '"comments"', '"file"', '"line"', '"type"',
+                  '"comment"', '"suggestion"', '"reference"'):
+        assert field in PR_COMMENT_PROMPT
+    assert "valid JSON object" in PR_COMMENT_PROMPT
+
+
+def test_get_system_prompt_detailed_does_not_forbid_required_summary() -> None:
+    """Review focus must not contradict the PR-level summary requirement."""
     prompt = get_system_prompt("detailed")
-    assert "Do NOT produce summary sections" in prompt
+    assert "summary" not in prompt.lower()
 
 
 def test_get_system_prompt_detailed_contains_no_focus_on_or_structured_review_language() -> None:
@@ -150,8 +159,8 @@ def test_get_system_prompt_detailed_contains_no_focus_on_or_structured_review_la
 
 def test_get_system_prompt_security_mentions_security_specific_terms() -> None:
     """security must include core vulnerability types it is expected to check for."""
-    prompt = get_system_prompt("security")
-    for term in ("SQL Injection", "XSS", "CSRF"):
+    prompt = get_system_prompt("security").lower()
+    for term in ("injection", "xss", "csrf"):
         assert term in prompt, f"Security prompt missing expected term: '{term}'"
 
 
@@ -171,11 +180,21 @@ def test_get_scope_guidance_diff_only_references_xml_context_tags() -> None:
     for structured in (False, True):
         guidance = get_scope_guidance("diff_only", structured=structured)
         assert "enclosing_scopes" in guidance, f"structured={structured}"
-        assert "file_skeleton" in guidance, f"structured={structured}"
         assert "adaptive_diff" in guidance, f"structured={structured}"
         # Must NOT reference the old sentinel markers
         assert "FULL_FILE_CONTEXT_START" not in guidance, f"structured={structured}"
         assert "FULL_FILE_CONTEXT_END" not in guidance, f"structured={structured}"
+
+
+def test_get_scope_guidance_describes_unified_diff_context_accurately() -> None:
+    """Guidance must match the five-line unified diff and optional XML block."""
+    for structured in (False, True):
+        guidance = get_scope_guidance("diff_only", structured=structured).lower()
+        assert "up to five" in guidance
+        assert "prefixed with a single space" in guidance
+        assert "when source content is available" in guidance
+        assert "may include an xml context block" in guidance
+        assert "no prefix" not in guidance
 
 
 def test_get_scope_guidance_diff_only_structured_demands_valid_line_number() -> None:
@@ -222,6 +241,47 @@ def test_build_user_message_includes_files_and_context() -> None:
     assert "</diff>" in message
 
 
+def test_normalize_prompt_spacing_collapses_only_repeated_blank_lines() -> None:
+    """Normalization must retain one blank line and semantic headings."""
+    text = "\n\n# Heading\n\n\nfirst section\n   \n\n## Next\nbody\n\n"
+
+    assert _normalize_prompt_spacing(text) == (
+        "# Heading\n\n"
+        "first section\n\n"
+        "## Next\n"
+        "body"
+    )
+
+
+def test_dump_prompt_debug_matches_normalized_prompt_content(tmp_path: Path) -> None:
+    """Debug dump must contain normalized prompts without decorative metadata."""
+    log_file = tmp_path / "debug.log"
+    client = LLMClient(make_llm_config(
+        debug_dump=True,
+        debug_dump_file=str(log_file),
+    ))
+    log_file.write_text("obsolete header\n\n", encoding="utf-8")
+
+    client._dump_prompt_debug(
+        "system line 1\n\n   \nsystem line 2",
+        "user line 1\n\nuser line 2",
+    )
+
+    dumped = log_file.read_text(encoding="utf-8")
+    assert dumped == (
+        "system line 1\n\n"
+        "system line 2\n\n"
+        "user line 1\n\n"
+        "user line 2\n"
+    )
+    assert "FULL CONTEXT SENT TO LLM" not in dumped
+    assert "obsolete header" not in dumped
+    assert "Provider:" not in dumped
+    assert "SYSTEM PROMPT" not in dumped
+    assert "USER MESSAGE" not in dumped
+    assert "\n\n\n" not in dumped
+
+
 def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
     """It should handle empty, missing and readable prompt files."""
     config = make_llm_config(custom_prompt_file="")
@@ -243,8 +303,13 @@ def test_load_custom_prompt_text_variants(tmp_path: Path, mocker) -> None:
 def test_review_pr_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -> None:
     """It should route reviews to the configured provider and merge custom context."""
     prompt_file = tmp_path / "prompt.md"
-    prompt_file.write_text("Always mention tests", encoding="utf-8")
-    config = make_llm_config(custom_prompt_file=str(prompt_file))
+    prompt_file.write_text("## Rules\n\n\nAlways mention tests", encoding="utf-8")
+    debug_file = tmp_path / "debug.log"
+    config = make_llm_config(
+        custom_prompt_file=str(prompt_file),
+        debug_dump=True,
+        debug_dump_file=str(debug_file),
+    )
     client = LLMClient(config)
     openai = mocker.patch(
         "src.llm_client.LLMClient._call_openai",
@@ -255,8 +320,13 @@ def test_review_pr_dispatches_and_merges_custom_prompt(mocker, tmp_path: Path) -
 
     assert result == ("review text", [])
     system_prompt, user_message = openai.call_args.args[:2]
-    assert "Custom user instructions" in system_prompt
+    assert "Additional user review preferences" in system_prompt
     assert "Custom context loaded from" in user_message
+    assert "\n\n\n" not in system_prompt
+    assert "\n\n\n" not in user_message
+    assert debug_file.read_text(encoding="utf-8") == (
+        f"{system_prompt}\n\n{user_message}\n"
+    )
 
 def test_review_omits_custom_instructions_header_when_filter_empties_prompt(mocker, tmp_path: Path) -> None:
     """If filtering removes all sections, the 'Custom user instructions' header should not appear."""

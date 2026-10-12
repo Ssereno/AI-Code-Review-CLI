@@ -6,7 +6,6 @@
 Covers:
 - changed_lines_from_diff: parse added lines from unified diff
 - _build_adaptive_diff: fallback context extraction
-- _build_file_skeleton: skeleton generation
 - ContextExtractor.extract: strategy selection for all 6 languages + fallback
 - XML output tags and structure
 - Tree-sitter fallback when library is unavailable
@@ -14,22 +13,19 @@ Covers:
 
 from __future__ import annotations
 
-import sys
-from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+import src.context_extractor as _ctx_mod
 from src.context_extractor import (
-    ADAPTIVE_CONTEXT_LINES,
     MAX_SCOPE_BLOCKS,
     ContextExtractor,
     ScopeInfo,
     _build_adaptive_diff,
-    _build_file_skeleton,
     _lang_from_path,
+    _remove_redundant_ancestor_scopes,
 )
-import src.context_extractor as _ctx_mod
 
 _EXT_TO_LANG: dict[str, str] = _ctx_mod._EXT_TO_LANG  # type: ignore[attr-defined]
 
@@ -55,6 +51,32 @@ def test_scope_info_defaults() -> None:
     assert s.end_line == 10
 
 
+def test_remove_ancestor_when_child_covers_all_changed_lines() -> None:
+    """A containing class is redundant when all changes belong to a method."""
+    class_scope = ScopeInfo(1, 10, "class_declaration", "Example")
+    method_scope = ScopeInfo(3, 6, "method_declaration", "Run")
+
+    result = _remove_redundant_ancestor_scopes(
+        [class_scope, method_scope],
+        changed_lines=[4],
+    )
+
+    assert result == [method_scope]
+
+
+def test_keep_ancestor_with_uncovered_class_level_change() -> None:
+    """An ancestor remains when it owns a change outside the child scope."""
+    class_scope = ScopeInfo(1, 10, "class_declaration", "Example")
+    method_scope = ScopeInfo(3, 6, "method_declaration", "Run")
+
+    result = _remove_redundant_ancestor_scopes(
+        [class_scope, method_scope],
+        changed_lines=[2, 4],
+    )
+
+    assert result == [class_scope, method_scope]
+
+
 # ---------------------------------------------------------------------------
 # _lang_from_path
 # ---------------------------------------------------------------------------
@@ -72,7 +94,7 @@ def test_scope_info_defaults() -> None:
     ("Makefile",      None),
 ])
 def test_lang_from_path(path: str, expected: str | None) -> None:
-    """Extension-to-language mapping must cover all 6 supported languages."""
+    """Extension-to-language mapping must cover all supported languages."""
     assert _lang_from_path(path) == expected
 
 
@@ -169,71 +191,6 @@ def test_build_adaptive_diff_line_numbers_are_absolute() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_file_skeleton (Python)
-# ---------------------------------------------------------------------------
-
-PYTHON_MODULE = """\
-import os
-import sys
-
-
-class MyClass:
-    def method_a(self):
-        # Method a.
-        x = 1
-        y = 2
-        z = x + y
-        return z
-
-    def method_b(self):
-        # Method b is far enough away from method_a.
-        a = "hello"
-        b = "world"
-        c = a + " " + b
-        return c
-
-    def method_c(self):
-        # Method c.
-        return 42
-
-    def method_d(self):
-        # Method d.
-        return None
-
-    def method_e(self):
-        # Method e is far away from line 8.
-        return True
-
-
-def standalone():
-    pass
-"""
-
-
-def test_build_file_skeleton_python_includes_imports_and_defs() -> None:
-    """Skeleton must always include import lines and def/class signatures."""
-    result = _build_file_skeleton(PYTHON_MODULE, changed_lines=[8], lang="python")
-    assert "import os" in result
-    assert "class MyClass" in result
-    assert "def method_a" in result
-
-
-def test_build_file_skeleton_python_replaces_unchanged_bodies() -> None:
-    """Unchanged function bodies far from the changed line must be replaced with '...'."""
-    # Use a small context window so that distant methods get collapsed to '...'
-    from src.context_extractor import _build_adaptive_diff as _adiff
-    result = _build_file_skeleton(PYTHON_MODULE, changed_lines=[8], lang="python")
-    # With default ADAPTIVE_CONTEXT_LINES=10, method_e at ~line 32 is outside
-    # the window for changed_line=8, so the skeleton must contain '...'
-    assert "..." in result
-
-
-def test_build_file_skeleton_empty_content_returns_empty() -> None:
-    """Empty content must return empty string."""
-    assert _build_file_skeleton("", changed_lines=[1], lang="python") == ""
-
-
-# ---------------------------------------------------------------------------
 # ContextExtractor.extract — fallback (no Tree-sitter)
 # ---------------------------------------------------------------------------
 
@@ -291,12 +248,12 @@ class TestExtractFallback:
 # ContextExtractor.extract — Python (Tree-sitter)
 # ---------------------------------------------------------------------------
 
-# These tests require tree-sitter-languages to be installed.
-# If not available, the test is automatically skipped.
+# Keep a defensive skip so the fallback-only suite remains usable in reduced
+# environments, even though tree-sitter-languages is a core dependency.
 try:
-    from tree_sitter_languages import get_parser as _get_parser  # type: ignore
+    __import__("tree_sitter_languages")
     _TS_INSTALLED = True
-except Exception:
+except ImportError:
     _TS_INSTALLED = False
 
 ts_required = pytest.mark.skipif(
@@ -322,7 +279,7 @@ def bar():
     return "bar"
 """
 
-    def test_extract_scenario_a_enclosing_scopes(self) -> None:
+    def test_extract_enclosing_scopes(self) -> None:
         """Single changed function must return enclosing_scopes strategy."""
         extractor = ContextExtractor()
         strategy, xml = extractor.extract(
@@ -345,8 +302,20 @@ def bar():
         )
         assert xml.strip().endswith("</enclosing_scopes>")
 
-    def test_extract_scenario_b_file_skeleton_when_many_blocks(self) -> None:
-        """More than max_scope_blocks distinct scopes must return file_skeleton."""
+    def test_whitespace_only_changes_use_adaptive_diff(self) -> None:
+        """Whitespace-only changes must not select an AST scope."""
+        extractor = ContextExtractor()
+        strategy, xml = extractor.extract(
+            file_path="src/module.py",
+            new_content=self.PYTHON_CODE,
+            changed_lines=[2],
+        )
+
+        assert strategy == "adaptive_diff"
+        assert "<adaptive_diff" in xml
+
+    def test_extract_adaptive_diff_when_many_scopes(self) -> None:
+        """More than max_scope_blocks distinct scopes must use adaptive_diff."""
         many_funcs = "\n".join(
             f"def func_{i}():\n    return {i}\n" for i in range(10)
         )
@@ -358,9 +327,22 @@ def bar():
             new_content=many_funcs,
             changed_lines=changed,
         )
-        assert strategy == "file_skeleton"
-        assert "<file_skeleton" in xml
-        assert "</file_skeleton>" in xml
+        assert strategy == "adaptive_diff"
+        assert "<adaptive_diff" in xml
+
+    def test_extract_adaptive_diff_when_scope_is_oversized(self) -> None:
+        """A scope over max_scope_lines must use adaptive_diff."""
+        code = "def large():\n" + "\n".join(
+            f"    value_{i} = {i}" for i in range(5)
+        )
+        extractor = ContextExtractor(max_scope_lines=5)
+        strategy, xml = extractor.extract(
+            file_path="src/large.py",
+            new_content=code,
+            changed_lines=[3],
+        )
+        assert strategy == "adaptive_diff"
+        assert "<adaptive_diff" in xml
 
     def test_extract_line_numbers_are_absolute(self) -> None:
         """Extracted scope must show absolute 1-based line numbers."""
@@ -400,7 +382,7 @@ const add = (a, b) => a + b;
     def test_extract_arrow_function(self) -> None:
         """Arrow function assigned to const must be captured as enclosing scope."""
         extractor = ContextExtractor()
-        strategy, xml = extractor.extract(
+        strategy, _xml = extractor.extract(
             file_path="src/math.js",
             new_content=self.JS_CODE,
             changed_lines=[5],
@@ -470,6 +452,31 @@ namespace MyApp
         assert strategy == "enclosing_scopes"
         assert "Add" in xml
 
+    def test_whitespace_change_after_method_does_not_select_class(self) -> None:
+        """A changed blank line outside a method must not pull in its class."""
+        code = """\
+public class Example
+{
+    public int GetValue()
+    {
+        return 1;
+    }
+
+    private int _otherValue;
+}
+"""
+        extractor = ContextExtractor(max_scope_lines=20)
+        strategy, xml = extractor.extract(
+            file_path="src/Example.cs",
+            new_content=code,
+            changed_lines=[5, 7],
+        )
+
+        assert strategy == "enclosing_scopes"
+        assert "method_declaration: GetValue" in xml
+        assert "class_declaration: Example" not in xml
+        assert "_otherValue" not in xml
+
 
 @ts_required
 class TestExtractJava:
@@ -514,16 +521,15 @@ SET last_login = NOW()
 WHERE id = 42;
 """
 
-    def test_extract_sql_statement(self) -> None:
-        """Changed SQL line must return sql_statement or adaptive_diff strategy."""
+    def test_extract_sql_enclosing_scope(self) -> None:
+        """A changed SQL statement uses the common enclosing_scopes strategy."""
         extractor = ContextExtractor()
         strategy, xml = extractor.extract(
             file_path="migrations/query.sql",
             new_content=self.SQL_CODE,
             changed_lines=[2],
         )
-        # sql_statement or adaptive_diff (if SQL grammar not available)
-        assert strategy in ("sql_statement", "adaptive_diff")
+        assert strategy in ("enclosing_scopes", "adaptive_diff")
         assert xml != ""
 
 

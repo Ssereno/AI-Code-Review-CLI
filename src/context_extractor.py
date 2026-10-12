@@ -7,20 +7,19 @@ Context Extractor Module - AI Code Review
 Provides AST-based context extraction for diff payloads sent to the LLM.
 
 Strategy selection per file:
-  - SQL files            → full SQL statement containing the changed line(s)
-  - ≤ ``MAX_SCOPE_BLOCKS`` changed logical blocks → Enclosing Scopes (Scenario A)
-  - > ``MAX_SCOPE_BLOCKS`` changed logical blocks → File Skeleton (Scenario B)
-  - Tree-sitter unavailable / language unsupported → Adaptive Diff fallback
+  - AST scopes within the configured limits → Enclosing Scopes
+  - Tree-sitter unavailable, unsupported language, parse failure, or scopes
+    outside the configured limits → Adaptive Diff fallback
 
 Output is always wrapped in XML tags so the LLM can distinguish code context
 from the actual diff:
 
   ``<enclosing_scopes file="src/auth.py">...</enclosing_scopes>``
-  ``<file_skeleton    file="src/module.py">...</file_skeleton>``
   ``<adaptive_diff    file="src/other.py">...</adaptive_diff>``
 
-Tree-sitter is an *optional* dependency.  If ``tree-sitter-languages`` is not
-installed the module automatically falls back to :func:`_build_adaptive_diff`.
+Tree-sitter is installed as a core dependency. The availability probe remains
+defensive: reduced or broken environments fall back to
+:func:`_build_adaptive_diff` instead of failing the review.
 """
 
 from __future__ import annotations
@@ -68,13 +67,12 @@ except Exception:  # pragma: no cover — optional dependency
 # Constants
 # ---------------------------------------------------------------------------
 
-#: Maximum number of distinct logical blocks that triggers Scenario A
-#: (Enclosing Scopes).  When more blocks are detected Scenario B (File
-#: Skeleton) is used instead.
-MAX_SCOPE_BLOCKS: int = 3
+#: Maximum number of distinct logical blocks included as Enclosing Scopes.
+#: When more blocks are detected the extractor uses Adaptive Diff instead.
+MAX_SCOPE_BLOCKS: int = 8
 
 #: Maximum number of lines in a single enclosing scope.  When a scope
-#: exceeds this limit the strategy falls back to File Skeleton to avoid
+#: exceeds this limit the strategy falls back to Adaptive Diff to avoid
 #: sending large class bodies to the LLM.
 MAX_SCOPE_LINES: int = 250
 
@@ -370,6 +368,69 @@ def _extract_enclosing_scopes_ts(
     return scopes
 
 
+def _non_whitespace_changed_lines(content: str, changed_lines: list[int]) -> list[int]:
+    """Return changed lines that contain meaningful code in the new file.
+
+    Whitespace-only additions must not influence AST scope selection. For
+    example, a blank line immediately after a method belongs to its containing
+    class and would otherwise cause the entire class to be selected.
+    """
+    all_lines = content.splitlines()
+    return [
+        line_number
+        for line_number in changed_lines
+        if 1 <= line_number <= len(all_lines)
+        and all_lines[line_number - 1].strip()
+    ]
+
+
+def _remove_redundant_ancestor_scopes(
+    scopes: list[ScopeInfo],
+    changed_lines: list[int],
+) -> list[ScopeInfo]:
+    """Drop ancestor scopes whose changed lines are covered by child scopes.
+
+    An ancestor is retained when it contains at least one meaningful changed
+    line outside every selected descendant. This avoids duplicate class and
+    method bodies without losing class-level changes.
+    """
+    retained: list[ScopeInfo] = []
+
+    for scope in scopes:
+        descendants = [
+            candidate
+            for candidate in scopes
+            if candidate is not scope
+            and scope.start_line <= candidate.start_line
+            and candidate.end_line <= scope.end_line
+            and (
+                scope.start_line < candidate.start_line
+                or candidate.end_line < scope.end_line
+            )
+        ]
+        scope_changes = [
+            line_number
+            for line_number in changed_lines
+            if scope.start_line <= line_number <= scope.end_line
+        ]
+        changes_covered_by_descendants = (
+            bool(scope_changes)
+            and bool(descendants)
+            and all(
+                any(
+                    child.start_line <= line_number <= child.end_line
+                    for child in descendants
+                )
+                for line_number in scope_changes
+            )
+        )
+
+        if not changes_covered_by_descendants:
+            retained.append(scope)
+
+    return retained
+
+
 def _format_scope_block(scope: ScopeInfo) -> str:
     """Render a :class:`ScopeInfo` with absolute 1-based line numbers."""
     lines: list[str] = []
@@ -377,140 +438,6 @@ def _format_scope_block(scope: ScopeInfo) -> str:
         abs_line = scope.start_line + offset
         lines.append(f"{abs_line:4d}: {src_line}")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# File Skeleton helpers
-# ---------------------------------------------------------------------------
-
-#: Regex patterns used to identify structural lines in each language.
-_SKELETON_PATTERNS: dict[str, list[str]] = {
-    "python": [
-        r"^\s*(?:import|from)\s+",           # imports
-        r"^\s*(?:def|async\s+def|class)\s+", # definitions
-        r"^\s*@\w",                           # decorators
-    ],
-    "javascript": [
-        r"^\s*(?:import|export|require)\s*",
-        r"^\s*(?:function|class|const|let|var)\s+\w+\s*(?:=\s*(?:function|\(|\()|\()",
-        r"^\s*(?:async\s+function|export\s+(?:default\s+)?(?:function|class))",
-    ],
-    "typescript": [
-        r"^\s*(?:import|export|require)\s*",
-        r"^\s*(?:function|class|const|let|var|interface|type|enum|abstract)\s+\w+",
-        r"^\s*(?:async\s+function|export\s+(?:default\s+)?(?:function|class|interface))",
-    ],
-    "tsx": [
-        r"^\s*(?:import|export|require)\s*",
-        r"^\s*(?:function|class|const|let|var|interface|type|enum|abstract)\s+\w+",
-    ],
-    "c_sharp": [
-        r"^\s*(?:using)\s+",
-        r"^\s*(?:namespace|public|private|protected|internal|static|sealed|abstract|partial|override|virtual)\s+",
-        r"^\s*(?:\[[\w\.\(\)\"]+\])",        # attributes
-    ],
-    "java": [
-        r"^\s*(?:import|package)\s+",
-        r"^\s*(?:public|private|protected|static|final|abstract|synchronized|@)\s*",
-    ],
-    "sql": [],  # SQL skeleton falls back to individual statements
-}
-
-# Body-start patterns (lines after which we can insert "...")
-_BODY_START: dict[str, list[str]] = {
-    "python":     [r":\s*$"],
-    "javascript": [r"\{\s*$"],
-    "typescript": [r"\{\s*$"],
-    "tsx":        [r"\{\s*$"],
-    "c_sharp":    [r"\{\s*$"],
-    "java":       [r"\{\s*$"],
-    "sql":        [],
-}
-
-
-def _build_file_skeleton(
-    content: str,
-    changed_lines: list[int],
-    lang: str,
-) -> str:
-    """Build a file skeleton: structural lines + changed blocks + ``...`` placeholders.
-
-    The skeleton includes:
-    - All structural/declaration lines (imports, signatures, class headers)
-    - Full content of lines inside changed regions (± ADAPTIVE_CONTEXT_LINES)
-    - ``...`` for bodies of unchanged functions/methods
-
-    Args:
-        content: Full source file content.
-        changed_lines: 1-based line numbers that were changed.
-        lang: Tree-sitter language name for pattern selection.
-
-    Returns:
-        Formatted skeleton string with 1-based line numbers.
-    """
-    all_lines = content.splitlines()
-    total = len(all_lines)
-
-    if not all_lines:
-        return ""
-
-    # Build set of "always include" lines (context around changes)
-    always: set[int] = set()
-    for ln in changed_lines:
-        lo = max(1, ln - ADAPTIVE_CONTEXT_LINES)
-        hi = min(total, ln + ADAPTIVE_CONTEXT_LINES)
-        always.update(range(lo, hi + 1))
-
-    # Structural patterns for this language
-    struct_patterns = [re.compile(p) for p in _SKELETON_PATTERNS.get(lang, [])]
-
-    result_lines: list[str] = []
-    skipping = False
-    prev_shown: Optional[int] = None
-
-    for idx, src in enumerate(all_lines, start=1):
-        is_structural = any(p.search(src) for p in struct_patterns)
-        in_changed = idx in always
-
-        if in_changed or is_structural:
-            if skipping and prev_shown is not None:
-                result_lines.append("      ...")
-            skipping = False
-            result_lines.append(f"{idx:4d}: {src}")
-            prev_shown = idx
-        else:
-            skipping = True
-
-    if skipping:
-        result_lines.append("      ...")
-
-    return "\n".join(result_lines)
-
-
-# ---------------------------------------------------------------------------
-# SQL-specific extraction
-# ---------------------------------------------------------------------------
-
-
-def _extract_sql_statement(
-    content: str,
-    changed_lines: list[int],
-    lang: str,
-) -> list[ScopeInfo]:
-    """Find the SQL statement(s) covering each changed line via Tree-sitter.
-
-    Args:
-        content: Full SQL file content.
-        changed_lines: 1-based line numbers that were changed.
-        lang: Always ``"sql"`` for this path.
-
-    Returns:
-        List of :class:`ScopeInfo` for each affected SQL statement.
-
-    Raises:
-        Exception: On Tree-sitter parse failure (caller activates fallback).
-    """
-    return _extract_enclosing_scopes_ts(content, changed_lines, lang)
 
 
 # ---------------------------------------------------------------------------
@@ -533,9 +460,10 @@ class ContextExtractor:
     The returned *xml_block* is ready to be embedded in the LLM user message.
 
     Attributes:
-        max_scope_blocks: Threshold for Scenario A vs Scenario B selection.
+        max_scope_blocks: Maximum number of AST scopes before falling back to
+            adaptive_diff.
         max_scope_lines: Maximum lines per scope block before falling back to
-            file_skeleton (avoids sending entire large classes to the LLM).
+            adaptive_diff (avoids sending entire large classes to the LLM).
         adaptive_context_lines: Lines of context for the fallback strategy.
     """
 
@@ -565,9 +493,8 @@ class ContextExtractor:
 
         1. If Tree-sitter is unavailable → ``adaptive_diff``
         2. If the language is not supported → ``adaptive_diff``
-        3. If the language is SQL → ``sql_statement`` (falls back on failure)
-        4. If ≤ ``max_scope_blocks`` distinct scopes found → ``enclosing_scopes``
-        5. Otherwise → ``file_skeleton``
+        3. If the extracted scopes fit the configured limits → ``enclosing_scopes``
+        4. Otherwise → ``adaptive_diff``
 
         Args:
             file_path: Path (or name) of the file being reviewed.
@@ -576,9 +503,8 @@ class ContextExtractor:
 
         Returns:
             A tuple ``(strategy, xml_block)`` where *strategy* is one of
-            ``"enclosing_scopes"``, ``"file_skeleton"``, ``"sql_statement"``,
-            or ``"adaptive_diff"``, and *xml_block* is the XML-tagged string
-            ready for the LLM payload.
+            ``"enclosing_scopes"`` or ``"adaptive_diff"``, and *xml_block*
+            is the XML-tagged string ready for the LLM payload.
         """
         if not changed_lines:
             return "adaptive_diff", ""
@@ -592,24 +518,18 @@ class ContextExtractor:
             return self._adaptive(file_path, new_content, changed_lines)
 
         # ------------------------------------------------------------------
-        # SQL path
-        # ------------------------------------------------------------------
-        if lang == "sql":
-            try:
-                scopes = _extract_sql_statement(new_content, changed_lines, lang)
-                if scopes:
-                    return self._format_enclosing_scopes(
-                        file_path, scopes, strategy="sql_statement"
-                    )
-            except Exception:
-                pass
-            return self._adaptive(file_path, new_content, changed_lines)
-
-        # ------------------------------------------------------------------
         # Generic AST path
         # ------------------------------------------------------------------
+        ast_changed_lines = _non_whitespace_changed_lines(new_content, changed_lines)
+        if not ast_changed_lines:
+            return self._adaptive(file_path, new_content, changed_lines)
+
         try:
-            scopes = _extract_enclosing_scopes_ts(new_content, changed_lines, lang)
+            scopes = _extract_enclosing_scopes_ts(
+                new_content,
+                ast_changed_lines,
+                lang,
+            )
         except Exception:
             return self._adaptive(file_path, new_content, changed_lines)
 
@@ -617,29 +537,17 @@ class ContextExtractor:
             # No enclosing scope found (top-level code) → adaptive diff
             return self._adaptive(file_path, new_content, changed_lines)
 
-        if len(scopes) <= self.max_scope_blocks:
-            # Check if any single scope is too large — if so, fall back to
-            # file_skeleton to avoid sending a 900-line class body to the LLM.
-            oversized = any(
-                (s.end_line - s.start_line) > self.max_scope_lines
-                for s in scopes
-            )
-            if not oversized:
-                # Scenario A: Enclosing Scopes
-                return self._format_enclosing_scopes(file_path, scopes)
+        scopes = _remove_redundant_ancestor_scopes(scopes, ast_changed_lines)
 
-        # Scenario B: File Skeleton
-        try:
-            skeleton = _build_file_skeleton(new_content, changed_lines, lang)
-        except Exception:
+        too_many_scopes = len(scopes) > self.max_scope_blocks
+        oversized_scope = any(
+            (s.end_line - s.start_line + 1) > self.max_scope_lines
+            for s in scopes
+        )
+        if too_many_scopes or oversized_scope:
             return self._adaptive(file_path, new_content, changed_lines)
 
-        xml = (
-            f'<file_skeleton file="{file_path}">\n'
-            f"{skeleton}\n"
-            f"</file_skeleton>"
-        )
-        return "file_skeleton", xml
+        return self._format_enclosing_scopes(file_path, scopes)
 
     # ------------------------------------------------------------------
     # Internal formatters
@@ -666,7 +574,6 @@ class ContextExtractor:
         self,
         file_path: str,
         scopes: list[ScopeInfo],
-        strategy: str = "enclosing_scopes",
     ) -> tuple[str, str]:
         """Render a list of :class:`ScopeInfo` into an XML block."""
         parts: list[str] = []
@@ -679,13 +586,12 @@ class ContextExtractor:
             parts.append(_format_scope_block(scope))
 
         body = "\n".join(parts)
-        tag = "enclosing_scopes" if strategy == "enclosing_scopes" else strategy
         xml = (
-            f'<{tag} file="{file_path}">\n'
+            f'<enclosing_scopes file="{file_path}">\n'
             f"{body}\n"
-            f"</{tag}>"
+            f"</enclosing_scopes>"
         )
-        return strategy, xml
+        return "enclosing_scopes", xml
 
     # ------------------------------------------------------------------
     # Utility: extract changed lines from a diff hunk for one file
