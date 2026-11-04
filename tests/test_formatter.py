@@ -273,3 +273,26 @@ def test_terminal_review_header_consistent_with_structured_comments() -> None:
 
     assert "🤖 AI Review Comments" in review_rendered
     assert "🤖 AI Review Comments" in structured_rendered
+
+
+def test_format_local_details_renders_metadata_and_files() -> None:
+    """It should render repository, branch, target, and changed files for local Git reviews."""
+    formatter = ReviewFormatter(color=False, output_format="terminal")
+    details = {
+        "repository": "my-repo",
+        "branch": "feature/local",
+        "target": "main → HEAD",
+        "changed_files": [
+            {"path": "/src/app.py", "change_type": "edit"},
+            {"path": "/src/new.py", "change_type": "add"},
+        ],
+    }
+
+    rendered = formatter.format_local_details(details)
+
+    assert "Local Git Review" in rendered
+    assert "my-repo" in rendered
+    assert "feature/local" in rendered
+    assert "main → HEAD" in rendered
+    assert "/src/app.py" in rendered
+    assert "/src/new.py" in rendered

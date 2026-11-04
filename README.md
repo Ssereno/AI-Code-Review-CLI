@@ -5,6 +5,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 ## Features
 
 - AI Pull Request review (`pr-review`)
+- Local Git review without a PR (`local` / `local-review` — working tree, `--staged`, `--from <branch>`, `--commit <sha>`)
 - Structured PR comments (inline + general summary)
 - `dry-run` mode to validate without posting
 - PR listing with filters (`list-prs`)

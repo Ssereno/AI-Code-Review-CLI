@@ -107,3 +107,32 @@ Options:
 - `--repo-name`, `-r`
 - `--status {active,completed,abandoned,all}`
 - `--author`
+
+### Local Git Review (`local` / `local-review`)
+
+Review local Git changes before opening a Pull Request (no TFS/Azure DevOps configuration required):
+
+```bash
+# Review uncommitted changes (working tree + staged + untracked files)
+ai-review local
+
+# Review only staged changes (git diff --cached)
+ai-review local --staged
+
+# Compare current branch against a base branch (e.g. main)
+ai-review local --from main
+
+# Compare two specific branches or refs
+ai-review local --from main --to feature/my-branch
+
+# Review a single commit
+ai-review local --commit abc1234
+```
+
+Options:
+- `--staged`, `-s` — Review only staged changes (`git diff --cached`)
+- `--from REF`, `--base REF` — Base branch or commit to compare from
+- `--to REF` — Target branch or commit to compare to (default: `HEAD` when `--from` is used)
+- `--commit SHA` — Review a single commit (`<commit>~1..<commit>`)
+- `--repo-path PATH` — Path to the local Git repository (default: current directory)
+- Supports all global review, output, and configuration options (`--detailed`, `--security`, `--review-scope`, `--output`, `--provider`, `--model`, etc.)

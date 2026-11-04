@@ -13,6 +13,7 @@ Usage:
     python ai_review.py                  # Interactive mode (main menu)
     python ai_review.py pr-review        # List PRs and do interactive review
     python ai_review.py pr-review <id>   # Direct review of a specific PR
+    python ai_review.py local            # Review local Git changes (uncommitted/staged/branch)
     python ai_review.py list-prs         # List active Pull Requests
 
 Options:
@@ -82,7 +83,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = _ensure_project_root_on_path(__file__)
 
 from src.config import ReviewConfig, VALID_PROVIDERS  # noqa: E402
-from src.git_utils import GitUtils  # noqa: E402
+from src.context_extractor import ContextExtractor  # noqa: E402
+from src.git_utils import GitError, GitUtils  # noqa: E402
 from src.llm_client import LLMClient, LLMError  # noqa: E402
 from src.formatter import ReviewFormatter, Colors, save_output  # noqa: E402
 from src import __version__ as VERSION  # noqa: E402
@@ -162,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s pr-review                     # List PRs and select\n"
             "  %(prog)s pr-review 42 --dry-run        # Review PR #42 without posting\n"
             "  %(prog)s pr-review 42 --provider bedrock # Review PR #42 with Bedrock\n"
+            "  %(prog)s local                         # Review local uncommitted changes\n"
+            "  %(prog)s local --staged                # Review staged changes\n"
+            "  %(prog)s local --from main             # Review branch diff against main\n"
             "  %(prog)s list-prs --status active       # List active PRs\n"
         ),
     )
@@ -186,6 +191,33 @@ def build_parser() -> argparse.ArgumentParser:
     sub_pr_review.add_argument("--target-branch", default=None,
                                 help="Filter PRs by target branch")
 
+    # --- local / local-review (LOCAL GIT MODE) ---
+    sub_local = subparsers.add_parser(
+        "local",
+        aliases=["local-review"],
+        help="💻 Local Git Review (uncommitted, staged, branch range, or commit)",
+    )
+    sub_local.add_argument(
+        "--staged", "-s", action="store_true",
+        help="Review only staged changes (git diff --cached)",
+    )
+    sub_local.add_argument(
+        "--from", "--base", dest="from_ref", default=None, metavar="REF",
+        help="Base branch or commit to compare from (e.g., main, origin/main)",
+    )
+    sub_local.add_argument(
+        "--to", dest="to_ref", default=None, metavar="REF",
+        help="Target branch or commit to compare to (default: HEAD when --from is used)",
+    )
+    sub_local.add_argument(
+        "--commit", default=None, metavar="SHA",
+        help="Review a specific commit (compares <commit>~1 to <commit>)",
+    )
+    sub_local.add_argument(
+        "--repo-path", default=None, metavar="PATH",
+        help="Path to the local Git repository (default: current directory)",
+    )
+
     # --- init ---
     subparsers.add_parser(
         "init", help="Create a config.yaml template in the current directory"
@@ -203,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
                               help="Filter by author")
 
     # --- Global options ---
-    all_subs = [sub_pr_review, sub_list_prs]
+    all_subs = [sub_pr_review, sub_local, sub_list_prs]
     for sub in all_subs:
         _add_global_options(sub)
 
@@ -294,6 +326,26 @@ def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
     save_output(md_output, output_file)
 
 
+def _save_local_review_output(output_file: str, repo_name: str,
+                              branch_label: str, review_text: str,
+                              was_truncated: bool) -> None:
+    """Saves the local Git review output if a target file was provided."""
+    if not output_file:
+        return
+
+    md_formatter = ReviewFormatter(color=False, output_format="markdown")
+    md_output = "\n".join([
+        md_formatter.format_header(
+            review_type="Local Git Review",
+            repo_name=repo_name,
+            branch=branch_label,
+        ),
+        review_text,
+        md_formatter.format_footer(truncated=was_truncated),
+    ])
+    save_output(md_output, output_file)
+
+
 # ---------------------------------------------------------------------------
 # Command execution functions
 # ---------------------------------------------------------------------------
@@ -348,6 +400,8 @@ def run_review(args: argparse.Namespace) -> int:
 
     if command == "pr-review":
         return run_pr_review_workflow(args, config, formatter)
+    elif command in ("local", "local-review"):
+        return run_local_review_workflow(args, config, formatter)
     elif command == "list-prs":
         return run_list_prs(args, config, formatter)
 
@@ -714,6 +768,174 @@ def _select_comments_to_post(comments: list[dict],
 
 
 # ---------------------------------------------------------------------------
+# Local Git Review
+# ---------------------------------------------------------------------------
+def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
+                              formatter: ReviewFormatter) -> int:
+    """
+    Local Git review workflow (working tree, staged, branch range, or commit).
+    Does not require TFS/Azure DevOps configuration.
+    """
+    repo_path = getattr(args, "repo_path", None)
+    try:
+        git_utils = GitUtils(repo_path=repo_path)
+    except GitError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    staged = bool(getattr(args, "staged", False))
+    from_ref = getattr(args, "from_ref", None)
+    to_ref = getattr(args, "to_ref", None)
+    commit = getattr(args, "commit", None)
+
+    repo_name = git_utils.get_repo_name()
+    branch = git_utils.get_current_branch()
+
+    if commit:
+        target_label = f"Commit {commit}"
+    elif from_ref:
+        target_label = f"{from_ref} → {to_ref or 'HEAD'}"
+    elif staged:
+        target_label = "Staged changes (--cached)"
+    else:
+        target_label = "Uncommitted changes (working tree)"
+
+    print(formatter.format_progress(f"Inspecting local Git changes ({target_label})"))
+
+    try:
+        changed_files = git_utils.get_local_changed_files(
+            staged=staged,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            commit=commit,
+        )
+    except GitError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    if not changed_files:
+        print(formatter.format_warning("No local code changes found to review."))
+        return 0
+
+    local_details = {
+        "repository": repo_name,
+        "branch": branch,
+        "target": target_label,
+        "changed_files": changed_files,
+    }
+    print(formatter.format_local_details(local_details))
+
+    if config.debug_dump and not config.debug_dump_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config.debug_dump_file = os.path.join("logs", f"local_{timestamp}_debug.log")
+        os.makedirs(os.path.dirname(config.debug_dump_file), exist_ok=True)
+        print(formatter.format_info(f"🐛 Debug dump enabled: {config.debug_dump_file}"))
+
+    print(formatter.format_progress("Building local diff and AST context"))
+
+    extractor = ContextExtractor(
+        max_scope_blocks=config.max_scope_blocks,
+        max_scope_lines=config.max_scope_lines,
+        adaptive_context_lines=config.adaptive_context_lines,
+    )
+
+    try:
+        diff = git_utils.get_local_diff(
+            review_scope=config.review_scope,
+            excluded_paths=config.excluded_paths or None,
+            file_extensions_filter=config.file_extensions_filter or None,
+            staged=staged,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            commit=commit,
+            context_extractor=extractor,
+        )
+    except GitError as exc:
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    if not diff.strip():
+        print(formatter.format_warning("No eligible code changes found after filtering."))
+        return 0
+
+    print(formatter.format_info(
+        f"Provider: {config.llm_provider} | Model: {config.model} | "
+        f"Mode: {config.verbosity} | Scope: {config.review_scope}"
+    ))
+
+    diff = git_utils.filter_diff_additions_only(diff)
+    if not diff.strip():
+        print(formatter.format_warning(
+            "After filtering additions only, the diff is empty. No new code to review."
+        ))
+        return 0
+
+    diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
+        diff,
+        config.max_diff_files,
+    )
+    if files_limited:
+        print(formatter.format_warning(
+            f"Diff truncated to {config.max_diff_files} files. "
+            f"{omitted_files} file(s) omitted."
+        ))
+
+    files_summary = git_utils.get_changed_files_summary(diff_limited)
+
+    diff_truncated, was_truncated = git_utils.truncate_diff(
+        diff_limited,
+        config.max_diff_lines,
+    )
+    if was_truncated:
+        print(formatter.format_warning(
+            f"Diff truncated to {config.max_diff_lines} lines per file."
+        ))
+
+    progress = ProgressIndicator("Analyzing local code with AI (may take 30-60s)")
+    progress.start()
+    start_time = time.time()
+
+    try:
+        llm = LLMClient(config)
+        review_text, structured_comments = llm.review_pr(
+            diff=diff_truncated,
+            files_summary=files_summary,
+            context=getattr(args, "context", ""),
+            review_scope=config.review_scope,
+        )
+    except LLMError as exc:
+        progress.stop()
+        print(formatter.format_error(str(exc)))
+        return 1
+
+    elapsed = time.time() - start_time
+    progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
+
+    token_estimate = getattr(llm, "last_token_estimate", None)
+    if token_estimate is not None and token_estimate.total_prompt_tokens is not None:
+        print(formatter.format_info(
+            f"Total Prompt: {token_estimate.total_prompt_tokens} tokens"
+        ))
+    else:
+        print(formatter.format_warning(
+            "Total Prompt: unavailable (LiteLLM and local tiktoken could not count the model)"
+        ))
+
+    print(formatter.format_structured_comments(structured_comments))
+
+    output_file = config.output_file or getattr(args, "output", "")
+    _save_local_review_output(
+        output_file=output_file,
+        repo_name=repo_name,
+        branch_label=f"{branch} ({target_label})",
+        review_text=review_text,
+        was_truncated=was_truncated,
+    )
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # List PRs
 # ---------------------------------------------------------------------------
 def run_list_prs(args: argparse.Namespace, config: ReviewConfig,
@@ -768,12 +990,15 @@ def interactive_mode() -> int:
     print(f"  {c.CYAN}1{c.RESET}) 🌟 Pull Request Review (list PRs and select)")
     print(f"  {c.CYAN}2{c.RESET}) 📋 List active Pull Requests")
     print("")
+    print(f"  {c.CYAN}{c.BOLD}── Local Git ──{c.RESET}")
+    print(f"  {c.CYAN}4{c.RESET}) 💻 Local Git Review (working tree, staged, or branch diff)")
+    print("")
     print(f"  {c.CYAN}{c.BOLD}── Other ──{c.RESET}")
     print(f"  {c.CYAN}3{c.RESET}) Current configuration")
     print(f"  {c.CYAN}0{c.RESET}) Exit")
 
     try:
-        choice = input(f"\n{c.BOLD}Choose [0-3]: {c.RESET}").strip()
+        choice = input(f"\n{c.BOLD}Choose [0-4]: {c.RESET}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\n")
         return 0
@@ -791,6 +1016,9 @@ def interactive_mode() -> int:
     if choice == "3":
         _show_config(config)
         return 0
+
+    if choice == "4":
+        return _interactive_local_review(config)
 
     print(f"{c.RED}Invalid option.{c.RESET}")
     return 1
@@ -831,6 +1059,41 @@ def _interactive_pr_review(config: ReviewConfig) -> int:
 def _interactive_list_prs(config: ReviewConfig) -> int:
     """Lists PRs interactively."""
     argv = ["list-prs"]
+    parser = build_parser()
+    parsed = parser.parse_args(argv)
+    return run_review(parsed)
+
+
+def _interactive_local_review(config: ReviewConfig) -> int:
+    """Interactive local Git review workflow."""
+    c = Colors
+
+    print(f"\n{c.BOLD}Local review target:{c.RESET}")
+    print(f"  {c.CYAN}1{c.RESET}) Uncommitted changes (working tree + staged)")
+    print(f"  {c.CYAN}2{c.RESET}) Staged changes only (--staged)")
+    print(f"  {c.CYAN}3{c.RESET}) Compare against base branch (--from)")
+
+    try:
+        target_choice = input(f"{c.BOLD}Choose [1-3, default=1]: {c.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        return 0
+
+    argv = ["local"]
+    if target_choice == "2":
+        argv.append("--staged")
+    elif target_choice == "3":
+        try:
+            base_ref = input(f"{c.BOLD}Base branch/ref (default=main): {c.RESET}").strip() or "main"
+        except (KeyboardInterrupt, EOFError):
+            print("\n")
+            return 0
+        argv.extend(["--from", base_ref])
+
+    verbosity = _ask_verbosity()
+    if verbosity:
+        argv.append(f"--{verbosity}")
+
     parser = build_parser()
     parsed = parser.parse_args(argv)
     return run_review(parsed)

@@ -128,6 +128,103 @@ def test_build_parser_applies_global_options_to_list_prs() -> None:
     assert args.output_format == "markdown"
 
 
+def test_build_parser_parses_local_review_options() -> None:
+    """It should parse the local review command and its target flags."""
+    parser = ai_review.build_parser()
+
+    args = parser.parse_args([
+        "local",
+        "--from",
+        "main",
+        "--to",
+        "feature/x",
+        "--security",
+        "--output",
+        "local.md",
+    ])
+
+    assert args.command == "local"
+    assert args.from_ref == "main"
+    assert args.to_ref == "feature/x"
+    assert args.verbosity == "security"
+    assert args.output == "local.md"
+
+
+def test_run_review_dispatches_to_local_workflow(mocker, review_config) -> None:
+    """It should route the local command to run_local_review_workflow."""
+    mocker.patch("src.ai_review.ReviewConfig.load", return_value=review_config)
+    workflow = mocker.patch("src.ai_review.run_local_review_workflow", return_value=0)
+    mocker.patch("src.ai_review.ReviewFormatter")
+
+    result = ai_review.run_review(make_args(command="local"))
+
+    assert result == 0
+    workflow.assert_called_once()
+
+
+def test_run_local_review_workflow_completes_and_saves_output(mocker, review_config) -> None:
+    """It should inspect local Git changes, run LLM review, and save output without TFS."""
+    formatter = MagicMock()
+    formatter.format_progress.side_effect = lambda msg: msg
+    formatter.format_local_details.return_value = "LOCAL DETAILS"
+    formatter.format_info.side_effect = lambda msg: msg
+    formatter.format_structured_comments.return_value = "LOCAL COMMENTS"
+    formatter.format_warning.side_effect = lambda msg: msg
+    formatter.format_success.side_effect = lambda msg: msg
+
+    diff = "diff --git a/src/a.py b/src/a.py\n+++ b/src/a.py\n@@ -0,0 +1 @@\n+print('local')"
+    git_utils = MagicMock()
+    git_utils.get_repo_name.return_value = "my-repo"
+    git_utils.get_current_branch.return_value = "feature/local"
+    git_utils.get_local_changed_files.return_value = [
+        {"path": "/src/a.py", "change_type": "edit", "original_path": "/src/a.py"}
+    ]
+    git_utils.get_local_diff.return_value = diff
+    git_utils.filter_diff_additions_only.return_value = diff
+    git_utils.limit_diff_files.return_value = (diff, False, 0)
+    git_utils.get_changed_files_summary.return_value = [{"file": "src/a.py", "additions": 1, "deletions": 0}]
+    git_utils.truncate_diff.return_value = (diff, False)
+
+    llm = MagicMock()
+    llm.review_pr.return_value = (
+        "Local review summary",
+        [{"file": "src/a.py", "line": 1, "type": "suggestion", "comment": "check"}],
+    )
+
+    markdown_formatter = MagicMock()
+    markdown_formatter.format_header.return_value = "HEADER"
+    markdown_formatter.format_footer.return_value = "FOOTER"
+
+    mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.GitUtils", return_value=git_utils)
+    mocker.patch("src.ai_review.LLMClient", return_value=llm)
+    save_output = mocker.patch("src.ai_review.save_output")
+    mocker.patch(
+        "src.ai_review.ReviewFormatter",
+        side_effect=lambda *args, **kwargs: (
+            markdown_formatter if kwargs.get("output_format") == "markdown" else formatter
+        ),
+    )
+    print_mock = mocker.patch("builtins.print")
+
+    args = make_args(
+        command="local",
+        staged=False,
+        from_ref="main",
+        to_ref=None,
+        commit=None,
+        repo_path=None,
+        output="local_review.md",
+    )
+    result = ai_review.run_local_review_workflow(args, review_config, formatter)
+
+    assert result == 0
+    git_utils.get_local_diff.assert_called_once()
+    llm.review_pr.assert_called_once()
+    save_output.assert_called_once()
+    print_mock.assert_any_call("LOCAL COMMENTS")
+
+
 def test_run_review_returns_error_for_invalid_config(mocker, review_config) -> None:
     """It should stop before command dispatch when configuration validation fails."""
     formatter = MagicMock()
