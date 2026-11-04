@@ -183,3 +183,136 @@ def test_filter_diff_additions_only_without_context_block_keeps_context_strips_d
     assert "context_line" in filtered       # context lines are kept
     assert "removed_line" not in filtered   # deletions are stripped
 
+
+def test_get_repo_root_name_and_branch() -> None:
+    """It should resolve repository root, name, and branch with fallbacks."""
+    instance = make_git_utils("/workspace/my-repo")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(*args: str, **kwargs: object) -> str:
+        calls.append(args)
+        if args == ("rev-parse", "--show-toplevel"):
+            return "/workspace/my-repo\n"
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return "feature/local\n"
+        return ""
+
+    instance._run_git = fake_run  # type: ignore[method-assign]
+    assert instance.get_repo_root() == "/workspace/my-repo"
+    assert instance.get_repo_name() == "my-repo"
+    assert instance.get_current_branch() == "feature/local"
+
+    # Detached HEAD fallback
+    def fake_detached(*args: str, **kwargs: object) -> str:
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return "HEAD\n"
+        if args == ("rev-parse", "--short", "HEAD"):
+            return "abc1234\n"
+        raise GitError("err")
+
+    instance._run_git = fake_detached  # type: ignore[method-assign]
+    assert instance.get_repo_root() == "/workspace/my-repo"
+    assert instance.get_current_branch() == "abc1234"
+
+
+def test_parse_name_status_and_get_local_changed_files() -> None:
+    """It should parse git name-status output for working tree, staged, branch, and commit."""
+    raw_status = "\n".join([
+        "M\tsrc/app.py",
+        "A\tsrc/new.py",
+        "D\tsrc/old.py",
+        "R100\tsrc/before.py\tsrc/after.py",
+    ])
+    parsed = GitUtils._parse_name_status(raw_status)
+    assert parsed == [
+        {"path": "/src/app.py", "change_type": "edit", "original_path": "/src/app.py"},
+        {"path": "/src/new.py", "change_type": "add", "original_path": "/src/new.py"},
+        {"path": "/src/old.py", "change_type": "delete", "original_path": "/src/old.py"},
+        {"path": "/src/after.py", "change_type": "rename", "original_path": "/src/before.py"},
+    ]
+
+    instance = make_git_utils("/repo")
+
+    def fake_git(*args: str, **kwargs: object) -> str:
+        if args == ("diff", "--name-status", "-M", "HEAD"):
+            return "M\tsrc/app.py\n"
+        if args == ("ls-files", "--others", "--exclude-standard"):
+            return "src/untracked.py\n"
+        if args == ("diff", "--cached", "--name-status", "-M"):
+            return "A\tsrc/staged.py\n"
+        if args == ("diff", "--name-status", "-M", "main", "HEAD"):
+            return "M\tsrc/branch.py\n"
+        if args == ("diff", "--name-status", "-M", "abc~1", "abc"):
+            return "M\tsrc/commit.py\n"
+        return ""
+
+    instance._run_git = fake_git  # type: ignore[method-assign]
+
+    wt_files = instance.get_local_changed_files()
+    assert wt_files == [
+        {"path": "/src/app.py", "change_type": "edit", "original_path": "/src/app.py"},
+        {"path": "/src/untracked.py", "change_type": "add", "original_path": "/src/untracked.py"},
+    ]
+
+    staged_files = instance.get_local_changed_files(staged=True)
+    assert staged_files == [
+        {"path": "/src/staged.py", "change_type": "add", "original_path": "/src/staged.py"},
+    ]
+
+    branch_files = instance.get_local_changed_files(from_ref="main")
+    assert branch_files == [
+        {"path": "/src/branch.py", "change_type": "edit", "original_path": "/src/branch.py"},
+    ]
+
+    commit_files = instance.get_local_changed_files(commit="abc")
+    assert commit_files == [
+        {"path": "/src/commit.py", "change_type": "edit", "original_path": "/src/commit.py"},
+    ]
+
+
+def test_get_local_diff_diff_only_and_full_code(tmp_path) -> None:
+    """It should build unified diffs with AST context or full_code diffs and apply filters."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    src_dir = repo_dir / "src"
+    src_dir.mkdir()
+    app_file = src_dir / "app.py"
+    app_file.write_text("def greet():\n    return 'hello world'\n", encoding="utf-8")
+
+    instance = make_git_utils(str(repo_dir))
+    instance.get_repo_root = lambda: str(repo_dir)  # type: ignore[method-assign]
+    instance.get_local_changed_files = lambda **kwargs: [  # type: ignore[method-assign]
+        {"path": "/src/app.py", "change_type": "edit", "original_path": "/src/app.py"},
+        {"path": "/src/deleted.py", "change_type": "delete", "original_path": "/src/deleted.py"},
+        {"path": "/libs/gen.py", "change_type": "add", "original_path": "/libs/gen.py"},
+        {"path": "/docs/readme.md", "change_type": "add", "original_path": "/docs/readme.md"},
+    ]
+
+    def fake_git(*args: str, **kwargs: object) -> str:
+        if args == ("show", "HEAD:src/app.py"):
+            return "def greet():\n    return 'old'\n"
+        return ""
+
+    instance._run_git = fake_git  # type: ignore[method-assign]
+
+    diff_only = instance.get_local_diff(
+        review_scope="diff_only",
+        excluded_paths=["libs/"],
+        file_extensions_filter=[".py"],
+    )
+    assert "diff --git a/src/app.py b/src/app.py" in diff_only
+    assert "+    return 'hello world'" in diff_only
+    assert "libs/gen.py" not in diff_only
+    assert "docs/readme.md" not in diff_only
+    assert ("<enclosing_scopes" in diff_only) or ("<adaptive_diff" in diff_only)
+
+    full_code = instance.get_local_diff(
+        review_scope="full_code",
+        excluded_paths=["libs/"],
+        file_extensions_filter=[".py"],
+    )
+    assert "@@ Change type: edit @@" in full_code
+    assert "+def greet():" in full_code
+    assert "+    return 'hello world'" in full_code
+
+

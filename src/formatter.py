@@ -230,6 +230,32 @@ class ReviewFormatter:
         output += f"\n{c.BLUE}{line}{c.RESET}\n"
         return output
 
+    def format_local_details(self, details: dict) -> str:
+        """Formats local Git review details for the terminal."""
+        c = Colors
+        width = 60
+        line = "─" * width
+
+        output = f"\n{c.BLUE}{c.BOLD}{line}{c.RESET}\n"
+        output += f"{c.BOLD}  💻 Local Git Review{c.RESET}\n"
+        output += f"{c.BLUE}{line}{c.RESET}\n"
+        output += f"{c.CYAN}  Repository: {c.WHITE}{details.get('repository', 'local')}{c.RESET}\n"
+        output += f"{c.CYAN}  Branch:     {c.GREEN}{details.get('branch', 'HEAD')}{c.RESET}\n"
+        output += f"{c.CYAN}  Target:     {c.YELLOW}{details.get('target', 'Working tree')}{c.RESET}\n"
+
+        changed_files = details.get("changed_files", [])
+        if changed_files:
+            output += f"\n{c.BOLD}  📁 Changed Files ({len(changed_files)}):{c.RESET}\n"
+            for f in changed_files[:20]:
+                change_icon = {"add": "🟢", "edit": "🟡", "delete": "🔴",
+                              "rename": "🔵"}.get(f["change_type"], "⚪")
+                output += f"    {change_icon} {f['path']}\n"
+            if len(changed_files) > 20:
+                output += f"    {c.DIM}... +{len(changed_files)-20} more files{c.RESET}\n"
+
+        output += f"\n{c.BLUE}{line}{c.RESET}\n"
+        return output
+
     def format_structured_comments(self, comments: list[dict],
                                    discarded_count: int = 0) -> str:
         """Formats LLM structured comments for terminal preview."""

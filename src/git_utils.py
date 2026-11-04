@@ -10,9 +10,12 @@ used by the PR review pipeline.
 Works with any Git repository, including TFS/Azure DevOps.
 """
 
+import difflib
 import subprocess
 import os
 from typing import Optional
+
+from .context_extractor import ContextExtractor
 
 class GitError(Exception):
     """Exception for Git-related errors."""
@@ -292,3 +295,334 @@ class GitUtils:
             })
 
         return files
+
+    # ------------------------------------------------------------------
+    # Local Git Repository Inspection & Diff Generation
+    # ------------------------------------------------------------------
+    def get_repo_root(self) -> str:
+        """Returns the absolute path to the Git repository root."""
+        try:
+            root = self._run_git("rev-parse", "--show-toplevel").strip()
+            return root if root else self.repo_path
+        except GitError:
+            return self.repo_path
+
+    def get_repo_name(self) -> str:
+        """Returns the repository directory name."""
+        root = self.get_repo_root().rstrip("/\\")
+        return os.path.basename(root) or "local-repo"
+
+    def get_current_branch(self) -> str:
+        """Returns the current branch name (or commit SHA if detached)."""
+        try:
+            branch = self._run_git("rev-parse", "--abbrev-ref", "HEAD").strip()
+            if branch and branch != "HEAD":
+                return branch
+            return self._run_git("rev-parse", "--short", "HEAD").strip()
+        except GitError:
+            return "HEAD"
+
+    @staticmethod
+    def _parse_name_status(output: str) -> list[dict]:
+        """Parses ``git diff --name-status`` output into structured file entries."""
+        files: list[dict] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+
+            status_code = parts[0].upper()
+            if status_code.startswith("R") and len(parts) >= 3:
+                orig_rel = parts[1].replace("\\", "/").lstrip("/")
+                new_rel = parts[2].replace("\\", "/").lstrip("/")
+                files.append({
+                    "path": f"/{new_rel}",
+                    "change_type": "rename",
+                    "original_path": f"/{orig_rel}",
+                })
+            else:
+                rel_path = parts[1].replace("\\", "/").lstrip("/")
+                change_type_map = {
+                    "A": "add",
+                    "M": "edit",
+                    "D": "delete",
+                    "T": "edit",
+                    "C": "add",
+                }
+                change_type = change_type_map.get(status_code[0], "edit")
+                files.append({
+                    "path": f"/{rel_path}",
+                    "change_type": change_type,
+                    "original_path": f"/{rel_path}",
+                })
+        return files
+
+    def _resolve_diff_sources(
+        self,
+        staged: bool = False,
+        from_ref: Optional[str] = None,
+        to_ref: Optional[str] = None,
+        commit: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Determines the old and new content source identifiers for local diffs."""
+        if commit:
+            return f"{commit}~1", commit
+        if from_ref:
+            return from_ref, (to_ref or "HEAD")
+        if staged:
+            return "HEAD", "INDEX"
+        return "HEAD", "WORKTREE"
+
+    def get_local_changed_files(
+        self,
+        staged: bool = False,
+        from_ref: Optional[str] = None,
+        to_ref: Optional[str] = None,
+        commit: Optional[str] = None,
+    ) -> list[dict]:
+        """Lists files changed in the local Git repository for the selected target.
+
+        Args:
+            staged: When True, inspects only staged changes (``--cached``).
+            from_ref: Base branch or commit to compare from.
+            to_ref: Target branch or commit to compare to (default ``HEAD`` when
+                *from_ref* is provided).
+            commit: Single commit SHA/ref to inspect (compares ``<commit>~1`` to
+                ``<commit>``).
+
+        Returns:
+            List of dicts with ``path``, ``change_type`` and ``original_path``.
+        """
+        if commit:
+            try:
+                out = self._run_git("diff", "--name-status", "-M", f"{commit}~1", commit)
+            except GitError:
+                out = self._run_git(
+                    "diff-tree", "--no-commit-id", "--name-status", "-r", "-M", commit
+                )
+            return self._parse_name_status(out)
+
+        if from_ref:
+            target = to_ref or "HEAD"
+            out = self._run_git("diff", "--name-status", "-M", from_ref, target)
+            return self._parse_name_status(out)
+
+        if staged:
+            out = self._run_git("diff", "--cached", "--name-status", "-M")
+            return self._parse_name_status(out)
+
+        # Default: uncommitted changes (working tree + index vs HEAD) plus untracked files
+        try:
+            out = self._run_git("diff", "--name-status", "-M", "HEAD")
+        except GitError:
+            out = self._run_git("diff", "--cached", "--name-status", "-M")
+
+        files = self._parse_name_status(out)
+        existing_paths = {f["path"] for f in files}
+
+        try:
+            untracked = self._run_git("ls-files", "--others", "--exclude-standard")
+            for raw_line in untracked.splitlines():
+                rel_path = raw_line.strip().replace("\\", "/").lstrip("/")
+                if not rel_path:
+                    continue
+                slashed = f"/{rel_path}"
+                if slashed not in existing_paths:
+                    files.append({
+                        "path": slashed,
+                        "change_type": "add",
+                        "original_path": slashed,
+                    })
+                    existing_paths.add(slashed)
+        except GitError:
+            pass
+
+        return files
+
+    def _get_local_file_content(self, file_path: str, source: str) -> str:
+        """Reads file content from the working tree, staging index, or a Git ref."""
+        rel_path = file_path.replace("\\", "/").lstrip("/")
+        if source == "WORKTREE":
+            full_path = os.path.join(self.get_repo_root(), rel_path)
+            with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        if source == "INDEX":
+            return self._run_git("show", f":{rel_path}")
+        return self._run_git("show", f"{source}:{rel_path}")
+
+    def get_local_diff(
+        self,
+        review_scope: str = "diff_only",
+        excluded_paths: Optional[list[str]] = None,
+        file_extensions_filter: Optional[list[str]] = None,
+        staged: bool = False,
+        from_ref: Optional[str] = None,
+        to_ref: Optional[str] = None,
+        commit: Optional[str] = None,
+        context_extractor: Optional[ContextExtractor] = None,
+    ) -> str:
+        """Builds the review diff payload for local Git changes.
+
+        Uses the same unified-diff + AST context extraction pipeline
+        (:class:`~src.context_extractor.ContextExtractor`) and ``full_code``
+        mode as :meth:`~src.tfs_client.TFSClient.get_pull_request_diff`.
+        """
+        changes = self.get_local_changed_files(
+            staged=staged,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            commit=commit,
+        )
+        if not changes:
+            return ""
+
+        old_source, new_source = self._resolve_diff_sources(
+            staged=staged,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            commit=commit,
+        )
+        review_scope = (review_scope or "diff_only").lower()
+        extractor = context_extractor or ContextExtractor()
+
+        _excl_prefixes = [
+            p.replace("\\", "/").lstrip("/").lower()
+            for p in (excluded_paths or [])
+        ]
+        _ext_filter = [e.lower() for e in (file_extensions_filter or [])]
+
+        diff_parts: list[str] = []
+        for change in changes:
+            change_type = change.get("change_type", "edit")
+            if change_type == "delete":
+                continue
+
+            file_path = change.get("path") or "unknown"
+            original_path = change.get("original_path") or file_path
+
+            norm_path = file_path.replace("\\", "/").lstrip("/").lower()
+            if _excl_prefixes and any(
+                norm_path.startswith(excl) for excl in _excl_prefixes
+            ):
+                continue
+
+            if _ext_filter and not any(
+                norm_path.endswith(ext) for ext in _ext_filter
+            ):
+                continue
+
+            if review_scope == "full_code":
+                diff_parts.extend(
+                    self._build_local_full_code_diff_part(
+                        file_path=file_path,
+                        change_type=change_type,
+                        new_source=new_source,
+                    )
+                )
+                diff_parts.append("")
+                continue
+
+            diff_parts.extend(
+                self._build_local_unified_diff_part(
+                    file_path=file_path,
+                    original_path=original_path,
+                    change_type=change_type,
+                    old_source=old_source,
+                    new_source=new_source,
+                    extractor=extractor,
+                )
+            )
+            diff_parts.append("")
+
+        if not diff_parts:
+            return ""
+
+        return "\n".join(diff_parts)
+
+    def _build_local_full_code_diff_part(
+        self,
+        file_path: str,
+        change_type: str,
+        new_source: str,
+    ) -> list[str]:
+        """Builds a ``full_code`` payload for a single locally changed file."""
+        parts = [
+            f"diff --git a{file_path} b{file_path}",
+            f"--- a{file_path}",
+            f"+++ b{file_path}",
+            f"@@ Change type: {change_type} @@",
+        ]
+
+        if change_type in ("edit", "add", "rename"):
+            try:
+                content = self._get_local_file_content(file_path, new_source)
+                if content:
+                    for line in content.split("\n"):
+                        parts.append(f"+{line}")
+            except Exception:
+                parts.append(f"+[Content not available for {file_path}]")
+
+        return parts
+
+    def _build_local_unified_diff_part(
+        self,
+        file_path: str,
+        original_path: str,
+        change_type: str,
+        old_source: str,
+        new_source: str,
+        extractor: ContextExtractor,
+    ) -> list[str]:
+        """Builds a unified diff + AST context block for a single local file."""
+        old_lines: list[str] = []
+        new_lines: list[str] = []
+
+        if change_type in ("edit", "rename"):
+            try:
+                old_content = self._get_local_file_content(original_path, old_source)
+                old_lines = old_content.splitlines()
+            except Exception:
+                old_lines = []
+
+        if change_type in ("edit", "rename", "add"):
+            try:
+                new_content = self._get_local_file_content(file_path, new_source)
+                new_lines = new_content.splitlines()
+            except Exception:
+                new_lines = []
+
+        diff = list(difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a{original_path}",
+            tofile=f"b{file_path}",
+            lineterm="",
+            n=5,
+        ))
+
+        if not diff:
+            return [
+                f"diff --git a{original_path} b{file_path}",
+                f"--- a{original_path}",
+                f"+++ b{file_path}",
+                "@@ No textual differences detected (possible binary/metadata change) @@",
+            ]
+
+        result = [f"diff --git a{original_path} b{file_path}"] + list(diff)
+
+        if new_lines:
+            new_content_text = "\n".join(new_lines)
+            file_diff_text = "\n".join(result)
+            changed_lines = ContextExtractor.changed_lines_from_diff(file_diff_text)
+            _strategy, xml_block = extractor.extract(
+                file_path=file_path,
+                new_content=new_content_text,
+                changed_lines=changed_lines,
+            )
+            if xml_block:
+                result.append(xml_block)
+
+        return result
