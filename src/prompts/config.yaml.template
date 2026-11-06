@@ -75,11 +75,6 @@ review:
   # Default verbosity: "detailed" or "security"
   verbosity: detailed
 
-  # Review scope:
-  #   diff_only (default): focuses only on differences introduced in the PR
-  #   full_code: allows full code review of changed files
-  scope: diff_only
-
   # Markdown file with custom rules/context for the prompt
   # The content of this file is injected into LLM instructions on each review
   # custom_prompt_file: review_prompt.md
@@ -90,14 +85,14 @@ review:
   # Limit of diff lines per file (larger sections are truncated)
   max_diff_lines: 4500
 
-  # Max changed logical blocks for Enclosing Scopes strategy (diff_only mode)
+  # Max changed logical blocks for Enclosing Scopes strategy
   max_scope_blocks: 8
 
   # Max lines in a single enclosing scope before falling back to Adaptive Diff
   # (prevents sending entire large classes to the LLM)
   max_scope_lines: 250
 
-  # Surrounding lines to keep for Adaptive Diff fallback (diff_only mode)
+  # Surrounding lines to keep for Adaptive Diff fallback
   adaptive_context_lines: 10
 
   # Max cross-file symbol declarations resolved via AST per file (0 = disabled)

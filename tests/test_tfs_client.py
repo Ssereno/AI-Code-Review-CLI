@@ -279,8 +279,8 @@ def test_get_pr_changed_files_handles_error_paths(mocker) -> None:
     assert client._get_pr_changed_files("repo-a", 1) == [{"path": "/file.py", "change_type": "edit", "original_path": "/old.py"}]
 
 
-def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
-    """It should build diffs using the selected review scope."""
+def test_get_pull_request_diff_builds_unified_diff(mocker) -> None:
+    """It should build unified diffs for changed files in a PR."""
     client = TFSClient(make_tfs_config())
     mocker.patch(
         "src.tfs_client.TFSClient._get",
@@ -290,20 +290,8 @@ def test_get_pull_request_diff_for_full_code_and_diff_only(mocker) -> None:
             {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
         ],
     )
-    full_code = mocker.patch("src.tfs_client.TFSClient._build_full_code_diff_part", return_value=["FULL"])
     unified = mocker.patch("src.tfs_client.TFSClient._build_unified_diff_part", return_value=["UNIFIED"])
 
-    assert "FULL" in client.get_pull_request_diff("repo-a", 1, review_scope="full_code")
-    assert full_code.called
-
-    mocker.patch(
-        "src.tfs_client.TFSClient._get",
-        side_effect=[
-            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
-            {"value": [{"id": 2}]},
-            {"changeEntries": [{"item": {"path": "/a.py"}, "changeType": "edit", "originalPath": "/a.py"}]},
-        ],
-    )
     assert "UNIFIED" in client.get_pull_request_diff("repo-a", 1)
     assert unified.called
 
@@ -524,21 +512,17 @@ def test_get_pull_request_diff_returns_empty_when_only_deletes_present(mocker) -
 
 
 def test_build_diff_parts_and_file_content(mocker) -> None:
-    """It should build full-code and unified diff payloads from file content."""
+    """It should build unified diff payloads from file content."""
     client = TFSClient(make_tfs_config())
-    get_file = mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=["new\ncontent", "old", "new"])
+    get_file = mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=["old", "new"])
 
-    full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
     unified = client._build_unified_diff_part("repo-a", "/a.py", "/a.py", "edit", "refs/heads/feature", "refs/heads/main")
 
-    assert "+new" in full[4]
     assert unified[0].startswith("diff --git")
-    assert get_file.call_count == 3
+    assert get_file.call_count == 2
 
     mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=RuntimeError("boom"))
-    fallback_full = client._build_full_code_diff_part("repo-a", "/a.py", "edit", "refs/heads/feature")
     no_text = client._build_unified_diff_part("repo-a", "/a.py", "/a.py", "edit", "refs/heads/feature", "refs/heads/main")
-    assert "Content not available" in fallback_full[-1]
     assert "No textual differences detected" in no_text[-1]
 
 
@@ -926,7 +910,7 @@ def test_get_pull_request_diff_injects_cross_file_referenced_symbols(mocker) -> 
 
     mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=fake_get_file)
 
-    diff = client.get_pull_request_diff("repo-a", 1, review_scope="diff_only")
+    diff = client.get_pull_request_diff("repo-a", 1)
     assert '<referenced_symbols file="/src/app.ts">' in diff
     assert "computeQuota" in diff
     assert "hiddenMultiplier" not in diff

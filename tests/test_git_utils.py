@@ -327,8 +327,8 @@ def test_parse_name_status_and_get_local_changed_files() -> None:
     ]
 
 
-def test_get_local_diff_diff_only_and_full_code(tmp_path) -> None:
-    """It should build unified diffs with AST context or full_code diffs and apply filters."""
+def test_get_local_diff_with_filters_and_ast_context(tmp_path) -> None:
+    """It should build unified diffs with AST context and apply path/extension filters."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     src_dir = repo_dir / "src"
@@ -352,25 +352,15 @@ def test_get_local_diff_diff_only_and_full_code(tmp_path) -> None:
 
     instance._run_git = fake_git  # type: ignore[method-assign]
 
-    diff_only = instance.get_local_diff(
-        review_scope="diff_only",
+    diff_text = instance.get_local_diff(
         excluded_paths=["libs/"],
         file_extensions_filter=[".py"],
     )
-    assert "diff --git a/src/app.py b/src/app.py" in diff_only
-    assert "+    return 'hello world'" in diff_only
-    assert "libs/gen.py" not in diff_only
-    assert "docs/readme.md" not in diff_only
-    assert ("<enclosing_scopes" in diff_only) or ("<adaptive_diff" in diff_only)
-
-    full_code = instance.get_local_diff(
-        review_scope="full_code",
-        excluded_paths=["libs/"],
-        file_extensions_filter=[".py"],
-    )
-    assert "@@ Change type: edit @@" in full_code
-    assert "+def greet():" in full_code
-    assert "+    return 'hello world'" in full_code
+    assert "diff --git a/src/app.py b/src/app.py" in diff_text
+    assert "+    return 'hello world'" in diff_text
+    assert "libs/gen.py" not in diff_text
+    assert "docs/readme.md" not in diff_text
+    assert ("<enclosing_scopes" in diff_text) or ("<adaptive_diff" in diff_text)
 
 
 def test_filter_and_truncate_preserve_referenced_symbols_block() -> None:
@@ -433,10 +423,59 @@ def test_get_local_diff_resolves_cross_file_referenced_symbols(tmp_path) -> None
         else ""
     )
 
-    diff = instance.get_local_diff(review_scope="diff_only")
+    diff = instance.get_local_diff()
     assert '<referenced_symbols file="/src/service.py">' in diff
     assert "InvoicePayload" in diff
     assert "from /src/models.py" in diff
+
+
+def test_discover_scan_files_and_get_scan_diff(tmp_path) -> None:
+    """discover_scan_files and get_scan_diff should support files, folders, globs, filters, and cross-file symbols."""
+    repo_dir = tmp_path / "scan_repo"
+    src_dir = repo_dir / "src"
+    gen_dir = repo_dir / "generated"
+    git_dir = repo_dir / ".git"
+    src_dir.mkdir(parents=True)
+    gen_dir.mkdir(parents=True)
+    git_dir.mkdir(parents=True)
+
+    (src_dir / "models.py").write_text(
+        "class PaymentDto:\n    total: float\n",
+        encoding="utf-8",
+    )
+    (src_dir / "handler.py").write_text(
+        "from .models import PaymentDto\n\ndef charge(dto: PaymentDto) -> bool:\n    return dto.total > 0\n",
+        encoding="utf-8",
+    )
+    (src_dir / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    (src_dir / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
+    (gen_dir / "skip.py").write_text("x = 1\n", encoding="utf-8")
+    (git_dir / "config.py").write_text("git_internal = True\n", encoding="utf-8")
+
+    instance = make_git_utils(str(repo_dir))
+    instance.get_repo_root = lambda: str(repo_dir)  # type: ignore[method-assign]
+
+    discovered = instance.discover_scan_files(
+        targets=["."],
+        excluded_paths=["generated/"],
+        file_extensions_filter=[".py"],
+    )
+    paths = [d["path"] for d in discovered]
+    assert paths == ["/src/handler.py", "/src/models.py"]
+    assert all(d["change_type"] == "scan" for d in discovered)
+
+    # Glob pattern targeting a single file; models.py should still be resolved via relative import
+    scan_diff, glob_files = instance.get_scan_diff(
+        targets=["src/*handler.py"],
+        excluded_paths=["generated/"],
+        file_extensions_filter=[".py"],
+    )
+    assert [f["path"] for f in glob_files] == ["/src/handler.py"]
+    assert "diff --git a/src/handler.py b/src/handler.py" in scan_diff
+    assert "@@ -0,0 +1,4 @@" in scan_diff
+    assert "+def charge(dto: PaymentDto) -> bool:" in scan_diff
+    assert '<referenced_symbols file="/src/handler.py">' in scan_diff
+    assert "PaymentDto" in scan_diff
 
 
 

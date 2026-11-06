@@ -12,7 +12,6 @@ Options:
 - `--author`
 - `--target-branch`
 - `--detailed` / `--security`
-- `--review-scope {diff_only,full_code}` (default: `diff_only`)
 - `--max-files-per-bundle N` — overrides `review.max_files_per_bundle` from config.yaml
 - `--context`, `-c`
 - `--format {terminal,markdown,json}`
@@ -63,12 +62,6 @@ Dry-run:
 
 ```bash
 ai-review pr-review 42 --dry-run
-```
-
-Full review of changed files (in addition to diff-focused review):
-
-```bash
-ai-review pr-review 42 --review-scope full_code
 ```
 
 Automatic posting (without confirmation):
@@ -129,4 +122,25 @@ Options:
 - `--to REF` — Target branch or commit to compare to (default: `HEAD` when `--from` is used)
 - `--commit SHA` — Review a single commit (`<commit>~1..<commit>`)
 - `--repo-path PATH` — Path to the local Git repository (default: current directory)
-- Supports all global review, output, and configuration options (`--detailed`, `--security`, `--review-scope`, `--output`, `--provider`, `--model`, etc.)
+- Supports all global review, output, and configuration options (`--detailed`, `--security`, `--max-files-per-bundle`, `--output`, `--provider`, `--model`, etc.)
+
+### Full Code Scan (`full-code-scan`)
+
+Audit complete files, folders, or glob patterns on demand without needing a Git diff or Pull Request (automatically applies `file_extensions_filter`, `excluded_paths`, Cross-File Symbol Resolution, and Smart File Bundling):
+
+```bash
+# Audit all eligible files in the current directory
+ai-review full-code-scan
+
+# Audit a specific folder or file
+ai-review full-code-scan src/Services/AuthService.cs
+ai-review full-code-scan src/
+
+# Audit files matching glob patterns with security focus and save report
+ai-review full-code-scan "src/**/*.cs" --security --output security_audit.md
+```
+
+Options:
+- `paths` (optional positional arguments) — One or more files, directories, or glob patterns to scan (default: `.`)
+- `--repo-path PATH` — Base directory for resolving relative paths and filters (default: current directory)
+- Supports all global review, output, and configuration options (`--detailed`, `--security`, `--max-files-per-bundle`, `--output`, `--format`, `--provider`, `--model`, etc.)

@@ -89,7 +89,6 @@ class ReviewConfig:
 
     # --- Review -------------------------------------------------------
     verbosity: str = "detailed"             # "detailed" | "security"
-    review_scope: str = "diff_only"         # "diff_only" | "full_code"
     max_files_per_bundle: int = 5           # Max related files grouped per LLM bundle
     max_diff_lines: int = 2000              # Max diff lines
     max_scope_blocks: int = 8               # Max changed blocks for Enclosing Scopes strategy
@@ -219,7 +218,6 @@ class ReviewConfig:
             "tfs_repository": ("tfs", "repository"),
             # Review
             "verbosity": ("review", "verbosity"),
-            "review_scope": ("review", "scope"),
             "max_files_per_bundle": ("review", "max_files_per_bundle"),
             "max_diff_lines": ("review", "max_diff_lines"),
             "max_scope_blocks": ("review", "max_scope_blocks"),
@@ -319,12 +317,6 @@ class ReviewConfig:
             issues.append(
                 f"Invalid verbosity: '{self.verbosity}'. "
                 "Use 'detailed' or 'security'."
-            )
-
-        if self.review_scope not in ("diff_only", "full_code"):
-            issues.append(
-                f"Invalid review scope: '{self.review_scope}'. "
-                "Use 'diff_only' or 'full_code'."
             )
 
         if self.max_files_per_bundle <= 0:

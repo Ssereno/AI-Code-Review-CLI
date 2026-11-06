@@ -6,6 +6,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 
 - AI Pull Request review (`pr-review`)
 - Local Git review without a PR (`local` / `local-review` — working tree, `--staged`, `--from <branch>`, `--commit <sha>`)
+- **Full Code Scan (`full-code-scan`)**: on-demand static quality and security audit of files, folders, or glob patterns without requiring a Git diff or PR
 - **Smart File Bundling**: groups related files (interfaces, implementations, unit tests, i18n pairs, and domain folders) into cohesive bundles (`max_files_per_bundle`) so large changesets are reviewed completely without context degradation
 - **Deterministic Cross-File Symbol Resolution**: resolves compact signatures and type declarations (`<referenced_symbols>`) via Tree-sitter across PR/local changesets and relative/sibling imports (`max_referenced_symbols`)
 - Structured PR comments (inline + general summary)
@@ -81,12 +82,13 @@ tfs:
 
 review:
   verbosity: detailed
-  scope: diff_only
   custom_prompt_file: review_prompt.md
   # maximum related files grouped per LLM review bundle (Smart File Bundling)
   max_files_per_bundle: 5
   # per-file limit
   max_diff_lines: 2000
+  # cross-file symbol declarations resolved per file (0 = disabled)
+  max_referenced_symbols: 10
   # extension allowlist (empty list = all files)
   file_extensions_filter: [".cs", ".ts", ".py"]
   # exclude path prefixes from the diff (applied before file_extensions_filter)

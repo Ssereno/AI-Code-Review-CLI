@@ -88,8 +88,8 @@ SYSTEM_PROMPTS = {
 #
 # See Also:
 #     LLMClient.review_pr: Combines this prompt with the verbosity system
-#     prompt (from get_system_prompt) and scope guidance (from
-#     get_scope_guidance) to build the final system prompt sent to the LLM.
+#     prompt (from get_system_prompt) and review guidance (from
+#     get_review_guidance) to build the final system prompt sent to the LLM.
 PR_COMMENT_PROMPT = (
     "Analyze the Pull Request code diff and return your response as a single JSON object with two "
     "fields:\n"
@@ -149,87 +149,47 @@ def get_system_prompt(verbosity: str) -> str:
     return SYSTEM_PROMPTS.get(verbosity, SYSTEM_PROMPTS["detailed"])
 
 
-def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
-    """Returns LLM instructions tailored to the active review scope.
-
-    For ``diff_only`` scope, the instructions inform the LLM that:
-
-    * Added lines are prefixed with ``+``. Each hunk includes up to five
-      unchanged context lines before and after the changes, prefixed with a
-      single space. Deleted lines are not included.
-    * When source content is available, a changed file may include an XML
-      context block containing either:
-
-      - ``<enclosing_scopes file="...">`` — the complete function(s) or
-        methods/statements that enclose the changed lines.
-      - ``<adaptive_diff file="...">`` — N lines of context around the
-        changed lines when AST extraction is unavailable or exceeds its
-        configured limits.
-      - ``<referenced_symbols file="...">`` — compact read-only signatures
-        and declarations of cross-file types, interfaces, and functions
-        referenced by the changed lines.
-
-    * Line numbers inside the XML blocks are **1-based absolute** line
-      numbers from the new version of the file and should be used as the
-      authoritative reference when reporting issue positions.
-    * The review must focus **exclusively** on the changed lines (``+`` in
-      the ``<diff>`` block); the XML context blocks exist only for
-      structural understanding.
-
-    For ``full_code`` scope, the instructions inform the LLM that the diff
-    represents the entire new file content (every line prefixed with ``+``)
-    and that deleted code is absent.
+def get_review_guidance(full_code_scan: bool = False) -> str:
+    """Returns LLM instructions for diff review (default) or ``full-code-scan`` mode.
 
     Args:
-        review_scope: ``"diff_only"`` (default) or ``"full_code"``.
-        structured: When ``True``, appends additional constraints for the
-            structured JSON comment mode (every comment must carry a valid
-            file path and line number > 0 for inline posting).
+        full_code_scan: When ``True``, instructs the LLM that each file section
+            contains the complete file prefixed with ``+`` for an on-demand
+            static audit. When ``False`` (default), instructs the LLM to focus
+            exclusively on the changed lines in the diff while using XML AST
+            context blocks as background reference.
 
     Returns:
         Instruction string to be appended to the system prompt.
     """
-    scope = (review_scope or "diff_only").lower()
-
-    if scope == "full_code":
+    if full_code_scan:
         return (
-            "Review scope: full_code. The diff contains only added lines (+) for each file. "
-            "Analyze the complete content of the changed files and identify issues in the new code. "
-            "Do not comment on deleted or absent code."
-        )
-
-    if structured:
-        return (
-            "Review scope: diff_only. "
-            "The <diff> block contains added lines (prefixed with +) and up to five unchanged "
-            "context lines before and after each hunk (prefixed with a single space). "
-            "Deleted lines were removed. When source content is available, a changed file may "
-            "include an XML context block: "
-            "<enclosing_scopes> contains the complete AST scope(s) enclosing the changes; "
-            "<adaptive_diff> contains surrounding context lines when AST extraction is unavailable "
-            "or exceeds its configured limits; "
-            "<referenced_symbols> contains read-only cross-file symbol signatures and declarations "
-            "referenced by the changed lines. "
-            "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
-            "Use those line numbers as the authoritative reference when reporting issue positions. "
-            "Focus your review EXCLUSIVELY on the changed lines (marked + in <diff>). "
-            "Do NOT report issues in context, unchanged lines, or <referenced_symbols> declarations unless they directly affect the correctness of the changes. "
-            "For every problem, you MUST provide a valid file and line (>0) from the changed file to allow inline comments. "
-            "Do not emit general problem comments without file/line."
+            "Review mode: full-code-scan. "
+            "Each file section in <diff> contains the complete source file (with every line prefixed by +) "
+            "for an on-demand static quality, architecture, and security audit. "
+            "When available, <referenced_symbols> blocks provide read-only cross-file signatures and type "
+            "declarations imported or referenced by the scanned file. "
+            "Analyze the complete content of each scanned file and identify real bugs, security vulnerabilities, "
+            "performance issues, and rule violations. "
+            "For every finding, you MUST provide a valid file path and 1-based line number (>0) from the scanned file."
         )
 
     return (
-        "Review scope: diff_only. "
         "The <diff> block contains added lines (prefixed with +) and up to five unchanged "
         "context lines before and after each hunk (prefixed with a single space). "
         "Deleted lines were removed. When source content is available, a changed file may "
-        "include an XML context block "
-        "(<enclosing_scopes>, <adaptive_diff>, or <referenced_symbols>) "
-        "as read-only structural background. "
+        "include an XML context block: "
+        "<enclosing_scopes> contains the complete AST scope(s) enclosing the changes; "
+        "<adaptive_diff> contains surrounding context lines when AST extraction is unavailable "
+        "or exceeds its configured limits; "
+        "<referenced_symbols> contains read-only cross-file symbol signatures and declarations "
+        "referenced by the changed lines. "
         "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
         "Use those line numbers as the authoritative reference when reporting issue positions. "
-        "Focus your review EXCLUSIVELY on the changed lines. "
-        "Do NOT report issues in context, unchanged lines, or <referenced_symbols> declarations unless they directly affect the correctness of the changes."
+        "Focus your review EXCLUSIVELY on the changed lines (marked + in <diff>). "
+        "Do NOT report issues in context, unchanged lines, or <referenced_symbols> declarations unless they directly affect the correctness of the changes. "
+        "For every problem, you MUST provide a valid file and line (>0) from the changed file to allow inline comments. "
+        "Do not emit general problem comments without file/line."
     )
 
 
@@ -375,21 +335,17 @@ class LLMClient:
             return ""
 
     def review_pr(self, diff: str, files_summary: list[dict],
-                  context: str = "", review_scope: str = "diff_only") -> tuple[str, list[dict]]:
+                  context: str = "", full_code_scan: bool = False) -> tuple[str, list[dict]]:
         """
-        Sends the diff to the LLM in a single call and returns both the
-        narrative review text and the structured PR comments, parsed from one
-        combined JSON response.
-
-        This replaces the previous two-call approach (separate narrative and
-        structured-comments requests), halving the diff/context payload sent
-        to the LLM per PR review.
+        Sends the diff (or scanned files) to the LLM in a single call and returns
+        both the narrative review text and the structured comments, parsed from
+        one combined JSON response.
 
         Args:
-            diff: Unified diff (or filtered/truncated diff) to review.
+            diff: Unified diff (or filtered/truncated diff / scan payload) to review.
             files_summary: List of dicts with 'file', 'additions', 'deletions'.
             context: Additional free-text context supplied by the user.
-            review_scope: "diff_only" (default) or "full_code".
+            full_code_scan: True when auditing complete files via ``full-code-scan``.
 
         Returns:
             Tuple of (review_text, structured_comments), where structured_comments
@@ -406,12 +362,9 @@ class LLMClient:
             active_langs = detect_langs([p for p in file_paths if p is not None])
             custom_prompt = filter_prompt_by_langs(custom_prompt, active_langs)  # can return an empty string
 
-        scope_guidance = get_scope_guidance(
-            review_scope=review_scope,
-            structured=True,
-        )
+        review_guidance = get_review_guidance(full_code_scan=full_code_scan)
 
-        combined_base = f"{base_prompt}\n\n{json_schema_prompt}\n\n{scope_guidance}"
+        combined_base = f"{base_prompt}\n\n{json_schema_prompt}\n\n{review_guidance}"
 
         if custom_prompt:
             system_prompt = (

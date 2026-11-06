@@ -183,7 +183,6 @@ tfs:
   repository: repo-a
 review:
   verbosity: security
-  scope: full_code
   max_files_per_bundle: 12
   max_diff_lines: 456
   custom_prompt_file: prompt.md
@@ -226,7 +225,6 @@ output:
     assert config.tfs_ca_bundle == "~/ca.pem"
     assert config.tfs_repository == "repo-a"
     assert config.verbosity == "security"
-    assert config.review_scope == "full_code"
     assert config.max_files_per_bundle == 12
     assert config.max_diff_lines == 456
     assert config.custom_prompt_file == "prompt.md"
@@ -274,7 +272,6 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     """It should report invalid generic review settings."""
     config = review_config_factory(
         verbosity="verbose",
-        review_scope="everything",
         max_files_per_bundle=0,
         max_diff_lines=0,
     )
@@ -282,7 +279,6 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     issues = config.validate()
 
     assert any("Invalid verbosity" in issue for issue in issues)
-    assert any("Invalid review scope" in issue for issue in issues)
     assert any("Invalid max_files_per_bundle" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
 

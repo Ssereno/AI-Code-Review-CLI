@@ -11,11 +11,13 @@ flowchart TD
   Interactive --> Action{Choose action}
   Action -->|PR review| PRReview[Start PR review workflow]
   Action -->|Local review| LocalReview[Start local Git review workflow]
+  Action -->|Full Code Scan| ScanReview[Start full-code-scan workflow]
   Action -->|List PRs| ListPRs[List pull requests]
   
   Parse --> Command{Command}
   Command -->|pr-review| PRReview
   Command -->|local / local-review| LocalReview
+  Command -->|full-code-scan| ScanReview
   Command -->|list-prs| ListPRs
 
   PRReview --> Filter[Load config & Init TFS client]
@@ -29,6 +31,10 @@ flowchart TD
   LocalGit --> LocalContext["Build local diff, AST scopes, Cross-File Symbols & Smart Bundles"]
   LocalContext --> LocalAI[Run AI review per bundle & aggregate]
   LocalAI --> LocalOut[Display structured review & optional file output]
+
+  ScanReview --> ScanFiles[Discover files/folders/globs & apply filters]
+  ScanFiles --> ScanContext["Build full-file scan payload, Cross-File Symbols & Smart Bundles"]
+  ScanContext --> LocalAI
   
   ListPRs --> End[Finish]
   Post --> End

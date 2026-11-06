@@ -66,6 +66,15 @@ def _supports_color() -> bool:
 class ReviewFormatter:
     """Formats and presents the review result."""
 
+    _COMMENT_TYPE_LABELS: dict[str, str] = {
+        "bug": "🐛 Bug",
+        "security": "🔒 Security",
+        "performance": "⚡ Performance",
+        "style": "📝 Style",
+        "suggestion": "💡 Suggestion",
+        "praise": "👍 Positive",
+    }
+
     def __init__(self, color: bool = True, output_format: str = "terminal"):
         self.output_format = output_format
         if not color or not _supports_color():
@@ -204,28 +213,38 @@ class ReviewFormatter:
         return output
 
     def format_local_details(self, details: dict) -> str:
-        """Formats local Git review details for the terminal."""
+        """Formats local Git review or full-code-scan details for the terminal."""
         c = Colors
         width = 60
         line = "─" * width
+        title = details.get("title", "💻 Local Git Review")
+        files_label = details.get("files_label", "Changed Files")
 
         output = f"\n{c.BLUE}{c.BOLD}{line}{c.RESET}\n"
-        output += f"{c.BOLD}  💻 Local Git Review{c.RESET}\n"
+        output += f"{c.BOLD}  {title}{c.RESET}\n"
         output += f"{c.BLUE}{line}{c.RESET}\n"
         output += f"{c.CYAN}  Repository: {c.WHITE}{details.get('repository', 'local')}{c.RESET}\n"
-        output += f"{c.CYAN}  Branch:     {c.GREEN}{details.get('branch', 'HEAD')}{c.RESET}\n"
+        if details.get("branch"):
+            output += f"{c.CYAN}  Branch:     {c.GREEN}{details['branch']}{c.RESET}\n"
         output += f"{c.CYAN}  Target:     {c.YELLOW}{details.get('target', 'Working tree')}{c.RESET}\n"
-        output += self._format_changed_files_block(details.get("changed_files", []))
+        output += self._format_changed_files_block(
+            details.get("changed_files", []),
+            label=files_label,
+        )
         output += f"\n{c.BLUE}{line}{c.RESET}\n"
         return output
 
-    def _format_changed_files_block(self, changed_files: list[dict]) -> str:
-        """Formats the changed-files list section shared by PR and Local details."""
+    def _format_changed_files_block(
+        self,
+        changed_files: list[dict],
+        label: str = "Changed Files",
+    ) -> str:
+        """Formats the files list section shared by PR, Local, and Full Code Scan details."""
         if not changed_files:
             return ""
         c = Colors
-        icon_map = {"add": "🟢", "edit": "🟡", "delete": "🔴", "rename": "🔵"}
-        output = f"\n{c.BOLD}  📁 Changed Files ({len(changed_files)}):{c.RESET}\n"
+        icon_map = {"add": "🟢", "edit": "🟡", "delete": "🔴", "rename": "🔵", "scan": "🔎"}
+        output = f"\n{c.BOLD}  📁 {label} ({len(changed_files)}):{c.RESET}\n"
         for f in changed_files[:20]:
             change_icon = icon_map.get(f.get("change_type", ""), "⚪")
             output += f"    {change_icon} {f['path']}\n"
@@ -250,20 +269,11 @@ class ReviewFormatter:
         if not comments:
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
-        type_labels = {
-            "bug": "🐛 Bug",
-            "security": "🔒 Security",
-            "performance": "⚡ Performance",
-            "style": "📝 Style",
-            "suggestion": "💡 Suggestion",
-            "praise": "👍 Positive",
-        }
-
         lines = [f"\n{c.BOLD}🤖 AI Review Comments ({len(comments)}):{c.RESET}\n"]
 
         for i, comment in enumerate(comments, 1):
             comment_type = comment.get("type", "suggestion")
-            label = type_labels.get(comment_type, comment_type.title())
+            label = self._COMMENT_TYPE_LABELS.get(comment_type, comment_type.title())
 
             file_info = ""
             if comment.get("file"):
@@ -389,14 +399,6 @@ class ReviewFormatter:
 
     def _markdown_structured_comments(self, comments: list[dict],
                                       summary: str = "") -> str:
-        type_labels = {
-            "bug": "🐛 Bug",
-            "security": "🔒 Security",
-            "performance": "⚡ Performance",
-            "style": "📝 Style",
-            "suggestion": "💡 Suggestion",
-            "praise": "👍 Positive",
-        }
         parts: list[str] = []
         if summary and summary.strip():
             parts.append(f"## 📝 Summary\n\n{summary.strip()}\n")
@@ -408,7 +410,7 @@ class ReviewFormatter:
         parts.append(f"## 🤖 AI Review Comments ({len(comments)})\n")
         for i, comment in enumerate(comments, 1):
             comment_type = comment.get("type", "suggestion")
-            label = type_labels.get(comment_type, comment_type.title())
+            label = self._COMMENT_TYPE_LABELS.get(comment_type, comment_type.title())
             loc = ""
             if comment.get("file"):
                 loc = comment["file"]

@@ -15,7 +15,7 @@ import pytest
 
 from src.config import ReviewConfig
 from src import llm_client
-from src.llm_client import LLMClient, LLMError, _normalize_prompt_spacing, build_user_message, get_scope_guidance, get_system_prompt, PR_COMMENT_PROMPT
+from src.llm_client import LLMClient, LLMError, _normalize_prompt_spacing, build_user_message, get_review_guidance, get_system_prompt, PR_COMMENT_PROMPT
 
 
 class FakeResponse:
@@ -91,13 +91,13 @@ def make_llm_config(**changes: object) -> ReviewConfig:
     return config
 
 
-def test_prompt_helpers_select_expected_language_and_scope() -> None:
-    """It should select prompts and scope guidance consistently."""
+def test_prompt_helpers_select_expected_language_and_guidance() -> None:
+    """It should select prompts and review guidance consistently."""
     assert "code reviewer" in get_system_prompt("detailed").lower()
     assert "JSON" in PR_COMMENT_PROMPT
-    assert "full_code" in get_scope_guidance("full_code")
-    assert "file and line" in get_scope_guidance("diff_only", structured=True).lower()
-    assert "added lines" in get_scope_guidance("diff_only")
+    assert "full-code-scan" in get_review_guidance(full_code_scan=True)
+    assert "file and line" in get_review_guidance(full_code_scan=False).lower()
+    assert "added lines" in get_review_guidance(full_code_scan=False)
 
 
 def test_get_pr_comment_prompt_function_removed() -> None:
@@ -105,13 +105,13 @@ def test_get_pr_comment_prompt_function_removed() -> None:
     assert not hasattr(llm_client, "get_pr_comment_prompt")
 
 
-def test_get_system_prompt_and_get_scope_guidance_reject_language_kwarg() -> None:
+def test_get_system_prompt_and_get_review_guidance_reject_language_kwarg() -> None:
     """Regression: language parameter was removed from both prompt helpers."""
     with pytest.raises(TypeError):
         get_system_prompt("detailed", language="pt")  # type: ignore[call-arg]
 
     with pytest.raises(TypeError):
-        get_scope_guidance("diff_only", structured=False, language="pt")  # type: ignore[call-arg]
+        get_review_guidance(full_code_scan=False, language="pt")  # type: ignore[call-arg]
 
 
 
@@ -172,56 +172,41 @@ def test_get_system_prompt_unknown_verbosity_falls_back_to_detailed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# get_scope_guidance — diff_only with XML context blocks
+# get_review_guidance — diff review and full-code-scan
 # ---------------------------------------------------------------------------
 
-def test_get_scope_guidance_diff_only_references_xml_context_tags() -> None:
-    """diff_only guidance must reference the XML context block tags, not old FULL_FILE_CONTEXT markers."""
-    for structured in (False, True):
-        guidance = get_scope_guidance("diff_only", structured=structured)
-        assert "enclosing_scopes" in guidance, f"structured={structured}"
-        assert "adaptive_diff" in guidance, f"structured={structured}"
-        # Must NOT reference the old sentinel markers
-        assert "FULL_FILE_CONTEXT_START" not in guidance, f"structured={structured}"
-        assert "FULL_FILE_CONTEXT_END" not in guidance, f"structured={structured}"
-
-
-def test_get_scope_guidance_describes_unified_diff_context_accurately() -> None:
-    """Guidance must match the five-line unified diff and optional XML block."""
-    for structured in (False, True):
-        guidance = get_scope_guidance("diff_only", structured=structured).lower()
-        assert "up to five" in guidance
-        assert "prefixed with a single space" in guidance
-        assert "when source content is available" in guidance
-        assert "may include an xml context block" in guidance
-        assert "no prefix" not in guidance
-
-
-def test_get_scope_guidance_diff_only_structured_demands_valid_line_number() -> None:
-    """Structured diff_only guidance must instruct the LLM to supply a line number > 0."""
-    guidance = get_scope_guidance("diff_only", structured=True)
-    assert "(>0)" in guidance
-
-
-def test_get_scope_guidance_diff_only_non_structured_focuses_on_changed_lines() -> None:
-    """Non-structured diff_only guidance must tell the LLM to focus on changed/added lines."""
-    guidance_en = get_scope_guidance("diff_only", structured=False)
-
-    assert "changed lines" in guidance_en.lower() or "added lines" in guidance_en.lower()
-
-
-def test_get_scope_guidance_diff_only_structured_does_not_demand_line_in_non_structured() -> None:
-    """Non-structured diff_only guidance must NOT mandate a minimum line number."""
-    guidance_en = get_scope_guidance("diff_only", structured=False)
-    assert "(>0)" not in guidance_en
-
-
-def test_get_scope_guidance_unknown_scope_falls_back_to_diff_only() -> None:
-    """An unrecognised review_scope must fall through and return diff_only guidance."""
-    guidance = get_scope_guidance("unknown_scope")
-
-    assert "diff_only" in guidance
+def test_get_review_guidance_references_xml_context_tags() -> None:
+    """Diff review guidance must reference the XML context block tags."""
+    guidance = get_review_guidance(full_code_scan=False)
     assert "enclosing_scopes" in guidance
+    assert "adaptive_diff" in guidance
+    assert "referenced_symbols" in guidance
+    assert "FULL_FILE_CONTEXT_START" not in guidance
+    assert "FULL_FILE_CONTEXT_END" not in guidance
+
+
+def test_get_review_guidance_describes_unified_diff_context_accurately() -> None:
+    """Guidance must match the five-line unified diff and optional XML block."""
+    guidance = get_review_guidance(full_code_scan=False).lower()
+    assert "up to five" in guidance
+    assert "prefixed with a single space" in guidance
+    assert "when source content is available" in guidance
+    assert "may include an xml context block" in guidance
+    assert "no prefix" not in guidance
+
+
+def test_get_review_guidance_demands_valid_line_number() -> None:
+    """Both diff review and full-code-scan guidance must require a line number (>0)."""
+    assert "(>0)" in get_review_guidance(full_code_scan=False)
+    assert "(>0)" in get_review_guidance(full_code_scan=True)
+
+
+def test_get_review_guidance_full_code_scan_describes_static_audit() -> None:
+    """full_code_scan guidance must instruct the LLM to audit complete scanned files."""
+    guidance = get_review_guidance(full_code_scan=True)
+    assert "full-code-scan" in guidance
+    assert "complete source file" in guidance
+    assert "<referenced_symbols>" in guidance
 
 
 def test_build_user_message_includes_files_and_context() -> None:
@@ -903,8 +888,8 @@ def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) 
 
 def test_build_user_message_and_guidance_include_referenced_symbols() -> None:
     """build_user_message must extract <referenced_symbols> outside <diff> alongside scope blocks."""
-    for structured in (False, True):
-        guidance = get_scope_guidance("diff_only", structured=structured)
+    for full_code_scan in (False, True):
+        guidance = get_review_guidance(full_code_scan=full_code_scan)
         assert "referenced_symbols" in guidance
 
     diff_with_symbols = "\n".join([

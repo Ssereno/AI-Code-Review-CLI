@@ -25,7 +25,7 @@ from typing import Optional
 from .config import ReviewConfig
 from .context_extractor import (
     ContextExtractor,
-    format_full_code_diff,
+    assemble_diff_with_referenced_symbols,
     format_unified_diff_with_context,
     normalize_filter_rules,
     should_include_file,
@@ -65,12 +65,7 @@ class TFSClient:
 
         self._session = None
         self._active_pr_files: Optional[dict[str, tuple[str, list[int]]]] = None
-        self._context_extractor = ContextExtractor(
-            max_scope_blocks=config.max_scope_blocks,
-            max_scope_lines=config.max_scope_lines,
-            adaptive_context_lines=config.adaptive_context_lines,
-            max_referenced_symbols=config.max_referenced_symbols,
-        )
+        self._context_extractor = ContextExtractor.from_config(config)
 
     @property
     def session(self):
@@ -322,22 +317,17 @@ class TFSClient:
         return files
 
     def get_pull_request_diff(self, repository: str, pr_id: int,
-                              review_scope: str = "diff_only",
                               excluded_paths: list[str] | None = None,
                               file_extensions_filter: list[str] | None = None) -> str:
         """
         Gets the diff of a specific Pull Request.
 
-        For ``diff_only`` scope (default), builds a standard unified diff for
-        each changed file and appends an XML context block produced by
-        :class:`~src.context_extractor.ContextExtractor` (one of
-        ``<enclosing_scopes>`` or ``<adaptive_diff>``). The block is preserved verbatim by
+        Builds a standard unified diff for each changed file and appends an XML
+        context block produced by :class:`~src.context_extractor.ContextExtractor`
+        (``<enclosing_scopes>``, ``<adaptive_diff>``, and/or
+        ``<referenced_symbols>``). The block is preserved verbatim by
         :py:meth:`GitUtils.filter_diff_additions_only` so the LLM receives
         structured scope context without consuming the entire file.
-
-        For ``full_code`` scope, every line of the new-version file is prefixed
-        with ``+``, producing a pseudo-diff that represents the complete file
-        as added content.
 
         Files are filtered **before** any HTTP content request is made, so
         excluded or extension-mismatched files incur no network cost.
@@ -345,7 +335,6 @@ class TFSClient:
         Args:
             repository: Repository name.
             pr_id: Pull Request ID.
-            review_scope: ``"diff_only"`` (default) or ``"full_code"``.
             excluded_paths: List of path prefixes to skip (case-insensitive,
                 leading slash optional). Files whose path starts with any
                 prefix are excluded before content is fetched.
@@ -383,13 +372,11 @@ class TFSClient:
         )
         changes = self._get(changes_path)
 
-        review_scope = (review_scope or "diff_only").lower()
         _excl_prefixes, _ext_filter = normalize_filter_rules(
             excluded_paths, file_extensions_filter
         )
 
         # Build diff from the changes
-        diff_parts: list[str] = []
         built_entries: list[tuple[str, list[str]]] = []
         pr_file_records: dict[str, tuple[str, list[int]]] = {}
         self._active_pr_files = pr_file_records
@@ -417,18 +404,6 @@ class TFSClient:
                     continue
                 # ------------------------------------------------------------------
 
-                if review_scope == "full_code":
-                    diff_parts.extend(
-                        self._build_full_code_diff_part(
-                            repository=repository,
-                            file_path=file_path,
-                            change_type=change_type,
-                            source_branch=source_branch,
-                        )
-                    )
-                    diff_parts.append("")
-                    continue
-
                 part_lines = list(
                     self._build_unified_diff_part(
                         repository=repository,
@@ -443,42 +418,29 @@ class TFSClient:
         finally:
             self._active_pr_files = None
 
-        if review_scope != "full_code" and built_entries:
-            candidate_files: dict[str, str] = {
-                fp: txt for fp, (txt, _) in pr_file_records.items() if txt
-            }
-            if (
-                self._context_extractor.max_referenced_symbols > 0
-                and pr_file_records
-            ):
-                self._populate_remote_imported_candidates(
-                    repository=repository,
-                    source_branch=source_branch,
-                    pr_file_records=pr_file_records,
-                    candidate_files=candidate_files,
-                )
-
-            for entry_path, entry_lines in built_entries:
-                if (
-                    self._context_extractor.max_referenced_symbols > 0
-                    and entry_path in pr_file_records
-                ):
-                    new_txt, ch_lines = pr_file_records[entry_path]
-                    ref_xml = self._context_extractor.extract_referenced_symbols(
-                        file_path=entry_path,
-                        new_content=new_txt,
-                        changed_lines=ch_lines,
-                        candidate_files=candidate_files,
-                    )
-                    if ref_xml:
-                        entry_lines.append(ref_xml)
-                diff_parts.extend(entry_lines)
-                diff_parts.append("")
-
-        if not diff_parts:
+        if not built_entries:
             return ""
 
-        return "\n".join(diff_parts)
+        candidate_files: dict[str, str] = {
+            fp: txt for fp, (txt, _) in pr_file_records.items() if txt
+        }
+        if (
+            self._context_extractor.max_referenced_symbols > 0
+            and pr_file_records
+        ):
+            self._populate_remote_imported_candidates(
+                repository=repository,
+                source_branch=source_branch,
+                pr_file_records=pr_file_records,
+                candidate_files=candidate_files,
+            )
+
+        return assemble_diff_with_referenced_symbols(
+            built_entries=built_entries,
+            file_records=pr_file_records,
+            candidate_files=candidate_files,
+            extractor=self._context_extractor,
+        )
 
     def _populate_remote_imported_candidates(
         self,
@@ -523,51 +485,10 @@ class TFSClient:
                     candidate_files[imp_path] = imp_content
                     fetched += 1
 
-    def _build_full_code_diff_part(self, repository: str, file_path: str,
-                                   change_type: str, source_branch: str) -> list[str]:
-        """Builds a ``full_code``-style payload for a single changed file.
-
-        Fetches the complete new-version content from the source branch and
-        prefixes every line with ``+``, producing a pseudo-diff that represents
-        the entire file as added content.  No ``-`` (deleted) lines are
-        included.
-
-        Args:
-            repository: Repository name.
-            file_path: Server path of the file (e.g. ``/src/auth.py``).
-            change_type: TFS change type string (``"edit"``, ``"add"``,
-                ``"rename"``, ``"delete"``, …).
-            source_branch: Source branch ref name (with or without the
-                ``refs/heads/`` prefix).
-
-        Returns:
-            List of diff-header and content strings for this file.
-        """
-        content: Optional[str] = None
-        unavailable_error = False
-
-        if change_type in ("edit", "add", "rename"):
-            try:
-                content = self._get_file_content(
-                    repository,
-                    file_path,
-                    version=source_branch.replace("refs/heads/", ""),
-                    version_type="branch",
-                )
-            except Exception:
-                unavailable_error = True
-
-        return format_full_code_diff(
-            file_path=file_path,
-            change_type=change_type,
-            content=content,
-            unavailable_error=unavailable_error,
-        )
-
     def _build_unified_diff_part(self, repository: str, file_path: str,
                                  original_path: str, change_type: str,
                                  source_branch: str, target_branch: str) -> list[str]:
-        """Builds a unified diff for a single file in ``diff_only`` mode.
+        """Builds a unified diff for a single file.
 
         Fetches the old version from the target branch and the new version
         from the source branch, then generates a standard unified diff with
@@ -772,7 +693,6 @@ class TFSClient:
 
     def post_review_comments(self, repository: str, pr_id: int,
                              comments: list[dict],
-                             review_scope: str = "diff_only",
                              comment_mode: str = "structured") -> list[dict]:
         """
         Posts multiple review comments on a PR.
@@ -788,7 +708,6 @@ class TFSClient:
             List of results for each posted comment.
         """
         results = []
-        review_scope = (review_scope or "diff_only").lower()
         comment_mode = (comment_mode or "structured").lower()
         use_inline_comments = comment_mode == "structured"
 

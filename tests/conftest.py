@@ -23,7 +23,6 @@ def review_config() -> ReviewConfig:
         model="gpt-4o-mini",
         color_output=False,
         output_format="terminal",
-        review_scope="diff_only",
         verbosity="detailed",
         max_files_per_bundle=5,
         max_diff_lines=200,
