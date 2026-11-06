@@ -20,6 +20,7 @@ import json
 import os
 
 from .config import ReviewConfig
+from .context_extractor import XML_CONTEXT_END_TAGS, XML_CONTEXT_START_TAGS
 from .prompt_utils import detect_langs, filter_prompt_by_langs
 from .token_estimator import TokenEstimate, TokenEstimator
 
@@ -164,6 +165,9 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
       - ``<adaptive_diff file="...">`` — N lines of context around the
         changed lines when AST extraction is unavailable or exceeds its
         configured limits.
+      - ``<referenced_symbols file="...">`` — compact read-only signatures
+        and declarations of cross-file types, interfaces, and functions
+        referenced by the changed lines.
 
     * Line numbers inside the XML blocks are **1-based absolute** line
       numbers from the new version of the file and should be used as the
@@ -203,12 +207,14 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
             "include an XML context block: "
             "<enclosing_scopes> contains the complete AST scope(s) enclosing the changes; "
             "<adaptive_diff> contains surrounding context lines when AST extraction is unavailable "
-            "or exceeds its configured limits. "
+            "or exceeds its configured limits; "
+            "<referenced_symbols> contains read-only cross-file symbol signatures and declarations "
+            "referenced by the changed lines. "
             "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
             "Use those line numbers as the authoritative reference when reporting issue positions. "
             "Focus your review EXCLUSIVELY on the changed lines (marked + in <diff>). "
-            "Do NOT report issues in context or unchanged lines unless they directly affect the correctness of the changes. "
-            "For every problem, you MUST provide a valid file and line (>0) to allow inline comments. "
+            "Do NOT report issues in context, unchanged lines, or <referenced_symbols> declarations unless they directly affect the correctness of the changes. "
+            "For every problem, you MUST provide a valid file and line (>0) from the changed file to allow inline comments. "
             "Do not emit general problem comments without file/line."
         )
 
@@ -218,12 +224,12 @@ def get_scope_guidance(review_scope: str, structured: bool = False) -> str:
         "context lines before and after each hunk (prefixed with a single space). "
         "Deleted lines were removed. When source content is available, a changed file may "
         "include an XML context block "
-        "(<enclosing_scopes> or <adaptive_diff>) "
+        "(<enclosing_scopes>, <adaptive_diff>, or <referenced_symbols>) "
         "as read-only structural background. "
         "Line numbers inside XML context blocks are 1-based absolute line numbers from the new file. "
         "Use those line numbers as the authoritative reference when reporting issue positions. "
         "Focus your review EXCLUSIVELY on the changed lines. "
-        "Do NOT report issues in context or unchanged lines unless they directly affect the correctness of the changes."
+        "Do NOT report issues in context, unchanged lines, or <referenced_symbols> declarations unless they directly affect the correctness of the changes."
     )
 
 
@@ -278,14 +284,8 @@ def build_user_message(diff: str, files_summary: list[dict], context: str = "") 
     xml_blocks: list[str] = []
     _xml_buffer: list[str] = []
     _in_xml = False
-    _xml_tags = (
-        "<enclosing_scopes ",
-        "<adaptive_diff ",
-    )
-    _xml_close = (
-        "</enclosing_scopes>",
-        "</adaptive_diff>",
-    )
+    _xml_tags = tuple(f"{tag} " for tag in XML_CONTEXT_START_TAGS)
+    _xml_close = XML_CONTEXT_END_TAGS
 
     for line in diff.splitlines():
         if not _in_xml and any(line.startswith(t) for t in _xml_tags):
@@ -322,6 +322,7 @@ class LLMClient:
 
     def __init__(self, config: ReviewConfig):
         self.config = config
+        self._debug_dump_initialized = False
         self.last_token_estimate = TokenEstimate(
             total_prompt_tokens=None,
             model=config.get_effective_model(),
@@ -347,9 +348,13 @@ class LLMClient:
         try:
             normalized_system_prompt = _normalize_prompt_spacing(system_prompt)
             normalized_user_message = _normalize_prompt_spacing(user_message)
-            with open(log_path, "w", encoding="utf-8") as f:
+            mode = "a" if self._debug_dump_initialized else "w"
+            with open(log_path, mode, encoding="utf-8") as f:
+                if self._debug_dump_initialized:
+                    f.write("\n---\n\n")
                 f.write(normalized_system_prompt + "\n\n")
                 f.write(normalized_user_message + "\n")
+            self._debug_dump_initialized = True
         except OSError:
             pass
 
@@ -399,7 +404,7 @@ class LLMClient:
         if custom_prompt:
             file_paths = [f.get("file") for f in files_summary]
             active_langs = detect_langs([p for p in file_paths if p is not None])
-            custom_prompt = filter_prompt_by_langs(custom_prompt, active_langs) # can return an empty list
+            custom_prompt = filter_prompt_by_langs(custom_prompt, active_langs)  # can return an empty string
 
         scope_guidance = get_scope_guidance(
             review_scope=review_scope,

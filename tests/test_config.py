@@ -184,7 +184,7 @@ tfs:
 review:
   verbosity: security
   scope: full_code
-  max_diff_files: 12
+  max_files_per_bundle: 12
   max_diff_lines: 456
   custom_prompt_file: prompt.md
   file_extensions_filter:
@@ -227,7 +227,7 @@ output:
     assert config.tfs_repository == "repo-a"
     assert config.verbosity == "security"
     assert config.review_scope == "full_code"
-    assert config.max_diff_files == 12
+    assert config.max_files_per_bundle == 12
     assert config.max_diff_lines == 456
     assert config.custom_prompt_file == "prompt.md"
     assert config.file_extensions_filter == [".py", ".md"]
@@ -275,7 +275,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
     config = review_config_factory(
         verbosity="verbose",
         review_scope="everything",
-        max_diff_files=0,
+        max_files_per_bundle=0,
         max_diff_lines=0,
     )
 
@@ -283,7 +283,7 @@ def test_validate_reports_generic_limits(review_config_factory) -> None:
 
     assert any("Invalid verbosity" in issue for issue in issues)
     assert any("Invalid review scope" in issue for issue in issues)
-    assert any("Invalid max_diff_files" in issue for issue in issues)
+    assert any("Invalid max_files_per_bundle" in issue for issue in issues)
     assert any("Invalid max_diff_lines" in issue for issue in issues)
 
 
@@ -387,3 +387,27 @@ review:
     )
 
     assert config.excluded_paths == ["migrations", "node_modules", "tests/fixtures"]
+
+
+def test_max_referenced_symbols_yaml_mapping_and_validation(temp_config_file) -> None:
+    """max_referenced_symbols must load from YAML, allow 0, and reject negative values."""
+    config = ReviewConfig()
+    assert config.max_referenced_symbols == 10
+
+    config._load_yaml(
+        temp_config_file(
+            """
+review:
+  max_referenced_symbols: 0
+""".strip()
+        )
+    )
+    assert config.max_referenced_symbols == 0
+
+    valid_zero = ReviewConfig(llm_provider="ollama", max_referenced_symbols=0)
+    assert valid_zero.validate() == []
+
+    invalid_neg = ReviewConfig(llm_provider="ollama", max_referenced_symbols=-1)
+    issues = invalid_neg.validate()
+    assert any("max_referenced_symbols" in issue for issue in issues)
+

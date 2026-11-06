@@ -885,3 +885,49 @@ def test_repository_helpers_and_status_formatting(mocker) -> None:
     assert client.get_repository_id("repo-a") == "1"
     with pytest.raises(TFSError, match="not found"):
         client.get_repository_id("missing")
+
+
+def test_get_pull_request_diff_injects_cross_file_referenced_symbols(mocker) -> None:
+    """get_pull_request_diff should append <referenced_symbols> across PR files and relative imports."""
+    client = TFSClient(make_tfs_config())
+    mocker.patch(
+        "src.tfs_client.TFSClient._get",
+        side_effect=[
+            {"sourceRefName": "refs/heads/feature", "targetRefName": "refs/heads/main"},
+            {"value": [{"id": 1}]},
+            {
+                "changeEntries": [
+                    {"item": {"path": "/src/app.ts"}, "changeType": "edit", "originalPath": "/src/app.ts"},
+                ]
+            },
+        ],
+    )
+
+    files_by_key = {
+        ("/src/app.ts", "main"): "export function run() {\n  return 0;\n}\n",
+        ("/src/app.ts", "feature"): (
+            "import { computeQuota } from './quota';\n"
+            "export function run() {\n"
+            "  return computeQuota(5);\n"
+            "}\n"
+        ),
+        ("/src/quota.ts", "feature"): (
+            "export function computeQuota(units: number): number {\n"
+            "  const hiddenMultiplier = 10;\n"
+            "  return units * hiddenMultiplier;\n"
+            "}\n"
+        ),
+    }
+
+    def fake_get_file(repository: str, file_path: str, version: str = "", version_type: str = "branch") -> str:
+        if (file_path, version) in files_by_key:
+            return files_by_key[(file_path, version)]
+        raise TFSError("not found")
+
+    mocker.patch("src.tfs_client.TFSClient._get_file_content", side_effect=fake_get_file)
+
+    diff = client.get_pull_request_diff("repo-a", 1, review_scope="diff_only")
+    assert '<referenced_symbols file="/src/app.ts">' in diff
+    assert "computeQuota" in diff
+    assert "hiddenMultiplier" not in diff
+

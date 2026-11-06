@@ -1,11 +1,41 @@
+# Pull Request Review Policy
+
+## Purpose
+- Produce concise, actionable findings focused on correctness, security, reliability, performance, and maintainability.
+- Avoid style/nitpick noise so findings are high-value and reviewable by humans and automation.
+
 <!-- lang: all -->
-## General Rules (all languages)
-- Security: SQL injection, XSS, hardcoded secrets/credentials, missing input validation, sensitive data exposed in logs.
-- Error handling: swallowed exceptions (empty catch), missing logging at critical points, generic error messages to end users.
-- Readability: methods too long or with too many responsibilities (SRP), poor naming, dead/commented-out code.
-- Duplication: repeated logic that should be extracted/reused.
-- Unused code: unused local variables, method parameters, private fields/methods, unreachable code, and unused imports/usings.
-- Mandatory language consistency: Newly added or modified identifiers, developer-facing comments, and documentation must use the same natural language already established by the surrounding code and project. Report mixed-language naming or documentation as a `style` finding on the identifier declaration or comment line. For example, a Portuguese method name in a codebase whose existing identifiers are English is a violation. Do not flag names imposed by external APIs, standard technical terms, or localized user-facing text.
+## Ignore
+- Naming preferences not covered by the language rules below
+- Formatting preferences (whitespace, indentation, line-length)
+- Subjective style debates and personal preferences
+- Language rules below are project conventions, not preferences; report violations of them.
+
+<!-- lang: all -->
+## Priorities (in order)
+1. Correctness
+2. Security
+3. Reliability
+4. Performance
+5. Maintainability
+
+<!-- lang: all -->
+## Dos
+- Maximum 10 issues; list the most important first.
+- Avoid duplicate issues; group closely related concerns into one issue.
+- Only report issues you can justify from the changed code/context.
+- If no issues are found just output a simple summary from the review.
+- Distinguish blocking comments (must-fix) from suggestions (nice-to-have) - this matters a lot for an automated reviewer, so it doesn't hold up merges over trivial issues.
+- If the change is purely formatting/whitespace, do not comment on it.
+- Ignore auto-generated files (generated migrations, `*.designer.cs`, `node_modules`, etc.) unless they contain manually-added code.
+- Flag only issues relevant to the diff/change being reviewed, not the entire file, unless the change requires it.
+- Before flagging something as "missing", verify it isn't present in the surrounding unchanged context (lines without `+`/`-`). Only flag genuinely absent elements, not elements outside the shown diff hunk.
+
+<!-- lang: all -->
+## Don'ts
+- Do NOT create findings that are purely style or subjective.
+- Do NOT invent code or external state; mark speculative findings with confidence < 0.6 and label them as speculative in the comment.
+- Do NOT repeat the same issue with different wording.
 
 <!-- lang: cs -->
 ## C#
@@ -14,8 +44,46 @@
 Report missing documentation as a `style` finding on the declaration line. Require `<summary>` and, when applicable, `<param>`, `<typeparam>` and
 `<returns>` elements. Follow Microsoft's XML documentation guidance: https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/xmldoc/
 - Mandatory null safety: Report a `bug` whenever newly added or modified
-code dereferences an externally supplied reference-type parameter without first validating it for null, unless non-nullability is explicitly
-established by preceding code. Recommend `ArgumentNullException.ThrowIfNull(parameter)` and report the finding on the first unsafe dereference.
 - Async: avoid `async void` (except handlers), use `ConfigureAwait(false)` in libraries, don't block with `.Result`/`.Wait()`.
 - Nullable refs: correct `?` usage, avoid unjustified `!`.
-- Immutability: prefer `readonly`, records, immutable types.
+- LINQ: avoid redundant iterations and multiple enumeration of the same `IEnumerable`.
+- Disposal: proper use of `IDisposable`/`using` for resources (streams, connections, etc).
+- Immutability: mark fields `readonly` when they are never reassigned.
+- Architecture: `MES/Host` may depend on `Platform/Host`, never the reverse. Do not impose ASP.NET Core, EF Core, MediatR/CQRS or Clean Architecture layouts on CMF Foundation code.
+- Business objects keep identity: they stay `EntityInstance`-based, never records. Prefer `EntityFactory`/DI over `new ConcreteService()`.
+- Data access: flag unloaded reference access, per-item `Load`/`Create`/`Save` or `LoadRelations` of large sets only to compute a boolean or count, when a bulk API (`LoadReference`, collection operations, set-based query) fits. A loop alone is not an N+1.
+- DEE actions: review only the user-defined code block; `Input["Key"] as Type` is the established contract, flag it only on a credible null dereference.
+- Contracts: do not change existing public/protected signatures incompatibly (add an overload); keep `DataMember` on required wire data.
+- Exceptions: use framework/localized exceptions instead of raw `Exception` in production paths; do not discard exceptions that need handling.
+
+<!-- lang: sql -->
+## SQL
+- Avoid `SELECT *`; specify columns explicitly.
+- Check for parameterized queries (avoid string concatenation → SQL injection).
+- Indexes: flag queries likely to cause table scans on large tables.
+- Transactions: ensure multi-step critical operations are wrapped in a transaction.
+- Naming conventions for tables/columns consistent with the rest of the schema.
+
+<!-- lang: ts,html -->
+## TypeScript / Angular
+- Follow the Angular style guide (https://angular.dev/style-guide).
+- Avoid new explicit `any`, `as any` and assertions that only silence type errors; use `unknown` and narrow untrusted input.
+- New `@ts-ignore`/`@ts-expect-error` need a comment explaining why the suppression is unavoidable; never disable strict checks.
+- New code uses the modern APIs: signal `input()`/`output()`, signal queries, `inject()` and standalone components (no new `NgModule` or `standalone: false`). Existing decorator-based code is grandfathered; do not flag it just because the diff touches it.
+- Avoid `setTimeout`/`setInterval` to wait for rendering or change detection; use the framework lifecycle, signals or RxJS timers with cleanup.
+- RxJS: persistent subscriptions need cleanup (async pipe, `takeUntil`, `takeUntilDestroyed`). A bare `subscribe()` on a finite HTTP call is not a leak by itself.
+- Use `OnPush` on brand-new components; do not retrofit existing ones.
+- Separate presentation (component) from business logic (services); avoid heavy template logic.
+- Viewport state (`isMobile`, etc.) uses the shared `BreakpointObserver` instead of ad-hoc width checks.
+- Files: kebab-case + type suffix (`select-maintenance-plan-step.component.ts/.html/.less`).
+- Classes: PascalCase matching file name, no type suffix (`SelectMaintenancePlanStep`, not `...Component`).
+- Selectors: kebab-case with project prefix (`app-select-maintenance-plan-step`).
+
+<!-- lang: less -->
+## LESS
+- Name `.less` files like their component.
+- Scope styles with `:host`; avoid global style leaks.
+- Colors use tokens (`var(--styleColorNNN)`, `var(--color-*)`, `color-mix()` for opacity), not literal or `rgba()` values; theme/token definition files are exempt.
+- Reuse shared spacing, typography and breakpoint variables (`@phone`, `@tablet`, `@desktop`, ...) instead of inline values.
+- Keep selector nesting to three levels at most; use `!important` only to override third-party styles.
+- Scope `::ng-deep` beneath `:host` and justify new uses in a comment; justify `ViewEncapsulation.None`.

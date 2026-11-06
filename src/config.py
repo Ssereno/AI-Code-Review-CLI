@@ -90,11 +90,12 @@ class ReviewConfig:
     # --- Review -------------------------------------------------------
     verbosity: str = "detailed"             # "detailed" | "security"
     review_scope: str = "diff_only"         # "diff_only" | "full_code"
-    max_diff_files: int = 50                 # Max diff files sent to LLM
+    max_files_per_bundle: int = 5           # Max related files grouped per LLM bundle
     max_diff_lines: int = 2000              # Max diff lines
     max_scope_blocks: int = 8               # Max changed blocks for Enclosing Scopes strategy
     max_scope_lines: int = 250              # Max lines in a scope before Adaptive Diff fallback
     adaptive_context_lines: int = 10        # Context lines for Adaptive Diff fallback
+    max_referenced_symbols: int = 10        # Max cross-file referenced symbols per file (0 = disabled)
     custom_prompt_file: str = "review_prompt.md"  # Markdown file with extra rules/context
     file_extensions_filter: list = field(default_factory=list)  # File extensions to include (empty = all)
     excluded_paths: list = field(default_factory=list)  # Folder path segments to exclude from diff
@@ -219,11 +220,12 @@ class ReviewConfig:
             # Review
             "verbosity": ("review", "verbosity"),
             "review_scope": ("review", "scope"),
-            "max_diff_files": ("review", "max_diff_files"),
+            "max_files_per_bundle": ("review", "max_files_per_bundle"),
             "max_diff_lines": ("review", "max_diff_lines"),
             "max_scope_blocks": ("review", "max_scope_blocks"),
             "max_scope_lines": ("review", "max_scope_lines"),
             "adaptive_context_lines": ("review", "adaptive_context_lines"),
+            "max_referenced_symbols": ("review", "max_referenced_symbols"),
             "custom_prompt_file": ("review", "custom_prompt_file"),
             "file_extensions_filter": ("review", "file_extensions_filter"),
             "excluded_paths": ("review", "excluded_paths"),
@@ -325,9 +327,9 @@ class ReviewConfig:
                 "Use 'diff_only' or 'full_code'."
             )
 
-        if self.max_diff_files <= 0:
+        if self.max_files_per_bundle <= 0:
             issues.append(
-                f"Invalid max_diff_files: '{self.max_diff_files}'. "
+                f"Invalid max_files_per_bundle: '{self.max_files_per_bundle}'. "
                 "Use an integer greater than 0."
             )
 
@@ -335,6 +337,12 @@ class ReviewConfig:
             issues.append(
                 f"Invalid max_diff_lines: '{self.max_diff_lines}'. "
                 "Use an integer greater than 0."
+            )
+
+        if self.max_referenced_symbols < 0:
+            issues.append(
+                f"Invalid max_referenced_symbols: '{self.max_referenced_symbols}'. "
+                "Use an integer greater than or equal to 0."
             )
 
         return issues

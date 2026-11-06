@@ -899,3 +899,38 @@ def test_call_bedrock_sigv4_success_and_errors(monkeypatch: pytest.MonkeyPatch) 
     req_module.post = lambda *a, **kw: (_ for _ in ()).throw(req_module.exceptions.RequestException("timeout"))
     with pytest.raises(LLMError, match="Bedrock HTTP request failed"):
         client._call_bedrock_sigv4("us-east-1", "AKID", "secret", "", "sys", "user")
+
+
+def test_build_user_message_and_guidance_include_referenced_symbols() -> None:
+    """build_user_message must extract <referenced_symbols> outside <diff> alongside scope blocks."""
+    for structured in (False, True):
+        guidance = get_scope_guidance("diff_only", structured=structured)
+        assert "referenced_symbols" in guidance
+
+    diff_with_symbols = "\n".join([
+        "diff --git a/src/app.ts b/src/app.ts",
+        "--- a/src/app.ts",
+        "+++ b/src/app.ts",
+        "@@ -1 +1 @@",
+        "+const u = createUser('alice');",
+        '<enclosing_scopes file="src/app.ts">',
+        "   1: const u = createUser('alice');",
+        "</enclosing_scopes>",
+        '<referenced_symbols file="src/app.ts">',
+        "<!-- from src/user.ts: function_declaration createUser (lines 3–3) -->",
+        "   3: export function createUser(name: string): User",
+        "</referenced_symbols>",
+    ])
+
+    msg = build_user_message(
+        diff=diff_with_symbols,
+        files_summary=[{"file": "src/app.ts", "additions": 1, "deletions": 0}],
+    )
+
+    diff_section = msg.split("<diff>")[1].split("</diff>")[0]
+    after_diff = msg.split("</diff>")[1]
+
+    assert "<referenced_symbols" not in diff_section
+    assert '<referenced_symbols file="src/app.ts">' in after_diff
+    assert "export function createUser(name: string): User" in after_diff
+

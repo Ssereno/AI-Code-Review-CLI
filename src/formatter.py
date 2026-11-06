@@ -14,6 +14,8 @@ import os
 import sys
 from datetime import datetime
 
+from . import __version__ as VERSION
+
 
 # ---------------------------------------------------------------------------
 # ANSI color codes for terminal output
@@ -77,27 +79,6 @@ class ReviewFormatter:
         elif self.output_format == "markdown":
             return self._markdown_header(review_type, repo_name, branch, extra_info)
         return ""
-
-    def format_files_summary(self, files: list[dict]) -> str:
-        """Formats the changed files summary."""
-        if self.output_format == "terminal":
-            return self._terminal_files_summary(files)
-        elif self.output_format == "markdown":
-            return self._markdown_files_summary(files)
-        return ""
-
-    def format_review(self, review_text: str) -> str:
-        """Formats the review text."""
-        if self.output_format == "terminal":
-            return self._terminal_review(review_text)
-        elif self.output_format == "markdown":
-            return review_text
-        elif self.output_format == "json":
-            return json.dumps({
-                "review": review_text,
-                "timestamp": datetime.now().isoformat(),
-            }, indent=2, ensure_ascii=False)
-        return review_text
 
     def format_footer(self, truncated: bool = False) -> str:
         """Formats the review footer."""
@@ -217,15 +198,7 @@ class ReviewFormatter:
                 output += f"    {c.DIM}... +{len(commits)-10} more commits{c.RESET}\n"
 
         # Changed files
-        changed_files = pr.get("changed_files", [])
-        if changed_files:
-            output += f"\n{c.BOLD}  📁 Changed Files ({len(changed_files)}):{c.RESET}\n"
-            for f in changed_files[:20]:
-                change_icon = {"add": "🟢", "edit": "🟡", "delete": "🔴",
-                              "rename": "🔵"}.get(f["change_type"], "⚪")
-                output += f"    {change_icon} {f['path']}\n"
-            if len(changed_files) > 20:
-                output += f"    {c.DIM}... +{len(changed_files)-20} more files{c.RESET}\n"
+        output += self._format_changed_files_block(pr.get("changed_files", []))
 
         output += f"\n{c.BLUE}{line}{c.RESET}\n"
         return output
@@ -242,30 +215,39 @@ class ReviewFormatter:
         output += f"{c.CYAN}  Repository: {c.WHITE}{details.get('repository', 'local')}{c.RESET}\n"
         output += f"{c.CYAN}  Branch:     {c.GREEN}{details.get('branch', 'HEAD')}{c.RESET}\n"
         output += f"{c.CYAN}  Target:     {c.YELLOW}{details.get('target', 'Working tree')}{c.RESET}\n"
-
-        changed_files = details.get("changed_files", [])
-        if changed_files:
-            output += f"\n{c.BOLD}  📁 Changed Files ({len(changed_files)}):{c.RESET}\n"
-            for f in changed_files[:20]:
-                change_icon = {"add": "🟢", "edit": "🟡", "delete": "🔴",
-                              "rename": "🔵"}.get(f["change_type"], "⚪")
-                output += f"    {change_icon} {f['path']}\n"
-            if len(changed_files) > 20:
-                output += f"    {c.DIM}... +{len(changed_files)-20} more files{c.RESET}\n"
-
+        output += self._format_changed_files_block(details.get("changed_files", []))
         output += f"\n{c.BLUE}{line}{c.RESET}\n"
         return output
 
+    def _format_changed_files_block(self, changed_files: list[dict]) -> str:
+        """Formats the changed-files list section shared by PR and Local details."""
+        if not changed_files:
+            return ""
+        c = Colors
+        icon_map = {"add": "🟢", "edit": "🟡", "delete": "🔴", "rename": "🔵"}
+        output = f"\n{c.BOLD}  📁 Changed Files ({len(changed_files)}):{c.RESET}\n"
+        for f in changed_files[:20]:
+            change_icon = icon_map.get(f.get("change_type", ""), "⚪")
+            output += f"    {change_icon} {f['path']}\n"
+        if len(changed_files) > 20:
+            output += f"    {c.DIM}... +{len(changed_files) - 20} more files{c.RESET}\n"
+        return output
+
     def format_structured_comments(self, comments: list[dict],
-                                   discarded_count: int = 0) -> str:
-        """Formats LLM structured comments for terminal preview."""
+                                   summary: str = "") -> str:
+        """Formats LLM structured comments according to ``self.output_format``."""
+        if self.output_format == "json":
+            return json.dumps({
+                "summary": summary,
+                "comments": comments,
+                "timestamp": datetime.now().isoformat(),
+            }, indent=2, ensure_ascii=False)
+
+        if self.output_format == "markdown":
+            return self._markdown_structured_comments(comments, summary)
+
         c = Colors
         if not comments:
-            if discarded_count > 0:
-                return (
-                    f"\n{c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                    f"due to missing file/line in diff_only mode.{c.RESET}\n"
-                )
             return f"\n{c.DIM}No comments generated.{c.RESET}\n"
 
         type_labels = {
@@ -278,13 +260,6 @@ class ReviewFormatter:
         }
 
         lines = [f"\n{c.BOLD}🤖 AI Review Comments ({len(comments)}):{c.RESET}\n"]
-
-        if discarded_count > 0:
-            lines.append(
-                f"  {c.YELLOW}⚠ {discarded_count} comment(s) discarded "
-                f"due to missing file/line in diff_only mode.{c.RESET}"
-            )
-            lines.append("")
 
         for i, comment in enumerate(comments, 1):
             comment_type = comment.get("type", "suggestion")
@@ -312,7 +287,7 @@ class ReviewFormatter:
             reference = comment.get("reference", "")
             if reference:
                 lines.append(f"       {c.DIM}📚 Reference: {reference}{c.RESET}")
-            
+
             lines.append("")
 
         return "\n".join(lines)
@@ -328,7 +303,7 @@ class ReviewFormatter:
 
         for r in results:
             if r.get("success"):
-                file_info = r.get("file", "geral")
+                file_info = r.get("file") or "general"
                 if r.get("line", 0) > 0:
                     file_info += f":{r['line']}"
                 lines.append(
@@ -337,12 +312,12 @@ class ReviewFormatter:
                 )
             elif r.get("skipped"):
                 lines.append(
-                    f"  {c.YELLOW}⚠ Skipped at {r.get('file', 'general')}: "
+                    f"  {c.YELLOW}⚠ Skipped at {r.get('file') or 'general'}: "
                     f"{r.get('error', 'no reason')}{c.RESET}"
                 )
             else:
                 lines.append(
-                    f"  {c.RED}❌ Failed at {r.get('file', 'general')}: "
+                    f"  {c.RED}❌ Failed at {r.get('file') or 'general'}: "
                     f"{r.get('error', 'unknown error')}{c.RESET}"
                 )
 
@@ -353,16 +328,6 @@ class ReviewFormatter:
             f"{c.RED}{fail_count} failed{c.RESET}"
         )
         return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # Spinner / Progress helpers
-    # ------------------------------------------------------------------
-    def format_spinner_frame(self, step: str, frame: int) -> str:
-        """Returns a spinner frame for progress display."""
-        c = Colors
-        spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        spinner = spinners[frame % len(spinners)]
-        return f"\r{c.CYAN}{spinner} {step}...{c.RESET}"
 
     # ------------------------------------------------------------------
     # Terminal formatting
@@ -389,61 +354,6 @@ class ReviewFormatter:
         header += f"{c.BLUE}{line}{c.RESET}\n"
         return header
 
-    def _terminal_files_summary(self, files: list[dict]) -> str:
-        c = Colors
-        summary = f"\n{c.BOLD}📁 Changed Files ({len(files)}):{c.RESET}\n"
-
-        total_add = 0
-        total_del = 0
-        for f in files:
-            add = f["additions"]
-            delete = f["deletions"]
-            total_add += add
-            total_del += delete
-
-            bar_add = "+" * min(add, 20)
-            bar_del = "-" * min(delete, 20)
-            bar = f"{c.GREEN}{bar_add}{c.RED}{bar_del}{c.RESET}"
-
-            summary += (
-                f"  {c.WHITE}{f['file']:<50}{c.RESET} "
-                f"{c.GREEN}+{add:<4}{c.RED}-{delete:<4}{c.RESET} {bar}\n"
-            )
-
-        summary += f"\n  {c.BOLD}Total: {c.GREEN}+{total_add} {c.RED}-{total_del}{c.RESET}\n"
-        return summary
-
-    def _terminal_review(self, review_text: str) -> str:
-        """Renders the AI review body for terminal output.
-
-        Wraps ``review_text`` between two bold horizontal rules and prepends
-        the section header ``🤖 AI Review Comments:``.  No transformation is
-        applied to the review content itself — it is appended verbatim so that
-        any Markdown or plain-text structure produced by the LLM is preserved.
-
-        Output format::
-
-            ────────────────────────────────────────────────────────────
-            🤖 AI Review Comments:
-            ────────────────────────────────────────────────────────────
-
-            <review_text>
-
-        Args:
-            review_text: The raw review text returned by the LLM client.
-
-        Returns:
-            A formatted string ready to be printed to the terminal,
-            including ANSI bold codes around the header and dividers.
-        """
-        c = Colors
-        output = f"\n{c.BOLD}{'─' * 60}{c.RESET}\n"
-        output += f"{c.BOLD}🤖 AI Review Comments:{c.RESET}\n"
-        output += f"{c.BOLD}{'─' * 60}{c.RESET}\n\n"
-        output += review_text
-        output += "\n"
-        return output
-
     def _terminal_footer(self, truncated: bool) -> str:
         c = Colors
         footer = f"\n{c.BLUE}{'═' * 60}{c.RESET}\n"
@@ -453,7 +363,7 @@ class ReviewFormatter:
                 f"reduce the scope of changes.{c.RESET}\n"
             )
         footer += (
-            f"{c.DIM}  Review generated by AI Code Review v2.0.0\n"
+            f"{c.DIM}  Review generated by AI Code Review v{VERSION}\n"
             f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{c.RESET}\n"
         )
         footer += f"{c.BLUE}{'═' * 60}{c.RESET}\n"
@@ -473,25 +383,57 @@ class ReviewFormatter:
             header += f"| **Branch** | {branch} |\n"
         if extra_info:
             header += f"| **Info** | {extra_info} |\n"
-        header += f"| **Data** | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |\n"
+        header += f"| **Date** | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |\n"
         header += "\n---\n\n"
         return header
 
-    def _markdown_files_summary(self, files: list[dict]) -> str:
-        summary = "## 📁 Changed Files\n\n"
-        summary += "| File | Additions | Deletions |\n"
-        summary += "|------|-----------|----------|\n"
-        for f in files:
-            summary += f"| `{f['file']}` | +{f['additions']} | -{f['deletions']} |\n"
-        summary += "\n"
-        return summary
+    def _markdown_structured_comments(self, comments: list[dict],
+                                      summary: str = "") -> str:
+        type_labels = {
+            "bug": "🐛 Bug",
+            "security": "🔒 Security",
+            "performance": "⚡ Performance",
+            "style": "📝 Style",
+            "suggestion": "💡 Suggestion",
+            "praise": "👍 Positive",
+        }
+        parts: list[str] = []
+        if summary and summary.strip():
+            parts.append(f"## 📝 Summary\n\n{summary.strip()}\n")
+
+        if not comments:
+            parts.append("## 🤖 AI Review Comments\n\n*No comments generated.*\n")
+            return "\n".join(parts)
+
+        parts.append(f"## 🤖 AI Review Comments ({len(comments)})\n")
+        for i, comment in enumerate(comments, 1):
+            comment_type = comment.get("type", "suggestion")
+            label = type_labels.get(comment_type, comment_type.title())
+            loc = ""
+            if comment.get("file"):
+                loc = comment["file"]
+                if comment.get("line", 0) > 0:
+                    loc += f":{comment['line']}"
+            header_line = f"### {i}. {label}" + (f" (`{loc}`)" if loc else "")
+            parts.append(header_line)
+            parts.append("")
+            parts.append(comment.get("comment", ""))
+            suggestion = comment.get("suggestion", "")
+            if suggestion:
+                parts.append(f"\n- **Suggestion:** {suggestion}")
+            reference = comment.get("reference", "")
+            if reference:
+                parts.append(f"- **Reference:** {reference}")
+            parts.append("")
+
+        return "\n".join(parts)
 
     def _markdown_footer(self, truncated: bool) -> str:
         footer = "\n---\n\n"
         if truncated:
             footer += "> ⚠️ **Note**: The diff was truncated due to size.\n\n"
         footer += (
-            f"*Review generated by AI Code Review v2.0.0 at "
+            f"*Review generated by AI Code Review v{VERSION} at "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n"
         )
         return footer

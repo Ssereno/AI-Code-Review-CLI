@@ -15,20 +15,21 @@ from src.git_utils import GitError, GitUtils
 
 def make_git_utils(repo_path: str = "repo") -> GitUtils:
     """Build a GitUtils instance without running repository validation."""
-    instance = GitUtils.__new__(GitUtils)
-    instance.repo_path = repo_path
-    return instance
+    return GitUtils(repo_path=repo_path, validate=False)
 
 
 def test_init_sets_repo_path_and_validates(mocker) -> None:
-    """It should initialize the repository path and validate the repo."""
+    """It should initialize the repository path and validate the repo unless validate=False."""
     validate = mocker.patch("src.git_utils.GitUtils._validate_repo")
 
-    instance = GitUtils.__new__(GitUtils)
-    GitUtils.__init__(instance, "/tmp/repo")
-
+    instance = GitUtils("/tmp/repo")
     assert instance.repo_path == "/tmp/repo"
     validate.assert_called_once_with()
+
+    validate.reset_mock()
+    unvalidated = GitUtils("/tmp/other", validate=False)
+    assert unvalidated.repo_path == "/tmp/other"
+    validate.assert_not_called()
 
 
 def test_validate_repo_wraps_git_errors() -> None:
@@ -77,25 +78,81 @@ def test_filter_and_split_diff_helpers(sample_diff: str) -> None:
     assert len(sections) == 2
 
 
-def test_limit_filter_and_truncate_helpers(sample_diff: str) -> None:
-    """It should limit files and truncate oversized sections."""
+def test_bundle_diff_files_and_truncate_helpers(sample_diff: str) -> None:
+    """It should bundle related files and truncate oversized sections."""
     instance = make_git_utils()
 
-    limited, was_limited, omitted = instance.limit_diff_files(sample_diff, max_files=1)
-    assert was_limited is True
-    assert omitted == 1
-    assert "TRUNCATED" in limited
+    bundles = instance.bundle_diff_files(sample_diff, max_files_per_bundle=1)
+    assert len(bundles) == 2
+    assert bundles[0]["files_summary"] == [{"file": "src/app.py", "additions": 2, "deletions": 1}]
+    assert bundles[1]["files_summary"] == [{"file": "docs/readme.md", "additions": 2, "deletions": 1}]
 
     truncated, changed = instance.truncate_diff_per_file(sample_diff, max_lines=3)
     assert changed is True
     assert "TRUNCATED IN THIS FILE" in truncated
 
 
+def test_smart_file_bundling_groups_related_stems_and_modules() -> None:
+    """It should keep interface, implementation, test, and i18n pairs together across directories."""
+    instance = make_git_utils()
+    multi_diff = "\n".join([
+        "diff --git a/src/Interfaces/IAuthService.cs b/src/Interfaces/IAuthService.cs",
+        "--- a/src/Interfaces/IAuthService.cs",
+        "+++ b/src/Interfaces/IAuthService.cs",
+        "@@ -1 +1 @@",
+        "+public interface IAuthService {}",
+        "diff --git a/src/Orders/OrderService.cs b/src/Orders/OrderService.cs",
+        "--- a/src/Orders/OrderService.cs",
+        "+++ b/src/Orders/OrderService.cs",
+        "@@ -1 +1 @@",
+        "+public class OrderService {}",
+        "diff --git a/src/Services/AuthService.cs b/src/Services/AuthService.cs",
+        "--- a/src/Services/AuthService.cs",
+        "+++ b/src/Services/AuthService.cs",
+        "@@ -1 +1 @@",
+        "+public class AuthService : IAuthService {}",
+        "diff --git a/tests/Services/AuthServiceTests.cs b/tests/Services/AuthServiceTests.cs",
+        "--- a/tests/Services/AuthServiceTests.cs",
+        "+++ b/tests/Services/AuthServiceTests.cs",
+        "@@ -1 +1 @@",
+        "+public class AuthServiceTests {}",
+        "diff --git a/i18n/message_en.properties b/i18n/message_en.properties",
+        "--- a/i18n/message_en.properties",
+        "+++ b/i18n/message_en.properties",
+        "@@ -1 +1 @@",
+        "+hello=Hello",
+        "diff --git a/i18n/message_zh.properties b/i18n/message_zh.properties",
+        "--- a/i18n/message_zh.properties",
+        "+++ b/i18n/message_zh.properties",
+        "@@ -1 +1 @@",
+        "+hello=你好",
+    ])
+
+    bundles = instance.bundle_diff_files(multi_diff, max_files_per_bundle=3)
+
+    assert len(bundles) == 2
+    bundle1_files = [f["file"] for f in bundles[0]["files_summary"]]
+    bundle2_files = [f["file"] for f in bundles[1]["files_summary"]]
+
+    # Auth triad grouped together despite OrderService appearing 2nd in raw diff
+    assert bundle1_files == [
+        "src/Interfaces/IAuthService.cs",
+        "src/Services/AuthService.cs",
+        "tests/Services/AuthServiceTests.cs",
+    ]
+    # OrderService + i18n message pair grouped into the second bundle (1 + 2 = 3 <= 3)
+    assert bundle2_files == [
+        "src/Orders/OrderService.cs",
+        "i18n/message_en.properties",
+        "i18n/message_zh.properties",
+    ]
+
+
 def test_truncate_diff_without_sections_and_summary(sample_diff: str) -> None:
     """It should truncate plain text diffs and summarize changed files."""
     instance = make_git_utils()
     plain_diff = "\n".join(f"line-{i}" for i in range(6))
-    truncated, was_truncated = instance.truncate_diff(plain_diff, max_lines=3)
+    truncated, was_truncated = instance.truncate_diff_per_file(plain_diff, max_lines=3)
     summary = instance.get_changed_files_summary(sample_diff)
 
     assert was_truncated is True
@@ -314,5 +371,72 @@ def test_get_local_diff_diff_only_and_full_code(tmp_path) -> None:
     assert "@@ Change type: edit @@" in full_code
     assert "+def greet():" in full_code
     assert "+    return 'hello world'" in full_code
+
+
+def test_filter_and_truncate_preserve_referenced_symbols_block() -> None:
+    """filter_diff_additions_only and truncate_diff_per_file must preserve <referenced_symbols>."""
+    instance = make_git_utils()
+    diff = "\n".join([
+        "diff --git a/src/app.py b/src/app.py",
+        "--- a/src/app.py",
+        "+++ b/src/app.py",
+        "@@ -1,2 +1,4 @@",
+        "-deleted_line",
+        "+line_1",
+        "+line_2",
+        "+line_3",
+        '<enclosing_scopes file="src/app.py">',
+        "   1: def run():",
+        "</enclosing_scopes>",
+        '<referenced_symbols file="src/app.py">',
+        "<!-- from src/dto.py: class_definition OrderDto (lines 1–2) -->",
+        "   1: class OrderDto:",
+        "-keep_inside_referenced_symbols",
+        "</referenced_symbols>",
+    ])
+
+    filtered = instance.filter_diff_additions_only(diff)
+    assert "-deleted_line" not in filtered
+    assert '<referenced_symbols file="src/app.py">' in filtered
+    assert "-keep_inside_referenced_symbols" in filtered
+    assert "</referenced_symbols>" in filtered
+
+    truncated, changed = instance.truncate_diff_per_file(filtered, max_lines=5)
+    assert changed is True
+    assert '<referenced_symbols file="src/app.py">' in truncated
+    assert truncated.rstrip().endswith("</referenced_symbols>")
+
+
+def test_get_local_diff_resolves_cross_file_referenced_symbols(tmp_path) -> None:
+    """get_local_diff should resolve symbols from unchanged local relative-imported files."""
+    repo_dir = tmp_path / "repo"
+    src_dir = repo_dir / "src"
+    src_dir.mkdir(parents=True)
+
+    (src_dir / "models.py").write_text(
+        "class InvoicePayload:\n    invoice_id: str\n    amount: float\n",
+        encoding="utf-8",
+    )
+    (src_dir / "service.py").write_text(
+        "from .models import InvoicePayload\n\ndef process(p: InvoicePayload) -> bool:\n    return p.amount > 0\n",
+        encoding="utf-8",
+    )
+
+    instance = make_git_utils(str(repo_dir))
+    instance.get_repo_root = lambda: str(repo_dir)  # type: ignore[method-assign]
+    instance.get_local_changed_files = lambda **kwargs: [  # type: ignore[method-assign]
+        {"path": "/src/service.py", "change_type": "edit", "original_path": "/src/service.py"},
+    ]
+    instance._run_git = lambda *args, **kwargs: (  # type: ignore[method-assign]
+        "def process(p):\n    return False\n"
+        if args == ("show", "HEAD:src/service.py")
+        else ""
+    )
+
+    diff = instance.get_local_diff(review_scope="diff_only")
+    assert '<referenced_symbols file="/src/service.py">' in diff
+    assert "InvoicePayload" in diff
+    assert "from /src/models.py" in diff
+
 
 

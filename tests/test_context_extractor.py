@@ -580,3 +580,224 @@ def test_extractor_custom_adaptive_context_lines() -> None:
     """adaptive_context_lines parameter must be honoured."""
     extractor = ContextExtractor(adaptive_context_lines=5)
     assert extractor.adaptive_context_lines == 5
+
+
+# ---------------------------------------------------------------------------
+# Cross-file deterministic symbol resolution (Option 4A)
+# ---------------------------------------------------------------------------
+
+
+@ts_required
+class TestCrossFileSymbolResolution:
+    """Tests for AST-based cross-file symbol extraction and resolution."""
+
+    def test_extract_symbol_definitions_csharp_ts_and_python(self) -> None:
+        """Should extract compact callable signatures (without body) and contracts."""
+        extractor = ContextExtractor()
+
+        cs_code = """\
+namespace Orders
+{
+    public record OrderDto(Guid Id, decimal Total);
+
+    public class OrderService
+    {
+        public OrderDto GetOrder(Guid id)
+        {
+            var secretBodyVar = 123;
+            return new OrderDto(id, secretBodyVar);
+        }
+    }
+}
+"""
+        cs_symbols = extractor.extract_symbol_definitions("/src/OrderService.cs", cs_code)
+        names = {s.name: s for s in cs_symbols}
+        assert "OrderDto" in names
+        assert "OrderService" in names
+        # Must extract method name GetOrder, NOT return type OrderDto
+        assert "GetOrder" in names
+        get_order_text = "\n".join(txt for _, txt in names["GetOrder"].numbered_lines)
+        assert "public OrderDto GetOrder(Guid id)" in get_order_text
+        assert "secretBodyVar" not in get_order_text
+
+        ts_code = """\
+export interface AuthClaims {
+    userId: string;
+    roles: string[];
+}
+
+export const verifyToken = (token: string): AuthClaims => {
+    const internalSecret = token.trim();
+    return { userId: internalSecret, roles: [] };
+};
+"""
+        ts_symbols = extractor.extract_symbol_definitions("/src/auth.ts", ts_code)
+        ts_names = {s.name: s for s in ts_symbols}
+        assert "AuthClaims" in ts_names
+        assert "verifyToken" in ts_names
+        verify_text = "\n".join(txt for _, txt in ts_names["verifyToken"].numbered_lines)
+        assert "verifyToken" in verify_text
+        assert "internalSecret" not in verify_text
+
+        py_code = """\
+@cached
+def compute_discount(amount: float) -> float:
+    hidden_local = amount * 0.1
+    return hidden_local
+"""
+        py_symbols = extractor.extract_symbol_definitions("/src/pricing.py", py_code)
+        py_names = {s.name: s for s in py_symbols}
+        assert "compute_discount" in py_names
+        py_sig = "\n".join(txt for _, txt in py_names["compute_discount"].numbered_lines)
+        assert "@cached" in py_sig
+        assert "def compute_discount" in py_sig
+        assert "hidden_local" not in py_sig
+
+    def test_extract_referenced_symbols_resolves_cross_file_contracts(self) -> None:
+        """Should emit <referenced_symbols> with signatures from candidate files."""
+        extractor = ContextExtractor()
+
+        service_code = """\
+using Orders.Models;
+
+public class OrderController
+{
+    private readonly IOrderRepository _repo;
+
+    public async Task Submit(OrderDto dto)
+    {
+        await _repo.SaveOrderAsync(dto);
+    }
+}
+"""
+        repo_code = """\
+public interface IOrderRepository
+{
+    Task<bool> SaveOrderAsync(OrderDto dto);
+}
+"""
+        dto_code = """\
+public record OrderDto(
+    Guid Id,
+    decimal Amount
+);
+"""
+        unrelated_code = """\
+public class AuditLogger
+{
+    public void WriteAudit(string entry) {}
+}
+"""
+        xml = extractor.extract_referenced_symbols(
+            file_path="/src/Controllers/OrderController.cs",
+            new_content=service_code,
+            changed_lines=[9],  # await _repo.SaveOrderAsync(dto);
+            candidate_files={
+                "/src/Controllers/OrderController.cs": service_code,
+                "/src/Interfaces/IOrderRepository.cs": repo_code,
+                "/src/Models/OrderDto.cs": dto_code,
+                "/src/Logging/AuditLogger.cs": unrelated_code,
+            },
+        )
+
+        assert xml.startswith('<referenced_symbols file="/src/Controllers/OrderController.cs">')
+        assert xml.endswith("</referenced_symbols>")
+        assert "SaveOrderAsync" in xml
+        assert "OrderDto" in xml
+        assert "WriteAudit" not in xml
+        assert "AuditLogger" not in xml
+
+    def test_interface_contract_kept_while_unrelated_same_name_skipped(self) -> None:
+        """Same-named method is kept from implemented interface, skipped from unrelated class."""
+        extractor = ContextExtractor()
+
+        impl_code = """\
+public class AuthService : IAuthService
+{
+    public bool ValidateSession(string token)
+    {
+        return token.Length > 10;
+    }
+}
+"""
+        iface_code = """\
+public interface IAuthService
+{
+    bool ValidateSession(string token);
+}
+"""
+        unrelated_code = """\
+public class LegacyValidator
+{
+    public bool ValidateSession(string token)
+    {
+        return false;
+    }
+}
+"""
+        xml = extractor.extract_referenced_symbols(
+            file_path="/src/AuthService.cs",
+            new_content=impl_code,
+            changed_lines=[5],
+            candidate_files={
+                "/src/IAuthService.cs": iface_code,
+                "/src/LegacyValidator.cs": unrelated_code,
+            },
+        )
+
+        assert "IAuthService" in xml
+        assert "LegacyValidator" not in xml
+
+
+def test_extract_referenced_symbols_regex_fallback_and_disable() -> None:
+    """Regex fallback must resolve cross-file symbols when Tree-sitter is unavailable."""
+    caller_py = "from .helpers import calculate_tax\n\ndef total(x):\n    return calculate_tax(x)\n"
+    helper_py = "def calculate_tax(amount: float) -> float:\n    secret = 0.23\n    return amount * secret\n"
+
+    with patch("src.context_extractor._TS_AVAILABLE", False):
+        extractor = ContextExtractor()
+        xml = extractor.extract_referenced_symbols(
+            file_path="/src/billing.py",
+            new_content=caller_py,
+            changed_lines=[4],
+            candidate_files={"/src/helpers.py": helper_py},
+        )
+
+    assert '<referenced_symbols file="/src/billing.py">' in xml
+    assert "def calculate_tax(amount: float) -> float:" in xml
+    assert "secret = 0.23" not in xml
+
+    disabled = ContextExtractor(max_referenced_symbols=0)
+    assert disabled.extract_referenced_symbols(
+        file_path="/src/billing.py",
+        new_content=caller_py,
+        changed_lines=[4],
+        candidate_files={"/src/helpers.py": helper_py},
+    ) == ""
+
+
+def test_resolve_relative_imports_and_sibling_types() -> None:
+    """Should resolve TS/JS/Python relative imports and C# sibling type paths."""
+    ts_imports = ContextExtractor.resolve_relative_imports(
+        "/src/components/login.ts",
+        "import { User } from '../models/user';\nimport { fmt } from './format.js';\n",
+    )
+    assert "/src/models/user.ts" in ts_imports
+    assert "/src/components/format.ts" in ts_imports
+
+    py_imports = ContextExtractor.resolve_relative_imports(
+        "/src/pkg/sub/service.py",
+        "from .dto import ItemDto\nfrom ..common import auth_utils\n",
+    )
+    assert "/src/pkg/sub/dto.py" in py_imports
+    assert "/src/pkg/common.py" in py_imports
+
+    cs_siblings = ContextExtractor.resolve_sibling_type_files(
+        "/src/Services/OrderService.cs",
+        "public class OrderService : IOrderService {\n    public void Run(OrderDto dto) {}\n}\n",
+        changed_lines=[2],
+    )
+    assert "/src/Services/IOrderService.cs" in cs_siblings
+    assert "/src/Interfaces/IOrderService.cs" in cs_siblings
+    assert "/src/Models/OrderDto.cs" in cs_siblings
+

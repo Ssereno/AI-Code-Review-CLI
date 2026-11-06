@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from src import __version__ as VERSION
 from src import formatter as formatter_module
 from src.formatter import Colors, ReviewFormatter, save_output
 
@@ -65,28 +67,20 @@ def test_formatter_init_disables_colors_when_requested(mocker) -> None:
 
 
 def test_format_header_and_footer_variants() -> None:
-    """It should render terminal and markdown headers and footers."""
+    """It should render terminal and markdown headers and footers with current VERSION."""
     terminal_formatter = ReviewFormatter(color=False, output_format="terminal")
     markdown_formatter = ReviewFormatter(color=False, output_format="markdown")
 
     terminal_header = terminal_formatter.format_header("PR Review", repo_name="repo-a", branch="main", extra_info="Info")
     markdown_header = markdown_formatter.format_header("PR Review", repo_name="repo-a", branch="main")
+    terminal_footer = terminal_formatter.format_footer(truncated=True)
+    markdown_footer = markdown_formatter.format_footer(truncated=True)
 
     assert "AI CODE REVIEW" in terminal_header
     assert "# 🤖 AI Code Review" in markdown_header
-    assert "Type" in markdown_header
-    assert terminal_formatter.format_footer(truncated=True)
-    assert markdown_formatter.format_footer(truncated=True)
-
-
-def test_format_review_json_output() -> None:
-    """It should render reviews as JSON when requested."""
-    formatter = ReviewFormatter(color=False, output_format="json")
-
-    rendered = formatter.format_review("hello")
-
-    assert '"review": "hello"' in rendered
-    assert '"timestamp":' in rendered
+    assert "| **Date** |" in markdown_header
+    assert f"v{VERSION}" in terminal_footer
+    assert f"v{VERSION}" in markdown_footer
 
 
 @pytest.mark.parametrize(
@@ -106,16 +100,6 @@ def test_basic_message_formatters(method: str, message: str, fragment: str) -> N
     rendered = getattr(formatter, method)(message)
 
     assert fragment in rendered
-
-
-def test_format_files_summary_for_terminal_and_markdown() -> None:
-    """It should render file summaries for both terminal and markdown outputs."""
-    files = [{"file": "src/app.py", "additions": 3, "deletions": 1}]
-    terminal_formatter = ReviewFormatter(color=False, output_format="terminal")
-    markdown_formatter = ReviewFormatter(color=False, output_format="markdown")
-
-    assert "src/app.py" in terminal_formatter.format_files_summary(files)
-    assert "| `src/app.py` | +3 | -1 |" in markdown_formatter.format_files_summary(files)
 
 
 def test_format_pr_list_handles_empty_and_full_entries() -> None:
@@ -165,9 +149,8 @@ def test_format_pr_details_handles_description_commits_and_files() -> None:
     assert "+2 more files" in details
 
 
-def test_format_structured_comments_variants() -> None:
-    """It should render structured comments and discarded warnings."""
-    formatter = ReviewFormatter(color=False)
+def test_format_structured_comments_terminal_markdown_and_json() -> None:
+    """It should render structured comments cleanly across terminal, markdown, and json formats."""
     comments = [
         {
             "file": "src/app.py",
@@ -179,13 +162,28 @@ def test_format_structured_comments_variants() -> None:
         }
     ]
 
-    rendered = formatter.format_structured_comments(comments, discarded_count=1)
-    empty = formatter.format_structured_comments([], discarded_count=2)
+    term_formatter = ReviewFormatter(color=False, output_format="terminal")
+    rendered_term = term_formatter.format_structured_comments(comments)
+    assert "🤖 AI Review Comments (1):" in rendered_term
+    assert "Possible crash" in rendered_term
+    assert "Add guard" in rendered_term
+    assert "Reference: Docs" in rendered_term
+    assert "No comments generated." in term_formatter.format_structured_comments([])
 
-    assert "Possible crash" in rendered
-    assert "Add guard" in rendered
-    assert "Reference" in rendered
-    assert "discarded" in empty
+    md_formatter = ReviewFormatter(color=False, output_format="markdown")
+    rendered_md = md_formatter.format_structured_comments(comments, summary="Overall summary")
+    assert "## 📝 Summary" in rendered_md
+    assert "Overall summary" in rendered_md
+    assert "## 🤖 AI Review Comments (1)" in rendered_md
+    assert "(`src/app.py:10`)" in rendered_md
+    assert "**Suggestion:** Add guard" in rendered_md
+
+    json_formatter = ReviewFormatter(color=False, output_format="json")
+    rendered_json = json_formatter.format_structured_comments(comments, summary="JSON summary")
+    parsed = json.loads(rendered_json)
+    assert parsed["summary"] == "JSON summary"
+    assert parsed["comments"] == comments
+    assert "timestamp" in parsed
 
 
 def test_format_post_results_summarizes_statuses() -> None:
@@ -193,24 +191,18 @@ def test_format_post_results_summarizes_statuses() -> None:
     formatter = ReviewFormatter(color=False)
     rendered = formatter.format_post_results([
         {"success": True, "file": "a.py", "line": 4, "thread_id": 1},
+        {"success": True, "file": "", "line": 0, "thread_id": 2},
         {"success": False, "file": "b.py", "error": "boom"},
         {"success": False, "skipped": True, "file": "c.py", "error": "ignored"},
     ])
 
     assert "Posted at a.py:4" in rendered
+    assert "Posted at general" in rendered
     assert "Skipped at c.py" in rendered
     assert "Failed at b.py" in rendered
-    assert "1 posted" in rendered
+    assert "2 posted" in rendered
     assert "1 skipped" in rendered
     assert "1 failed" in rendered
-
-
-def test_spinner_frame_rotates_frames() -> None:
-    """It should cycle spinner frames deterministically."""
-    formatter = ReviewFormatter(color=False)
-
-    assert "step" in formatter.format_spinner_frame("step", 0)
-    assert "step" in formatter.format_spinner_frame("step", 11)
 
 
 def test_save_output_creates_parent_directories(tmp_path: Path, mocker) -> None:
@@ -232,47 +224,6 @@ def test_save_output_handles_os_error(tmp_path: Path, mocker) -> None:
     save_output("content", str(tmp_path / "review.md"))
 
     print_mock.assert_called_once()
-
-
-def test_terminal_review_contains_new_header() -> None:
-    """It should render the updated header '🤖 AI Review Comments:' in terminal format."""
-    formatter = ReviewFormatter(color=False, output_format="terminal")
-
-    rendered = formatter.format_review("Some review content")
-
-    assert "🤖 AI Review Comments:" in rendered
-
-
-def test_terminal_review_does_not_contain_old_header() -> None:
-    """It should NOT contain the old '📝 REVIEW:' header after the change."""
-    formatter = ReviewFormatter(color=False, output_format="terminal")
-
-    rendered = formatter.format_review("Some review content")
-
-    assert "📝 REVIEW:" not in rendered
-
-
-def test_terminal_review_includes_review_text() -> None:
-    """It should include the review body text in the output."""
-    formatter = ReviewFormatter(color=False, output_format="terminal")
-    review_text = "Detected a potential null-pointer dereference."
-
-    rendered = formatter.format_review(review_text)
-
-    assert review_text in rendered
-
-
-def test_terminal_review_header_consistent_with_structured_comments() -> None:
-    """Both _terminal_review and format_structured_comments should use '🤖 AI Review Comments'."""
-    formatter = ReviewFormatter(color=False, output_format="terminal")
-
-    review_rendered = formatter.format_review("text")
-    structured_rendered = formatter.format_structured_comments(
-        [{"type": "suggestion", "comment": "Minor issue"}]
-    )
-
-    assert "🤖 AI Review Comments" in review_rendered
-    assert "🤖 AI Review Comments" in structured_rendered
 
 
 def test_format_local_details_renders_metadata_and_files() -> None:

@@ -20,7 +20,7 @@ Options:
     --detailed                           # Detailed review (default)
     --security                           # Security-focused review
     --review-scope <diff_only|full_code> # Review scope (default: diff_only)
-    --max-diff-files <n>                 # Max files in diff (overrides config)
+    --max-files-per-bundle <n>           # Max related files per LLM bundle (overrides config)
     --dry-run                            # Review without posting comments
     --auto-post                          # Post comments without confirmation
     --model <name>                       # LLM model to use
@@ -49,6 +49,7 @@ import sys
 import time
 import threading
 from datetime import datetime
+from typing import Optional
 
 
 def _configure_console_streams() -> None:
@@ -264,8 +265,8 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         help="Review scope: diff_only (default) or full_code"
     )
     group_review.add_argument(
-        "--max-diff-files", default=None, type=int, metavar="N",
-        help="Max diff files sent to LLM (overrides review.max_diff_files)"
+        "--max-files-per-bundle", default=None, type=int, metavar="N",
+        help="Max related files grouped per LLM bundle (overrides review.max_files_per_bundle)"
     )
     group_review.add_argument(
         "--context", "-c", default="",
@@ -306,41 +307,31 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _save_pr_review_output(output_file: str, pr_id: int, repo_name: str,
-                           pr_details: dict, review_text: str,
-                           was_truncated: bool) -> None:
-    """Saves the PR review output if a target file was provided."""
+def _save_review_output(
+    output_file: str,
+    review_type: str,
+    repo_name: str,
+    branch: str,
+    review_text: str,
+    structured_comments: list[dict],
+    was_truncated: bool,
+) -> None:
+    """Saves the review output as Markdown if a target file was provided."""
     if not output_file:
         return
 
     md_formatter = ReviewFormatter(color=False, output_format="markdown")
+    body = md_formatter.format_structured_comments(
+        structured_comments,
+        summary=review_text,
+    )
     md_output = "\n".join([
         md_formatter.format_header(
-            review_type=f"Pull Request #{pr_id}",
+            review_type=review_type,
             repo_name=repo_name,
-            branch=f"{pr_details['source_branch']} → {pr_details['target_branch']}",
+            branch=branch,
         ),
-        review_text,
-        md_formatter.format_footer(truncated=was_truncated),
-    ])
-    save_output(md_output, output_file)
-
-
-def _save_local_review_output(output_file: str, repo_name: str,
-                              branch_label: str, review_text: str,
-                              was_truncated: bool) -> None:
-    """Saves the local Git review output if a target file was provided."""
-    if not output_file:
-        return
-
-    md_formatter = ReviewFormatter(color=False, output_format="markdown")
-    md_output = "\n".join([
-        md_formatter.format_header(
-            review_type="Local Git Review",
-            repo_name=repo_name,
-            branch=branch_label,
-        ),
-        review_text,
+        body,
         md_formatter.format_footer(truncated=was_truncated),
     ])
     save_output(md_output, output_file)
@@ -364,8 +355,8 @@ def run_review(args: argparse.Namespace) -> int:
         config.llm_provider = args.provider
     if getattr(args, "review_scope", None):
         config.review_scope = args.review_scope
-    if getattr(args, "max_diff_files", None) is not None:
-        config.max_diff_files = args.max_diff_files
+    if getattr(args, "max_files_per_bundle", None) is not None:
+        config.max_files_per_bundle = args.max_files_per_bundle
     if getattr(args, "output_format", None):
         config.output_format = args.output_format
     if getattr(args, "output", None):
@@ -409,6 +400,130 @@ def run_review(args: argparse.Namespace) -> int:
         "Unrecognized command. Use --help to see available commands."
     ))
     return 1
+
+
+def _execute_bundled_review(
+    llm: LLMClient,
+    bundles: list[dict],
+    context: str,
+    review_scope: str,
+) -> tuple[str, list[dict]]:
+    """Executes LLM review across one or more cohesive file bundles and merges results."""
+    if not bundles:
+        return "", []
+
+    if len(bundles) == 1:
+        bundle = bundles[0]
+        return llm.review_pr(
+            diff=bundle["diff"],
+            files_summary=bundle["files_summary"],
+            context=context,
+            review_scope=review_scope,
+        )
+
+    summaries: list[str] = []
+    all_comments: list[dict] = []
+    total_tokens = 0
+    has_token_estimate = True
+    last_model = llm.config.get_effective_model()
+
+    for idx, bundle in enumerate(bundles, 1):
+        summary_text, comments = llm.review_pr(
+            diff=bundle["diff"],
+            files_summary=bundle["files_summary"],
+            context=context,
+            review_scope=review_scope,
+        )
+        if summary_text and summary_text.strip():
+            summaries.append(f"**Bundle {idx}/{len(bundles)}:** {summary_text.strip()}")
+        all_comments.extend(comments)
+
+        est = getattr(llm, "last_token_estimate", None)
+        if est is not None and est.total_prompt_tokens is not None:
+            total_tokens += est.total_prompt_tokens
+            last_model = est.model
+        else:
+            has_token_estimate = False
+
+    if has_token_estimate:
+        from src.token_estimator import TokenEstimate
+        llm.last_token_estimate = TokenEstimate(
+            total_prompt_tokens=total_tokens,
+            model=last_model,
+            error=None,
+        )
+
+    combined_summary = "\n\n".join(summaries) if summaries else "Review completed."
+    return combined_summary, all_comments
+
+
+def _prepare_and_execute_review(
+    diff: str,
+    args: argparse.Namespace,
+    config: ReviewConfig,
+    formatter: ReviewFormatter,
+    git_utils: GitUtils,
+    progress_message: str,
+) -> tuple[int, Optional[tuple[str, list[dict], bool]]]:
+    """Filters, truncates, bundles *diff*, executes LLM review, and logs token stats."""
+    diff = git_utils.filter_diff_additions_only(diff)
+    if not diff.strip():
+        print(formatter.format_warning(
+            "After filtering additions only, the diff is empty. No new code to review."
+        ))
+        return 0, None
+
+    diff_truncated, was_truncated = git_utils.truncate_diff_per_file(
+        diff,
+        config.max_diff_lines,
+    )
+    if was_truncated:
+        print(formatter.format_warning(
+            f"Diff truncated to {config.max_diff_lines} lines per file."
+        ))
+
+    bundles = git_utils.bundle_diff_files(
+        diff_truncated,
+        config.max_files_per_bundle,
+    )
+    total_files = sum(len(b.get("files_summary", [])) for b in bundles)
+    if bundles:
+        print(formatter.format_info(
+            f"📦 Smart File Bundling: grouped {total_files} file(s) into "
+            f"{len(bundles)} cohesive bundle(s) (max {config.max_files_per_bundle} files/bundle)"
+        ))
+
+    progress = ProgressIndicator(progress_message)
+    progress.start()
+    start_time = time.time()
+
+    try:
+        llm = LLMClient(config)
+        review_text, structured_comments = _execute_bundled_review(
+            llm=llm,
+            bundles=bundles,
+            context=getattr(args, "context", ""),
+            review_scope=config.review_scope,
+        )
+    except LLMError as exc:
+        progress.stop()
+        print(formatter.format_error(str(exc)))
+        return 1, None
+
+    elapsed = time.time() - start_time
+    progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
+
+    token_estimate = getattr(llm, "last_token_estimate", None)
+    if token_estimate is not None and token_estimate.total_prompt_tokens is not None:
+        print(formatter.format_info(
+            f"Total Prompt: {token_estimate.total_prompt_tokens} tokens"
+        ))
+    else:
+        print(formatter.format_warning(
+            "Total Prompt: unavailable (LiteLLM and local tiktoken could not count the model)"
+        ))
+
+    return 0, (review_text, structured_comments, was_truncated)
 
 
 def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
@@ -506,58 +621,19 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     if dry_run:
         print(formatter.format_info("🔍 DRY-RUN mode: comments will NOT be posted"))
 
-    # Get diff files summary
-    git_utils = GitUtils.__new__(GitUtils)
-    git_utils.repo_path = os.getcwd()
-
-    # Keep only added lines (+): ignore context and removed lines
-    diff = git_utils.filter_diff_additions_only(diff)
-    if not diff.strip():
-        print(formatter.format_warning(
-            "After filtering additions only, the diff is empty. No new code to review."
-        ))
-        return 0
-
-    # Limit number of diff files if needed
-    diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
-        diff,
-        config.max_diff_files,
+    git_utils = GitUtils(validate=False)
+    status_code, review_outcome = _prepare_and_execute_review(
+        diff=diff,
+        args=args,
+        config=config,
+        formatter=formatter,
+        git_utils=git_utils,
+        progress_message="Analyzing code with AI (may take 30-60s)",
     )
-    if files_limited:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_files} files. "
-            f"{omitted_files} file(s) omitted."
-        ))
+    if review_outcome is None:
+        return status_code
 
-    files_summary = git_utils.get_changed_files_summary(diff_limited)
-
-    # Truncate diff if needed
-    diff_truncated, was_truncated = git_utils.truncate_diff(
-        diff_limited,
-        config.max_diff_lines,
-    )
-    if was_truncated:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_lines} lines per file."
-        ))
-
-    # --- Perform structured review ---
-    progress = ProgressIndicator("Analyzing code with AI (may take 30-60s)")
-    progress.start()
-    start_time = time.time()
-
-    try:
-        llm = LLMClient(config)
-        review_text, structured_comments = llm.review_pr(
-            diff=diff_truncated,
-            files_summary=files_summary,
-            context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
-        )
-    except LLMError as exc:
-        progress.stop()
-        print(formatter.format_error(str(exc)))
-        return 1
+    review_text, structured_comments, was_truncated = review_outcome
 
     without_inline = [
         c for c in structured_comments
@@ -568,34 +644,21 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         print(formatter.format_info(
             f"{len(without_inline)} comment(s) without file/line will be posted as a general PR comment."
         ))
-    discarded_comments: list[str] = []  # nothing is discarded
-
-    elapsed = time.time() - start_time
-    progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
-
-    token_estimate = getattr(llm, "last_token_estimate", None)
-    if token_estimate is not None and token_estimate.total_prompt_tokens is not None:
-        print(formatter.format_info(
-            f"Total Prompt: {token_estimate.total_prompt_tokens} tokens"
-        ))
-    else:
-        print(formatter.format_warning(
-            "Total Prompt: unavailable (LiteLLM and local tiktoken could not count the model)"
-        ))
 
     # --- Show structured comments preview ---
     print(formatter.format_structured_comments(
         structured_comments,
-        discarded_count=len(discarded_comments),
+        summary=review_text,
     ))
 
     output_file = config.output_file or getattr(args, "output", "")
-    _save_pr_review_output(
+    _save_review_output(
         output_file=output_file,
-        pr_id=pr_id,
+        review_type=f"Pull Request #{pr_id}",
         repo_name=repo_name,
-        pr_details=pr_details,
+        branch=f"{pr_details['source_branch']} → {pr_details['target_branch']}",
         review_text=review_text,
+        structured_comments=structured_comments,
         was_truncated=was_truncated,
     )
 
@@ -837,6 +900,7 @@ def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         max_scope_blocks=config.max_scope_blocks,
         max_scope_lines=config.max_scope_lines,
         adaptive_context_lines=config.adaptive_context_lines,
+        max_referenced_symbols=config.max_referenced_symbols,
     )
 
     try:
@@ -863,72 +927,32 @@ def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         f"Mode: {config.verbosity} | Scope: {config.review_scope}"
     ))
 
-    diff = git_utils.filter_diff_additions_only(diff)
-    if not diff.strip():
-        print(formatter.format_warning(
-            "After filtering additions only, the diff is empty. No new code to review."
-        ))
-        return 0
-
-    diff_limited, files_limited, omitted_files = git_utils.limit_diff_files(
-        diff,
-        config.max_diff_files,
+    status_code, review_outcome = _prepare_and_execute_review(
+        diff=diff,
+        args=args,
+        config=config,
+        formatter=formatter,
+        git_utils=git_utils,
+        progress_message="Analyzing local code with AI (may take 30-60s)",
     )
-    if files_limited:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_files} files. "
-            f"{omitted_files} file(s) omitted."
-        ))
+    if review_outcome is None:
+        return status_code
 
-    files_summary = git_utils.get_changed_files_summary(diff_limited)
+    review_text, structured_comments, was_truncated = review_outcome
 
-    diff_truncated, was_truncated = git_utils.truncate_diff(
-        diff_limited,
-        config.max_diff_lines,
-    )
-    if was_truncated:
-        print(formatter.format_warning(
-            f"Diff truncated to {config.max_diff_lines} lines per file."
-        ))
-
-    progress = ProgressIndicator("Analyzing local code with AI (may take 30-60s)")
-    progress.start()
-    start_time = time.time()
-
-    try:
-        llm = LLMClient(config)
-        review_text, structured_comments = llm.review_pr(
-            diff=diff_truncated,
-            files_summary=files_summary,
-            context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
-        )
-    except LLMError as exc:
-        progress.stop()
-        print(formatter.format_error(str(exc)))
-        return 1
-
-    elapsed = time.time() - start_time
-    progress.stop(formatter.format_success(f"Review completed in {elapsed:.1f}s"))
-
-    token_estimate = getattr(llm, "last_token_estimate", None)
-    if token_estimate is not None and token_estimate.total_prompt_tokens is not None:
-        print(formatter.format_info(
-            f"Total Prompt: {token_estimate.total_prompt_tokens} tokens"
-        ))
-    else:
-        print(formatter.format_warning(
-            "Total Prompt: unavailable (LiteLLM and local tiktoken could not count the model)"
-        ))
-
-    print(formatter.format_structured_comments(structured_comments))
+    print(formatter.format_structured_comments(
+        structured_comments,
+        summary=review_text,
+    ))
 
     output_file = config.output_file or getattr(args, "output", "")
-    _save_local_review_output(
+    _save_review_output(
         output_file=output_file,
+        review_type="Local Git Review",
         repo_name=repo_name,
-        branch_label=f"{branch} ({target_label})",
+        branch=f"{branch} ({target_label})",
         review_text=review_text,
+        structured_comments=structured_comments,
         was_truncated=was_truncated,
     )
 
@@ -991,10 +1015,10 @@ def interactive_mode() -> int:
     print(f"  {c.CYAN}2{c.RESET}) 📋 List active Pull Requests")
     print("")
     print(f"  {c.CYAN}{c.BOLD}── Local Git ──{c.RESET}")
-    print(f"  {c.CYAN}4{c.RESET}) 💻 Local Git Review (working tree, staged, or branch diff)")
+    print(f"  {c.CYAN}3{c.RESET}) 💻 Local Git Review (working tree, staged, or branch diff)")
     print("")
     print(f"  {c.CYAN}{c.BOLD}── Other ──{c.RESET}")
-    print(f"  {c.CYAN}3{c.RESET}) Current configuration")
+    print(f"  {c.CYAN}4{c.RESET}) ⚙️  Current configuration")
     print(f"  {c.CYAN}0{c.RESET}) Exit")
 
     try:
@@ -1006,7 +1030,6 @@ def interactive_mode() -> int:
     if choice == "0":
         return 0
 
-    # --- PR Review ---
     if choice == "1":
         return _interactive_pr_review(config)
 
@@ -1014,11 +1037,11 @@ def interactive_mode() -> int:
         return _interactive_list_prs(config)
 
     if choice == "3":
-        _show_config(config)
-        return 0
+        return _interactive_local_review(config)
 
     if choice == "4":
-        return _interactive_local_review(config)
+        _show_config(config)
+        return 0
 
     print(f"{c.RED}Invalid option.{c.RESET}")
     return 1
