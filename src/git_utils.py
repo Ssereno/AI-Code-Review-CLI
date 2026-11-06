@@ -10,6 +10,7 @@ used by the PR review pipeline.
 Works with any Git repository, including TFS/Azure DevOps.
 """
 
+import glob
 import os
 import re
 import subprocess
@@ -19,11 +20,31 @@ from .context_extractor import (
     ContextExtractor,
     XML_CONTEXT_END_TAGS,
     XML_CONTEXT_START_TAGS,
-    format_full_code_diff,
+    assemble_diff_with_referenced_symbols,
+    format_scan_file_diff,
     format_unified_diff_with_context,
     normalize_filter_rules,
     should_include_file,
 )
+
+_SCAN_IGNORED_DIRS: set[str] = {
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "bin",
+    "obj",
+    "dist",
+    "build",
+    ".vs",
+    ".idea",
+    ".vscode",
+}
 
 class GitError(Exception):
     """Exception for Git-related errors."""
@@ -602,11 +623,17 @@ class GitUtils:
 
         return files
 
-    def _get_local_file_content(self, file_path: str, source: str) -> str:
+    def _get_local_file_content(
+        self,
+        file_path: str,
+        source: str,
+        base_dir: Optional[str] = None,
+    ) -> str:
         """Reads file content from the working tree, staging index, or a Git ref."""
         rel_path = file_path.replace("\\", "/").lstrip("/")
         if source == "WORKTREE":
-            full_path = os.path.join(self.get_repo_root(), rel_path)
+            root = base_dir or self.get_repo_root()
+            full_path = os.path.join(root, rel_path)
             with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         if source == "INDEX":
@@ -615,7 +642,6 @@ class GitUtils:
 
     def get_local_diff(
         self,
-        review_scope: str = "diff_only",
         excluded_paths: Optional[list[str]] = None,
         file_extensions_filter: Optional[list[str]] = None,
         staged: bool = False,
@@ -627,8 +653,8 @@ class GitUtils:
         """Builds the review diff payload for local Git changes.
 
         Uses the same unified-diff + AST context extraction pipeline
-        (:class:`~src.context_extractor.ContextExtractor`) and ``full_code``
-        mode as :meth:`~src.tfs_client.TFSClient.get_pull_request_diff`.
+        (:class:`~src.context_extractor.ContextExtractor`) as
+        :meth:`~src.tfs_client.TFSClient.get_pull_request_diff`.
         """
         changes = self.get_local_changed_files(
             staged=staged,
@@ -645,13 +671,11 @@ class GitUtils:
             to_ref=to_ref,
             commit=commit,
         )
-        review_scope = (review_scope or "diff_only").lower()
         extractor = context_extractor or ContextExtractor()
         _excl_prefixes, _ext_filter = normalize_filter_rules(
             excluded_paths, file_extensions_filter
         )
 
-        diff_parts: list[str] = []
         built_entries: list[tuple[str, list[str]]] = []
         file_records: dict[str, tuple[str, list[int]]] = {}
 
@@ -666,17 +690,6 @@ class GitUtils:
             if not should_include_file(file_path, _excl_prefixes, _ext_filter):
                 continue
 
-            if review_scope == "full_code":
-                diff_parts.extend(
-                    self._build_local_full_code_diff_part(
-                        file_path=file_path,
-                        change_type=change_type,
-                        new_source=new_source,
-                    )
-                )
-                diff_parts.append("")
-                continue
-
             part_lines = self._build_local_unified_diff_part(
                 file_path=file_path,
                 original_path=original_path,
@@ -688,39 +701,26 @@ class GitUtils:
             )
             built_entries.append((file_path, part_lines))
 
-        if review_scope != "full_code" and built_entries:
-            candidate_files: dict[str, str] = {
-                fp: txt for fp, (txt, _) in file_records.items() if txt
-            }
-            if extractor.max_referenced_symbols > 0 and file_records:
-                self._populate_local_imported_candidates(
-                    file_records=file_records,
-                    candidate_files=candidate_files,
-                    new_source=new_source,
-                    extractor=extractor,
-                )
-
-            for entry_path, entry_lines in built_entries:
-                if (
-                    extractor.max_referenced_symbols > 0
-                    and entry_path in file_records
-                ):
-                    new_txt, ch_lines = file_records[entry_path]
-                    ref_xml = extractor.extract_referenced_symbols(
-                        file_path=entry_path,
-                        new_content=new_txt,
-                        changed_lines=ch_lines,
-                        candidate_files=candidate_files,
-                    )
-                    if ref_xml:
-                        entry_lines.append(ref_xml)
-                diff_parts.extend(entry_lines)
-                diff_parts.append("")
-
-        if not diff_parts:
+        if not built_entries:
             return ""
 
-        return "\n".join(diff_parts)
+        candidate_files: dict[str, str] = {
+            fp: txt for fp, (txt, _) in file_records.items() if txt
+        }
+        if extractor.max_referenced_symbols > 0 and file_records:
+            self._populate_local_imported_candidates(
+                file_records=file_records,
+                candidate_files=candidate_files,
+                new_source=new_source,
+                extractor=extractor,
+            )
+
+        return assemble_diff_with_referenced_symbols(
+            built_entries=built_entries,
+            file_records=file_records,
+            candidate_files=candidate_files,
+            extractor=extractor,
+        )
 
     def _populate_local_imported_candidates(
         self,
@@ -729,12 +729,13 @@ class GitUtils:
         new_source: str,
         extractor: ContextExtractor,
         max_extra_files: int = 10,
+        base_dir: Optional[str] = None,
     ) -> None:
         """Load unchanged local relative/sibling imported files into *candidate_files*."""
         known_norms = {
             p.replace("\\", "/").lstrip("/").lower() for p in candidate_files
         }
-        repo_root = self.get_repo_root() if new_source == "WORKTREE" else ""
+        repo_root = (base_dir or self.get_repo_root()) if new_source == "WORKTREE" else ""
         added = 0
 
         for fp, (content, ch_lines) in file_records.items():
@@ -761,7 +762,9 @@ class GitUtils:
                         continue
 
                 try:
-                    imp_content = self._get_local_file_content(imp_path, new_source)
+                    imp_content = self._get_local_file_content(
+                        imp_path, new_source, base_dir=repo_root or None
+                    )
                 except Exception:
                     continue
 
@@ -769,29 +772,6 @@ class GitUtils:
                     candidate_files[imp_path] = imp_content
                     known_norms.add(norm_imp)
                     added += 1
-
-    def _build_local_full_code_diff_part(
-        self,
-        file_path: str,
-        change_type: str,
-        new_source: str,
-    ) -> list[str]:
-        """Builds a ``full_code`` payload for a single locally changed file."""
-        content: Optional[str] = None
-        unavailable_error = False
-
-        if change_type in ("edit", "add", "rename"):
-            try:
-                content = self._get_local_file_content(file_path, new_source)
-            except Exception:
-                unavailable_error = True
-
-        return format_full_code_diff(
-            file_path=file_path,
-            change_type=change_type,
-            content=content,
-            unavailable_error=unavailable_error,
-        )
 
     def _build_local_unified_diff_part(
         self,
@@ -829,3 +809,167 @@ class GitUtils:
             extractor=extractor,
             file_records=file_records,
         )
+
+    # ------------------------------------------------------------------
+    # Full Code Scan (static file/directory/glob audit without Git diff)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_text_file(abs_path: str) -> bool:
+        """Returns True if *abs_path* is a readable non-binary file."""
+        try:
+            with open(abs_path, "rb") as fh:
+                chunk = fh.read(8192)
+            return b"\x00" not in chunk
+        except OSError:
+            return False
+
+    @staticmethod
+    def _to_scan_rel_path(abs_path: str, base_dir: str) -> str:
+        """Converts *abs_path* into a slash-prefixed path relative to *base_dir*."""
+        try:
+            rel = os.path.relpath(abs_path, base_dir)
+        except ValueError:
+            rel = os.path.basename(abs_path)
+        norm = rel.replace("\\", "/")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        if norm.startswith(".."):
+            norm = os.path.basename(abs_path)
+        return f"/{norm.lstrip('/')}"
+
+    def discover_scan_files(
+        self,
+        targets: Optional[list[str]] = None,
+        excluded_paths: Optional[list[str]] = None,
+        file_extensions_filter: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Discovers local files matching *targets* (files, directories, or globs).
+
+        Applies ``excluded_paths`` and ``file_extensions_filter`` and skips
+        binary files as well as standard build/VCS directories.
+
+        Returns:
+            List of dicts with ``path`` (slash-prefixed relative path),
+            ``abs_path``, and ``change_type`` (``"scan"``).
+        """
+        base_dir = os.path.abspath(self.repo_path)
+        raw_targets = targets or ["."]
+        excl_prefixes, ext_filter = normalize_filter_rules(
+            excluded_paths, file_extensions_filter
+        )
+
+        discovered: list[dict] = []
+        seen_abs: set[str] = set()
+
+        def _try_add_file(file_abs: str) -> None:
+            norm_abs = os.path.normcase(os.path.abspath(file_abs))
+            if norm_abs in seen_abs:
+                return
+            rel_path = self._to_scan_rel_path(file_abs, base_dir)
+            parts = [p for p in rel_path.strip("/").split("/")[:-1] if p]
+            if any(part in _SCAN_IGNORED_DIRS for part in parts):
+                return
+            if not should_include_file(rel_path, excl_prefixes, ext_filter):
+                return
+            if not self._is_text_file(file_abs):
+                return
+            seen_abs.add(norm_abs)
+            discovered.append({
+                "path": rel_path,
+                "abs_path": os.path.abspath(file_abs),
+                "change_type": "scan",
+            })
+
+        def _walk_directory(dir_abs: str) -> None:
+            for root, dirnames, filenames in os.walk(dir_abs):
+                dirnames[:] = sorted(
+                    d for d in dirnames
+                    if d not in _SCAN_IGNORED_DIRS and not d.startswith(".git")
+                )
+                for fname in sorted(filenames):
+                    _try_add_file(os.path.join(root, fname))
+
+        for target in raw_targets:
+            candidate = (
+                target
+                if os.path.isabs(target)
+                else os.path.join(base_dir, target)
+            )
+            if os.path.isfile(candidate):
+                _try_add_file(candidate)
+            elif os.path.isdir(candidate):
+                _walk_directory(candidate)
+            else:
+                matches = sorted(glob.glob(candidate, recursive=True))
+                for match in matches:
+                    if os.path.isfile(match):
+                        _try_add_file(match)
+                    elif os.path.isdir(match):
+                        _walk_directory(match)
+
+        return discovered
+
+    def get_scan_diff(
+        self,
+        targets: Optional[list[str]] = None,
+        excluded_paths: Optional[list[str]] = None,
+        file_extensions_filter: Optional[list[str]] = None,
+        context_extractor: Optional[ContextExtractor] = None,
+    ) -> tuple[str, list[dict]]:
+        """Builds the full-code scan payload and discovered file list for ``full-code-scan``.
+
+        Returns:
+            Tuple of ``(scan_diff_text, discovered_files)``.
+        """
+        discovered = self.discover_scan_files(
+            targets=targets,
+            excluded_paths=excluded_paths,
+            file_extensions_filter=file_extensions_filter,
+        )
+        if not discovered:
+            return "", []
+
+        extractor = context_extractor or ContextExtractor()
+        built_entries: list[tuple[str, list[str]]] = []
+        file_records: dict[str, tuple[str, list[int]]] = {}
+
+        for entry in discovered:
+            rel_path = entry["path"]
+            abs_path = entry["abs_path"]
+            content: Optional[str] = None
+            unavailable_error = False
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError:
+                unavailable_error = True
+
+            part_lines = format_scan_file_diff(
+                file_path=rel_path,
+                content=content,
+                unavailable_error=unavailable_error,
+            )
+            built_entries.append((rel_path, part_lines))
+            if content:
+                line_count = len(content.splitlines())
+                file_records[rel_path] = (content, list(range(1, line_count + 1)))
+
+        candidate_files: dict[str, str] = {
+            fp: txt for fp, (txt, _) in file_records.items() if txt
+        }
+        if extractor.max_referenced_symbols > 0 and file_records:
+            self._populate_local_imported_candidates(
+                file_records=file_records,
+                candidate_files=candidate_files,
+                new_source="WORKTREE",
+                extractor=extractor,
+                base_dir=os.path.abspath(self.repo_path),
+            )
+
+        diff_text = assemble_diff_with_referenced_symbols(
+            built_entries=built_entries,
+            file_records=file_records,
+            candidate_files=candidate_files,
+            extractor=extractor,
+        )
+        return diff_text, discovered

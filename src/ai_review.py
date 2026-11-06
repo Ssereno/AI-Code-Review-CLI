@@ -10,16 +10,16 @@ Main mode: Pull Request review on Azure DevOps/TFS with
 automatic comments posted directly to the PR.
 
 Usage:
-    python ai_review.py                  # Interactive mode (main menu)
-    python ai_review.py pr-review        # List PRs and do interactive review
-    python ai_review.py pr-review <id>   # Direct review of a specific PR
-    python ai_review.py local            # Review local Git changes (uncommitted/staged/branch)
-    python ai_review.py list-prs         # List active Pull Requests
+    python ai_review.py                          # Interactive mode (main menu)
+    python ai_review.py pr-review                # List PRs and do interactive review
+    python ai_review.py pr-review <id>           # Direct review of a specific PR
+    python ai_review.py local                    # Review local Git changes (uncommitted/staged/branch)
+    python ai_review.py full-code-scan [paths]   # Audit full files, folders, or glob patterns
+    python ai_review.py list-prs                 # List active Pull Requests
 
 Options:
     --detailed                           # Detailed review (default)
     --security                           # Security-focused review
-    --review-scope <diff_only|full_code> # Review scope (default: diff_only)
     --max-files-per-bundle <n>           # Max related files per LLM bundle (overrides config)
     --dry-run                            # Review without posting comments
     --auto-post                          # Post comments without confirmation
@@ -168,7 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s local                         # Review local uncommitted changes\n"
             "  %(prog)s local --staged                # Review staged changes\n"
             "  %(prog)s local --from main             # Review branch diff against main\n"
-            "  %(prog)s list-prs --status active       # List active PRs\n"
+            "  %(prog)s full-code-scan src/           # Audit all eligible files in src/\n"
+            "  %(prog)s full-code-scan \"src/**/*.cs\"  # Audit files matching a glob\n"
+            "  %(prog)s list-prs --status active      # List active PRs\n"
         ),
     )
 
@@ -219,6 +221,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the local Git repository (default: current directory)",
     )
 
+    # --- full-code-scan (FULL FILE AUDIT MODE) ---
+    sub_scan = subparsers.add_parser(
+        "full-code-scan",
+        help="🔎 Full Code Scan (audit local files, directories, or glob patterns without a diff)",
+    )
+    sub_scan.add_argument(
+        "paths",
+        nargs="*",
+        default=["."],
+        metavar="PATH",
+        help="Files, directories, or glob patterns to scan (default: current directory)",
+    )
+    sub_scan.add_argument(
+        "--repo-path", default=None, metavar="PATH",
+        help="Base directory for relative paths and filters (default: current directory)",
+    )
+
     # --- init ---
     subparsers.add_parser(
         "init", help="Create a config.yaml template in the current directory"
@@ -236,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
                               help="Filter by author")
 
     # --- Global options ---
-    all_subs = [sub_pr_review, sub_local, sub_list_prs]
+    all_subs = [sub_pr_review, sub_local, sub_scan, sub_list_prs]
     for sub in all_subs:
         _add_global_options(sub)
 
@@ -258,11 +277,6 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     group_review.add_argument(
         "--security", "-S", action="store_const", dest="verbosity",
         const="security", help="Security-focused review"
-    )
-    group_review.add_argument(
-        "--review-scope", default=None,
-        choices=["diff_only", "full_code"],
-        help="Review scope: diff_only (default) or full_code"
     )
     group_review.add_argument(
         "--max-files-per-bundle", default=None, type=int, metavar="N",
@@ -353,8 +367,6 @@ def run_review(args: argparse.Namespace) -> int:
         config.model = args.model
     if getattr(args, "provider", None):
         config.llm_provider = args.provider
-    if getattr(args, "review_scope", None):
-        config.review_scope = args.review_scope
     if getattr(args, "max_files_per_bundle", None) is not None:
         config.max_files_per_bundle = args.max_files_per_bundle
     if getattr(args, "output_format", None):
@@ -393,6 +405,8 @@ def run_review(args: argparse.Namespace) -> int:
         return run_pr_review_workflow(args, config, formatter)
     elif command in ("local", "local-review"):
         return run_local_review_workflow(args, config, formatter)
+    elif command == "full-code-scan":
+        return run_full_code_scan_workflow(args, config, formatter)
     elif command == "list-prs":
         return run_list_prs(args, config, formatter)
 
@@ -406,7 +420,7 @@ def _execute_bundled_review(
     llm: LLMClient,
     bundles: list[dict],
     context: str,
-    review_scope: str,
+    full_code_scan: bool = False,
 ) -> tuple[str, list[dict]]:
     """Executes LLM review across one or more cohesive file bundles and merges results."""
     if not bundles:
@@ -418,7 +432,7 @@ def _execute_bundled_review(
             diff=bundle["diff"],
             files_summary=bundle["files_summary"],
             context=context,
-            review_scope=review_scope,
+            full_code_scan=full_code_scan,
         )
 
     summaries: list[str] = []
@@ -432,7 +446,7 @@ def _execute_bundled_review(
             diff=bundle["diff"],
             files_summary=bundle["files_summary"],
             context=context,
-            review_scope=review_scope,
+            full_code_scan=full_code_scan,
         )
         if summary_text and summary_text.strip():
             summaries.append(f"**Bundle {idx}/{len(bundles)}:** {summary_text.strip()}")
@@ -457,6 +471,19 @@ def _execute_bundled_review(
     return combined_summary, all_comments
 
 
+def _init_debug_dump(
+    config: ReviewConfig,
+    formatter: ReviewFormatter,
+    prefix: str,
+) -> None:
+    """Initializes a timestamped debug dump log path when debug_dump is enabled."""
+    if config.debug_dump and not config.debug_dump_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config.debug_dump_file = os.path.join("logs", f"{prefix}_{timestamp}_debug.log")
+        os.makedirs(os.path.dirname(config.debug_dump_file), exist_ok=True)
+        print(formatter.format_info(f"🐛 Debug dump enabled: {config.debug_dump_file}"))
+
+
 def _prepare_and_execute_review(
     diff: str,
     args: argparse.Namespace,
@@ -464,6 +491,7 @@ def _prepare_and_execute_review(
     formatter: ReviewFormatter,
     git_utils: GitUtils,
     progress_message: str,
+    full_code_scan: bool = False,
 ) -> tuple[int, Optional[tuple[str, list[dict], bool]]]:
     """Filters, truncates, bundles *diff*, executes LLM review, and logs token stats."""
     diff = git_utils.filter_diff_additions_only(diff)
@@ -503,7 +531,7 @@ def _prepare_and_execute_review(
             llm=llm,
             bundles=bundles,
             context=getattr(args, "context", ""),
-            review_scope=config.review_scope,
+            full_code_scan=full_code_scan,
         )
     except LLMError as exc:
         progress.stop()
@@ -584,11 +612,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # Show PR details
     print(formatter.format_pr_details(pr_details))
 
-    if config.debug_dump and not config.debug_dump_file:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config.debug_dump_file = os.path.join("logs", f"pr_{pr_id}_{timestamp}_debug.log")
-        os.makedirs(os.path.dirname(config.debug_dump_file), exist_ok=True)
-        print(formatter.format_info(f"🐛 Debug dump enabled: {config.debug_dump_file}"))
+    _init_debug_dump(config, formatter, f"pr_{pr_id}")
 
     # --- Get PR diff ---
     print(formatter.format_progress("Getting Pull Request diff"))
@@ -597,7 +621,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         diff = tfs.get_pull_request_diff(
             repo_name,
             pr_id,
-            review_scope=config.review_scope,
             excluded_paths=config.excluded_paths or None,
             file_extensions_filter=config.file_extensions_filter or None,
         )
@@ -612,7 +635,7 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     # --- AI Analysis ---
     print(formatter.format_info(
         f"Provider: {config.llm_provider} | Model: {config.model} | "
-        f"Mode: {config.verbosity} | Scope: {config.review_scope}"
+        f"Mode: {config.verbosity}"
     ))
 
     dry_run = config.dry_run or getattr(args, "dry_run", False)
@@ -693,7 +716,6 @@ def run_pr_review_workflow(args: argparse.Namespace, config: ReviewConfig,
             repo_name,
             pr_id,
             comments_to_post,
-            review_scope=config.review_scope,
             comment_mode=config.pr_comment_mode,
         )
         print(formatter.format_post_results(results))
@@ -888,24 +910,14 @@ def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
     }
     print(formatter.format_local_details(local_details))
 
-    if config.debug_dump and not config.debug_dump_file:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config.debug_dump_file = os.path.join("logs", f"local_{timestamp}_debug.log")
-        os.makedirs(os.path.dirname(config.debug_dump_file), exist_ok=True)
-        print(formatter.format_info(f"🐛 Debug dump enabled: {config.debug_dump_file}"))
+    _init_debug_dump(config, formatter, "local")
 
     print(formatter.format_progress("Building local diff and AST context"))
 
-    extractor = ContextExtractor(
-        max_scope_blocks=config.max_scope_blocks,
-        max_scope_lines=config.max_scope_lines,
-        adaptive_context_lines=config.adaptive_context_lines,
-        max_referenced_symbols=config.max_referenced_symbols,
-    )
+    extractor = ContextExtractor.from_config(config)
 
     try:
         diff = git_utils.get_local_diff(
-            review_scope=config.review_scope,
             excluded_paths=config.excluded_paths or None,
             file_extensions_filter=config.file_extensions_filter or None,
             staged=staged,
@@ -924,7 +936,7 @@ def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
 
     print(formatter.format_info(
         f"Provider: {config.llm_provider} | Model: {config.model} | "
-        f"Mode: {config.verbosity} | Scope: {config.review_scope}"
+        f"Mode: {config.verbosity}"
     ))
 
     status_code, review_outcome = _prepare_and_execute_review(
@@ -951,6 +963,96 @@ def run_local_review_workflow(args: argparse.Namespace, config: ReviewConfig,
         review_type="Local Git Review",
         repo_name=repo_name,
         branch=f"{branch} ({target_label})",
+        review_text=review_text,
+        structured_comments=structured_comments,
+        was_truncated=was_truncated,
+    )
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Full Code Scan (static audit of local files / folders / globs)
+# ---------------------------------------------------------------------------
+def run_full_code_scan_workflow(args: argparse.Namespace, config: ReviewConfig,
+                                formatter: ReviewFormatter) -> int:
+    """
+    Full code static audit workflow for files, folders, or glob patterns.
+    Does not require a Git diff or TFS/Azure DevOps configuration.
+    """
+    repo_path = getattr(args, "repo_path", None)
+    git_utils = GitUtils(repo_path=repo_path, validate=False)
+    targets = list(getattr(args, "paths", None) or ["."])
+    target_label = ", ".join(targets)
+
+    base_abs = os.path.abspath(git_utils.repo_path)
+    repo_name = os.path.basename(base_abs.rstrip("/\\")) or "local-scan"
+    branch = ""
+    try:
+        git_utils._validate_repo()
+        repo_name = git_utils.get_repo_name()
+        branch = git_utils.get_current_branch()
+    except GitError:
+        pass
+
+    print(formatter.format_progress(f"Scanning files matching ({target_label})"))
+
+    extractor = ContextExtractor.from_config(config)
+
+    diff, discovered_files = git_utils.get_scan_diff(
+        targets=targets,
+        excluded_paths=config.excluded_paths or None,
+        file_extensions_filter=config.file_extensions_filter or None,
+        context_extractor=extractor,
+    )
+
+    if not discovered_files or not diff.strip():
+        print(formatter.format_warning("No eligible files found to scan."))
+        return 0
+
+    scan_details = {
+        "title": "🔎 Full Code Scan",
+        "files_label": "Scanned Files",
+        "repository": repo_name,
+        "branch": branch,
+        "target": target_label,
+        "changed_files": discovered_files,
+    }
+    print(formatter.format_local_details(scan_details))
+
+    _init_debug_dump(config, formatter, "scan")
+
+    print(formatter.format_info(
+        f"Provider: {config.llm_provider} | Model: {config.model} | "
+        f"Mode: {config.verbosity}"
+    ))
+
+    status_code, review_outcome = _prepare_and_execute_review(
+        diff=diff,
+        args=args,
+        config=config,
+        formatter=formatter,
+        git_utils=git_utils,
+        progress_message="Scanning code with AI (may take 30-60s)",
+        full_code_scan=True,
+    )
+    if review_outcome is None:
+        return status_code
+
+    review_text, structured_comments, was_truncated = review_outcome
+
+    print(formatter.format_structured_comments(
+        structured_comments,
+        summary=review_text,
+    ))
+
+    output_file = config.output_file or getattr(args, "output", "")
+    branch_header = f"{branch} ({target_label})" if branch else target_label
+    _save_review_output(
+        output_file=output_file,
+        review_type="Full Code Scan",
+        repo_name=repo_name,
+        branch=branch_header,
         review_text=review_text,
         structured_comments=structured_comments,
         was_truncated=was_truncated,
@@ -1014,15 +1116,16 @@ def interactive_mode() -> int:
     print(f"  {c.CYAN}1{c.RESET}) 🌟 Pull Request Review (list PRs and select)")
     print(f"  {c.CYAN}2{c.RESET}) 📋 List active Pull Requests")
     print("")
-    print(f"  {c.CYAN}{c.BOLD}── Local Git ──{c.RESET}")
+    print(f"  {c.CYAN}{c.BOLD}── Local Git & Static Audit ──{c.RESET}")
     print(f"  {c.CYAN}3{c.RESET}) 💻 Local Git Review (working tree, staged, or branch diff)")
+    print(f"  {c.CYAN}4{c.RESET}) 🔎 Full Code Scan (audit files, folders, or glob patterns)")
     print("")
     print(f"  {c.CYAN}{c.BOLD}── Other ──{c.RESET}")
-    print(f"  {c.CYAN}4{c.RESET}) ⚙️  Current configuration")
+    print(f"  {c.CYAN}5{c.RESET}) ⚙️  Current configuration")
     print(f"  {c.CYAN}0{c.RESET}) Exit")
 
     try:
-        choice = input(f"\n{c.BOLD}Choose [0-4]: {c.RESET}").strip()
+        choice = input(f"\n{c.BOLD}Choose [0-5]: {c.RESET}").strip()
     except (KeyboardInterrupt, EOFError):
         print("\n")
         return 0
@@ -1034,12 +1137,15 @@ def interactive_mode() -> int:
         return _interactive_pr_review(config)
 
     if choice == "2":
-        return _interactive_list_prs(config)
+        return _interactive_list_prs()
 
     if choice == "3":
-        return _interactive_local_review(config)
+        return _interactive_local_review()
 
     if choice == "4":
+        return _interactive_full_code_scan()
+
+    if choice == "5":
         _show_config(config)
         return 0
 
@@ -1047,7 +1153,7 @@ def interactive_mode() -> int:
     return 1
 
 
-def _interactive_pr_review(config: ReviewConfig) -> int:
+def _interactive_pr_review(config: Optional[ReviewConfig] = None) -> int:
     """Interactive PR review workflow."""
     c = Colors
 
@@ -1079,7 +1185,7 @@ def _interactive_pr_review(config: ReviewConfig) -> int:
     return run_review(parsed)
 
 
-def _interactive_list_prs(config: ReviewConfig) -> int:
+def _interactive_list_prs() -> int:
     """Lists PRs interactively."""
     argv = ["list-prs"]
     parser = build_parser()
@@ -1087,7 +1193,7 @@ def _interactive_list_prs(config: ReviewConfig) -> int:
     return run_review(parsed)
 
 
-def _interactive_local_review(config: ReviewConfig) -> int:
+def _interactive_local_review() -> int:
     """Interactive local Git review workflow."""
     c = Colors
 
@@ -1113,6 +1219,28 @@ def _interactive_local_review(config: ReviewConfig) -> int:
             return 0
         argv.extend(["--from", base_ref])
 
+    verbosity = _ask_verbosity()
+    if verbosity:
+        argv.append(f"--{verbosity}")
+
+    parser = build_parser()
+    parsed = parser.parse_args(argv)
+    return run_review(parsed)
+
+
+def _interactive_full_code_scan() -> int:
+    """Interactive full-code-scan workflow."""
+    c = Colors
+
+    try:
+        raw_target = input(
+            f"\n{c.BOLD}Path or glob pattern to scan (default=.): {c.RESET}"
+        ).strip() or "."
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        return 0
+
+    argv = ["full-code-scan", raw_target]
     verbosity = _ask_verbosity()
     if verbosity:
         argv.append(f"--{verbosity}")

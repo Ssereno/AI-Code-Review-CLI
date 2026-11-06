@@ -38,11 +38,10 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 | Parameter | Description | Example / Default |
 |---|---|---|
 | `review.verbosity` | Review detail level (`detailed` or `security`). | `detailed` |
-| `review.scope` | Controls how much code is sent. (See **Review Scope** below). | `diff_only` |
 | `review.custom_prompt_file` | Path to the markdown file with additional rules. (See **Markdown-Customizable Prompt**). | `review_prompt.md` |
 | `review.max_files_per_bundle` | Maximum number of related files grouped into each LLM review bundle (See **Smart File Bundling** below). | `5` |
 | `review.max_diff_lines` | Maximum lines per file before truncating. | `4500` |
-| `review.max_scope_blocks` | Changed blocks limit for the *Enclosing Scopes* strategy (`diff_only` mode). | `8` |
+| `review.max_scope_blocks` | Changed blocks limit for the *Enclosing Scopes* strategy. | `8` |
 | `review.max_scope_lines` | Line limit in a scope before falling back to *Adaptive Diff*. | `250` |
 | `review.adaptive_context_lines`| Surrounding lines to keep for *Adaptive Diff*. | `10` |
 | `review.max_referenced_symbols`| Max cross-file symbol signatures/declarations resolved per file (`0` = disabled). | `10` |
@@ -71,25 +70,15 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 | `dump` | Enable logging of raw responses and debug info. | `false` |
 | `dump_file` | File where debug info will be saved. | `logs/debug.log` |
 
-## Review Scope
+## AST Context Extraction & Cross-File Symbol Resolution
 
-`review.scope` controls how much code is sent to the LLM for each changed file.
-
-| Scope | Description |
-|---|---|
-| `diff_only` | Default. Unified diff (changed lines only) + an Enclosing Scopes or Adaptive Diff context block. |
-| `full_code` | All lines of the new file version, every line prefixed with `+`. No baseline. |
-
-### `diff_only` — diff with AST context (default)
-
-In `diff_only` mode the tool automatically selects the most token-efficient context
-strategy for each changed file:
+During `pr-review` and `local` reviews, the tool automatically selects the most token-efficient AST context strategy for each changed file (and for `full-code-scan`, resolves `<referenced_symbols>` across scanned and imported files):
 
 | Strategy | When used | XML tag |
 |---|---|---|
 | **Enclosing Scopes** | AST parsing succeeds and the affected scopes fit `max_scope_blocks` and `max_scope_lines` | `<enclosing_scopes file="...">` |
 | **Adaptive Diff** | AST unavailable/unsupported, parsing fails, or the affected scopes exceed either configured limit | `<adaptive_diff file="...">` |
-| **Referenced Symbols** | Changed lines reference functions, methods, interfaces, DTOs, or types defined in other changed or imported files (`max_referenced_symbols > 0`) | `<referenced_symbols file="...">` |
+| **Referenced Symbols** | Changed/scanned lines reference functions, methods, interfaces, DTOs, or types defined in other changed or imported files (`max_referenced_symbols > 0`) | `<referenced_symbols file="...">` |
 
 Whitespace-only changed lines are ignored when selecting AST scopes. When a
 more specific scope, such as a method, covers all meaningful changes inside an
@@ -99,12 +88,6 @@ namespace bodies.
 For **Cross-File Symbol Resolution** (`<referenced_symbols>`), Tree-sitter (with a regex fallback) deterministically extracts only **compact signatures** for functions/methods (omitting method bodies) and concise **contracts/declarations** for interfaces, DTOs, records, structs, and enums across other files in the PR/local changeset as well as relative/sibling imported files. Set `review.max_referenced_symbols: 0` to disable cross-file symbol resolution.
 
 Supported languages for AST parsing: **Python, JavaScript, TypeScript, TSX, C#, Java, SQL**.
-
-```yaml
-review:
-  scope: diff_only
-  # scope: full_code
-```
 
 ## Smart File Bundling
 

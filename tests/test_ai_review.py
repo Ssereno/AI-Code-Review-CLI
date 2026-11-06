@@ -22,7 +22,6 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "verbosity": None,
         "model": None,
         "provider": None,
-        "review_scope": None,
         "max_files_per_bundle": None,
         "output_format": None,
         "output": "",
@@ -92,8 +91,6 @@ def test_build_parser_parses_pr_review_options() -> None:
         "42",
         "--dry-run",
         "--security",
-        "--review-scope",
-        "full_code",
         "--max-files-per-bundle",
         "3",
         "--output",
@@ -104,7 +101,6 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.pr_id == 42
     assert args.dry_run is True
     assert args.verbosity == "security"
-    assert args.review_scope == "full_code"
     assert args.max_files_per_bundle == 3
     assert args.output == "review.md"
 
@@ -160,6 +156,89 @@ def test_run_review_dispatches_to_local_workflow(mocker, review_config) -> None:
 
     assert result == 0
     workflow.assert_called_once()
+
+
+def test_build_parser_and_run_full_code_scan_workflow(mocker, review_config) -> None:
+    """It should parse full-code-scan arguments and execute the static scan workflow."""
+    parser = ai_review.build_parser()
+    parsed = parser.parse_args([
+        "full-code-scan",
+        "src/",
+        "tests/*.py",
+        "--security",
+        "--output",
+        "scan.md",
+    ])
+    assert parsed.command == "full-code-scan"
+    assert parsed.paths == ["src/", "tests/*.py"]
+    assert parsed.verbosity == "security"
+    assert parsed.output == "scan.md"
+
+    formatter = MagicMock()
+    formatter.format_progress.side_effect = lambda msg: msg
+    formatter.format_local_details.return_value = "SCAN DETAILS"
+    formatter.format_info.side_effect = lambda msg: msg
+    formatter.format_structured_comments.return_value = "SCAN COMMENTS"
+    formatter.format_warning.side_effect = lambda msg: msg
+    formatter.format_success.side_effect = lambda msg: msg
+
+    diff = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -0,0 +1,1 @@\n+x = 1"
+    git_utils = MagicMock()
+    git_utils.repo_path = "/workspace/my-repo"
+    git_utils.get_repo_name.return_value = "my-repo"
+    git_utils.get_current_branch.return_value = "main"
+    git_utils.get_scan_diff.return_value = (
+        diff,
+        [{"path": "/src/a.py", "abs_path": "/workspace/my-repo/src/a.py", "change_type": "scan"}],
+    )
+    git_utils.filter_diff_additions_only.return_value = diff
+    git_utils.truncate_diff_per_file.return_value = (diff, False)
+    git_utils.bundle_diff_files.return_value = [{
+        "diff": diff,
+        "files_summary": [{"file": "src/a.py", "additions": 1, "deletions": 0}],
+    }]
+
+    llm = MagicMock()
+    llm.review_pr.return_value = (
+        "Scan summary",
+        [{"file": "src/a.py", "line": 1, "type": "security", "comment": "issue"}],
+    )
+
+    markdown_formatter = MagicMock()
+    markdown_formatter.format_header.return_value = "HEADER"
+    markdown_formatter.format_structured_comments.return_value = "BODY"
+    markdown_formatter.format_footer.return_value = "FOOTER"
+
+    mocker.patch("src.ai_review.ProgressIndicator")
+    mocker.patch("src.ai_review.GitUtils", return_value=git_utils)
+    mocker.patch("src.ai_review.LLMClient", return_value=llm)
+    save_output = mocker.patch("src.ai_review.save_output")
+    mocker.patch(
+        "src.ai_review.ReviewFormatter",
+        side_effect=lambda *args, **kwargs: (
+            markdown_formatter if kwargs.get("output_format") == "markdown" else formatter
+        ),
+    )
+    print_mock = mocker.patch("builtins.print")
+
+    args = make_args(
+        command="full-code-scan",
+        paths=["src/"],
+        repo_path=None,
+        output="scan.md",
+    )
+    result = ai_review.run_full_code_scan_workflow(args, review_config, formatter)
+
+    assert result == 0
+    git_utils.get_scan_diff.assert_called_once()
+    llm.review_pr.assert_called_once_with(
+        diff=diff,
+        files_summary=[{"file": "src/a.py", "additions": 1, "deletions": 0}],
+        context="",
+        full_code_scan=True,
+    )
+    save_output.assert_called_once()
+    print_mock.assert_any_call("SCAN COMMENTS")
 
 
 def test_run_local_review_workflow_completes_and_saves_output(mocker, review_config) -> None:
@@ -422,7 +501,7 @@ def test_execute_bundled_review_merges_multiple_bundles_and_tokens() -> None:
         llm=llm,
         bundles=bundles,
         context="",
-        review_scope="diff_only",
+        full_code_scan=False,
     )
 
     assert "Bundle 1/2:" in summary

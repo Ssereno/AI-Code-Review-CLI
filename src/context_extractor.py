@@ -1019,6 +1019,20 @@ class ContextExtractor:
         self.max_referenced_symbols = max_referenced_symbols
         self._symbol_cache: dict[tuple[str, int], list[SymbolInfo]] = {}
 
+    @classmethod
+    def from_config(cls, config: object) -> "ContextExtractor":
+        """Build a :class:`ContextExtractor` from a :class:`~src.config.ReviewConfig`."""
+        return cls(
+            max_scope_blocks=getattr(config, "max_scope_blocks", MAX_SCOPE_BLOCKS),
+            max_scope_lines=getattr(config, "max_scope_lines", MAX_SCOPE_LINES),
+            adaptive_context_lines=getattr(
+                config, "adaptive_context_lines", ADAPTIVE_CONTEXT_LINES
+            ),
+            max_referenced_symbols=getattr(
+                config, "max_referenced_symbols", MAX_REFERENCED_SYMBOLS
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -1617,24 +1631,27 @@ def should_include_file(
     return True
 
 
-def format_full_code_diff(
+def format_scan_file_diff(
     file_path: str,
-    change_type: str,
     content: Optional[str],
     unavailable_error: bool = False,
 ) -> list[str]:
-    """Build a ``full_code`` pseudo-diff payload for a single changed file."""
+    """Build a pseudo-diff payload for a full-file static scan (``full-code-scan``)."""
     parts = [
         f"diff --git a{file_path} b{file_path}",
         f"--- a{file_path}",
         f"+++ b{file_path}",
-        f"@@ Change type: {change_type} @@",
     ]
     if unavailable_error:
+        parts.append("@@ -0,0 +1,1 @@")
         parts.append(f"+[Content not available for {file_path}]")
     elif content:
-        for line in content.split("\n"):
+        lines = content.splitlines()
+        parts.append(f"@@ -0,0 +1,{len(lines)} @@")
+        for line in lines:
             parts.append(f"+{line}")
+    else:
+        parts.append("@@ -0,0 +0,0 @@")
     return parts
 
 
@@ -1683,3 +1700,31 @@ def format_unified_diff_with_context(
             result.append(xml_block)
 
     return result
+
+
+def assemble_diff_with_referenced_symbols(
+    built_entries: list[tuple[str, list[str]]],
+    file_records: dict[str, tuple[str, list[int]]],
+    candidate_files: dict[str, str],
+    extractor: ContextExtractor,
+) -> str:
+    """Append ``<referenced_symbols>`` blocks to *built_entries* and join into a unified diff string."""
+    if not built_entries:
+        return ""
+
+    diff_parts: list[str] = []
+    for entry_path, entry_lines in built_entries:
+        if extractor.max_referenced_symbols > 0 and entry_path in file_records:
+            new_txt, ch_lines = file_records[entry_path]
+            ref_xml = extractor.extract_referenced_symbols(
+                file_path=entry_path,
+                new_content=new_txt,
+                changed_lines=ch_lines,
+                candidate_files=candidate_files,
+            )
+            if ref_xml:
+                entry_lines.append(ref_xml)
+        diff_parts.extend(entry_lines)
+        diff_parts.append("")
+
+    return "\n".join(diff_parts)
