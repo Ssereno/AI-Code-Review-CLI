@@ -11,9 +11,9 @@ Options:
 - `--auto-post`
 - `--author`
 - `--target-branch`
-- `--quick` / `--detailed` / `--security`
+- `--detailed` / `--security`
 - `--review-scope {diff_only,full_code}` (default: `diff_only`)
-- `--max-diff-files N` — overrides `review.max_diff_files` from config.yaml
+- `--max-files-per-bundle N` — overrides `review.max_files_per_bundle` from config.yaml
 - `--context`, `-c`
 - `--format {terminal,markdown,json}`
 - `--output`, `-o`
@@ -42,7 +42,7 @@ ai-review init
 ### Interactive Mode
 
 ```bash
-ai-review pr-review
+ai-review
 ```
 
 ### Pull Request Review
@@ -89,18 +89,12 @@ Choose provider/model via CLI:
 ai-review pr-review 42 --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0
 ```
 
-### List Pull Requests
+### List Pull Requests (`list-prs`)
 
 ```bash
-ai-review pr-review list-prs
-ai-review pr-review list-prs --status completed
-ai-review pr-review list-prs --repo-name backend --author "John"
-```
-
-### `list-prs`
-
-```bash
-ai-review pr-review list-prs
+ai-review list-prs
+ai-review list-prs --status completed
+ai-review list-prs --repo-name backend --author "John"
 ```
 
 Options:

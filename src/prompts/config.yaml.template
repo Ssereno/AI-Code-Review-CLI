@@ -84,8 +84,8 @@ review:
   # The content of this file is injected into LLM instructions on each review
   # custom_prompt_file: review_prompt.md
 
-  # Limit of diff files sent to the LLM (remaining files are omitted)
-  max_diff_files: 50
+  # Maximum number of related files grouped into each LLM review bundle (Smart File Bundling)
+  max_files_per_bundle: 5
 
   # Limit of diff lines per file (larger sections are truncated)
   max_diff_lines: 4500
@@ -99,6 +99,9 @@ review:
 
   # Surrounding lines to keep for Adaptive Diff fallback (diff_only mode)
   adaptive_context_lines: 10
+
+  # Max cross-file symbol declarations resolved via AST per file (0 = disabled)
+  max_referenced_symbols: 10
 
   # Exclude paths from the diff by prefix (empty list = no exclusions).
   # Files whose path starts with a listed prefix are excluded.

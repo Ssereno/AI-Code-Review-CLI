@@ -17,14 +17,19 @@ Works with both on-premises TFS and Azure DevOps Services.
 """
 
 import base64
-import difflib
 import hashlib
 import os
 import re
 from typing import Optional
 
 from .config import ReviewConfig
-from .context_extractor import ContextExtractor
+from .context_extractor import (
+    ContextExtractor,
+    format_full_code_diff,
+    format_unified_diff_with_context,
+    normalize_filter_rules,
+    should_include_file,
+)
 
 
 class TFSError(Exception):
@@ -59,10 +64,12 @@ class TFSClient:
             )
 
         self._session = None
+        self._active_pr_files: Optional[dict[str, tuple[str, list[int]]]] = None
         self._context_extractor = ContextExtractor(
             max_scope_blocks=config.max_scope_blocks,
             max_scope_lines=config.max_scope_lines,
             adaptive_context_lines=config.adaptive_context_lines,
+            max_referenced_symbols=config.max_referenced_symbols,
         )
 
     @property
@@ -377,77 +384,144 @@ class TFSClient:
         changes = self._get(changes_path)
 
         review_scope = (review_scope or "diff_only").lower()
-
-        # Normalise filters once before the loop (forward slashes, lower-case).
-        # excluded_paths: strip optional leading slash so "Libs/" == "/Libs/".
-        _excl_prefixes = [
-            p.replace("\\", "/").lstrip("/").lower()
-            for p in (excluded_paths or [])
-        ]
-        _ext_filter = [e.lower() for e in (file_extensions_filter or [])]
+        _excl_prefixes, _ext_filter = normalize_filter_rules(
+            excluded_paths, file_extensions_filter
+        )
 
         # Build diff from the changes
-        diff_parts = []
-        for change in changes.get("changeEntries", []):
-            # `item` can be null for deleted files; use `or {}` as a safe fallback.
-            item = change.get("item") or {}
-            change_type = change.get("changeType", "unknown")
+        diff_parts: list[str] = []
+        built_entries: list[tuple[str, list[str]]] = []
+        pr_file_records: dict[str, tuple[str, list[int]]] = {}
+        self._active_pr_files = pr_file_records
 
-            if item.get("isFolder"):
-                continue
+        try:
+            for change in changes.get("changeEntries", []):
+                # `item` can be null for deleted files; use `or {}` as a safe fallback.
+                item = change.get("item") or {}
+                change_type = change.get("changeType", "unknown")
 
-            # Deleted files are skipped from the LLM diff.
-            # They are still reported in the terminal summary via _get_pr_changed_files.
-            if change_type == "delete":
-                continue
+                if item.get("isFolder"):
+                    continue
 
-            # `path` can be null; fall back to `originalPath` (safe for add/edit/rename).
-            file_path = item.get("path") or change.get("originalPath") or "unknown"
-            original_path = change.get("originalPath") or file_path
+                # Deleted files are skipped from the LLM diff.
+                # They are still reported in the terminal summary via _get_pr_changed_files.
+                if change_type == "delete":
+                    continue
 
-            # --- Early-exit filters (no HTTP request made for skipped files) ---
-            # Normalise once: strip leading slash, lower-case, forward slashes.
-            norm_path = file_path.replace("\\", "/").lstrip("/").lower()
+                # `path` can be null; fall back to `originalPath` (safe for add/edit/rename).
+                file_path = item.get("path") or change.get("originalPath") or "unknown"
+                original_path = change.get("originalPath") or file_path
 
-            if _excl_prefixes and any(
-                norm_path.startswith(excl) for excl in _excl_prefixes
-            ):
-                continue
+                # --- Early-exit filters (no HTTP request made for skipped files) ---
+                if not should_include_file(file_path, _excl_prefixes, _ext_filter):
+                    continue
+                # ------------------------------------------------------------------
 
-            if _ext_filter and not any(
-                norm_path.endswith(ext) for ext in _ext_filter
-            ):
-                continue
-            # ------------------------------------------------------------------
+                if review_scope == "full_code":
+                    diff_parts.extend(
+                        self._build_full_code_diff_part(
+                            repository=repository,
+                            file_path=file_path,
+                            change_type=change_type,
+                            source_branch=source_branch,
+                        )
+                    )
+                    diff_parts.append("")
+                    continue
 
-            if review_scope == "full_code":
-                diff_parts.extend(
-                    self._build_full_code_diff_part(
+                part_lines = list(
+                    self._build_unified_diff_part(
                         repository=repository,
                         file_path=file_path,
+                        original_path=original_path,
                         change_type=change_type,
                         source_branch=source_branch,
+                        target_branch=target_branch,
                     )
                 )
-                diff_parts.append("")
-                continue
+                built_entries.append((file_path, part_lines))
+        finally:
+            self._active_pr_files = None
 
-            diff_parts.extend(
-                self._build_unified_diff_part(
+        if review_scope != "full_code" and built_entries:
+            candidate_files: dict[str, str] = {
+                fp: txt for fp, (txt, _) in pr_file_records.items() if txt
+            }
+            if (
+                self._context_extractor.max_referenced_symbols > 0
+                and pr_file_records
+            ):
+                self._populate_remote_imported_candidates(
                     repository=repository,
-                    file_path=file_path,
-                    original_path=original_path,
-                    change_type=change_type,
                     source_branch=source_branch,
-                    target_branch=target_branch,
+                    pr_file_records=pr_file_records,
+                    candidate_files=candidate_files,
                 )
-            )
-            diff_parts.append("")
+
+            for entry_path, entry_lines in built_entries:
+                if (
+                    self._context_extractor.max_referenced_symbols > 0
+                    and entry_path in pr_file_records
+                ):
+                    new_txt, ch_lines = pr_file_records[entry_path]
+                    ref_xml = self._context_extractor.extract_referenced_symbols(
+                        file_path=entry_path,
+                        new_content=new_txt,
+                        changed_lines=ch_lines,
+                        candidate_files=candidate_files,
+                    )
+                    if ref_xml:
+                        entry_lines.append(ref_xml)
+                diff_parts.extend(entry_lines)
+                diff_parts.append("")
 
         if not diff_parts:
             return ""
 
         return "\n".join(diff_parts)
+
+    def _populate_remote_imported_candidates(
+        self,
+        repository: str,
+        source_branch: str,
+        pr_file_records: dict[str, tuple[str, list[int]]],
+        candidate_files: dict[str, str],
+        max_fetches: int = 3,
+    ) -> None:
+        """Fetch up to *max_fetches* unchanged relative-imported files from TFS."""
+        source_ref = source_branch.replace("refs/heads/", "")
+        known_norms = {
+            p.replace("\\", "/").lstrip("/").lower() for p in candidate_files
+        }
+        fetched = 0
+
+        for fp, (content, _ch) in pr_file_records.items():
+            if fetched >= max_fetches:
+                break
+            src_ext = os.path.splitext(fp)[1].lower()
+            for imp_path in self._context_extractor.resolve_relative_imports(fp, content):
+                if fetched >= max_fetches:
+                    break
+                if imp_path.endswith("/__init__.py") or imp_path.endswith("/index.ts") or imp_path.endswith("/index.js"):
+                    continue
+                if os.path.splitext(imp_path)[1].lower() != src_ext:
+                    continue
+                norm_imp = imp_path.replace("\\", "/").lstrip("/").lower()
+                if norm_imp in known_norms:
+                    continue
+                known_norms.add(norm_imp)
+                try:
+                    imp_content = self._get_file_content(
+                        repository,
+                        imp_path,
+                        version=source_ref,
+                        version_type="branch",
+                    )
+                except Exception:
+                    continue
+                if imp_content:
+                    candidate_files[imp_path] = imp_content
+                    fetched += 1
 
     def _build_full_code_diff_part(self, repository: str, file_path: str,
                                    change_type: str, source_branch: str) -> list[str]:
@@ -469,12 +543,8 @@ class TFSClient:
         Returns:
             List of diff-header and content strings for this file.
         """
-        parts = [
-            f"diff --git a{file_path} b{file_path}",
-            f"--- a{file_path}",
-            f"+++ b{file_path}",
-            f"@@ Change type: {change_type} @@",
-        ]
+        content: Optional[str] = None
+        unavailable_error = False
 
         if change_type in ("edit", "add", "rename"):
             try:
@@ -484,13 +554,15 @@ class TFSClient:
                     version=source_branch.replace("refs/heads/", ""),
                     version_type="branch",
                 )
-                if content:
-                    for line in content.split("\n"):
-                        parts.append(f"+{line}")
             except Exception:
-                parts.append(f"+[Content not available for {file_path}]")
+                unavailable_error = True
 
-        return parts
+        return format_full_code_diff(
+            file_path=file_path,
+            change_type=change_type,
+            content=content,
+            unavailable_error=unavailable_error,
+        )
 
     def _build_unified_diff_part(self, repository: str, file_path: str,
                                  original_path: str, change_type: str,
@@ -555,43 +627,14 @@ class TFSClient:
             except Exception:
                 new_lines = []
 
-        diff = list(difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile=f"a{original_path}",
-            tofile=f"b{file_path}",
-            lineterm="",
-            n=5,
-        ))
-
-        if not diff:
-            return [
-                f"diff --git a{original_path} b{file_path}",
-                f"--- a{original_path}",
-                f"+++ b{file_path}",
-                "@@ No textual differences detected (possible binary/metadata change) @@",
-            ]
-
-        # difflib does not include the "diff --git" header — always add it
-        # so that filter_diff_by_extensions and _split_diff_sections work correctly.
-        raw_diff = list(diff)
-        result = [f"diff --git a{original_path} b{file_path}"] + raw_diff
-
-        # Build the AST-based context block (Enclosing Scopes or Adaptive Diff
-        # fallback) and append it after the diff section.
-        if new_lines:
-            new_content = "\n".join(new_lines)
-            file_diff_text = "\n".join(result)
-            changed_lines = ContextExtractor.changed_lines_from_diff(file_diff_text)
-            _strategy, xml_block = self._context_extractor.extract(
-                file_path=file_path,
-                new_content=new_content,
-                changed_lines=changed_lines,
-            )
-            if xml_block:
-                result.append(xml_block)
-
-        return result
+        return format_unified_diff_with_context(
+            file_path=file_path,
+            original_path=original_path,
+            old_lines=old_lines,
+            new_lines=new_lines,
+            extractor=self._context_extractor,
+            file_records=self._active_pr_files,
+        )
 
     def _get_raw(self, path: str, params: Optional[dict] = None,
                api_version: Optional[str] = None) -> str:
@@ -922,14 +965,6 @@ class TFSClient:
             "pending": 6,
         }
         return status_map.get(status.lower(), 1)
-
-    # ==================================================================
-    # Pull Requests - Compatibility (legacy method)
-    # ==================================================================
-    def add_pr_comment(self, repository: str, pr_id: int,
-                       comment: str, status: str = "active") -> dict:
-        """Legacy alias for post_general_comment."""
-        return self.post_general_comment(repository, pr_id, comment, status)
 
     # ==================================================================
     # Repositories

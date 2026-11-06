@@ -25,7 +25,7 @@ def review_config() -> ReviewConfig:
         output_format="terminal",
         review_scope="diff_only",
         verbosity="detailed",
-        max_diff_files=10,
+        max_files_per_bundle=5,
         max_diff_lines=200,
         tfs_base_url="https://example.invalid/tfs",
         tfs_project="ExampleProject",

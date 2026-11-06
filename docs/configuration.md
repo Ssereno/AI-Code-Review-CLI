@@ -40,11 +40,12 @@ Below is a list of all parameters available in `config.yaml`, organized by categ
 | `review.verbosity` | Review detail level (`detailed` or `security`). | `detailed` |
 | `review.scope` | Controls how much code is sent. (See **Review Scope** below). | `diff_only` |
 | `review.custom_prompt_file` | Path to the markdown file with additional rules. (See **Markdown-Customizable Prompt**). | `review_prompt.md` |
-| `review.max_diff_files` | Maximum number of files sent to the LLM per review. | `50` |
+| `review.max_files_per_bundle` | Maximum number of related files grouped into each LLM review bundle (See **Smart File Bundling** below). | `5` |
 | `review.max_diff_lines` | Maximum lines per file before truncating. | `4500` |
 | `review.max_scope_blocks` | Changed blocks limit for the *Enclosing Scopes* strategy (`diff_only` mode). | `8` |
 | `review.max_scope_lines` | Line limit in a scope before falling back to *Adaptive Diff*. | `250` |
 | `review.adaptive_context_lines`| Surrounding lines to keep for *Adaptive Diff*. | `10` |
+| `review.max_referenced_symbols`| Max cross-file symbol signatures/declarations resolved per file (`0` = disabled). | `10` |
 | `review.file_extensions_filter`| Restrictive list of extensions to review (empty = all). (See **Filter by File Extension** below). | `[]` |
 
 ### PR
@@ -88,11 +89,14 @@ strategy for each changed file:
 |---|---|---|
 | **Enclosing Scopes** | AST parsing succeeds and the affected scopes fit `max_scope_blocks` and `max_scope_lines` | `<enclosing_scopes file="...">` |
 | **Adaptive Diff** | AST unavailable/unsupported, parsing fails, or the affected scopes exceed either configured limit | `<adaptive_diff file="...">` |
+| **Referenced Symbols** | Changed lines reference functions, methods, interfaces, DTOs, or types defined in other changed or imported files (`max_referenced_symbols > 0`) | `<referenced_symbols file="...">` |
 
 Whitespace-only changed lines are ignored when selecting AST scopes. When a
 more specific scope, such as a method, covers all meaningful changes inside an
 ancestor scope, the ancestor is omitted to avoid sending duplicated class or
 namespace bodies.
+
+For **Cross-File Symbol Resolution** (`<referenced_symbols>`), Tree-sitter (with a regex fallback) deterministically extracts only **compact signatures** for functions/methods (omitting method bodies) and concise **contracts/declarations** for interfaces, DTOs, records, structs, and enums across other files in the PR/local changeset as well as relative/sibling imported files. Set `review.max_referenced_symbols: 0` to disable cross-file symbol resolution.
 
 Supported languages for AST parsing: **Python, JavaScript, TypeScript, TSX, C#, Java, SQL**.
 
@@ -100,6 +104,19 @@ Supported languages for AST parsing: **Python, JavaScript, TypeScript, TSX, C#, 
 review:
   scope: diff_only
   # scope: full_code
+```
+
+## Smart File Bundling
+
+Instead of sending a massive multi-file diff in a single monolithic LLM request (or truncating and omitting files), the CLI uses **Smart File Bundling** (`review.max_files_per_bundle`, default `5`):
+
+1. **Cohesive Stem Grouping:** Files belonging to the same logical entity across folders — such as C#/TS interfaces and implementations (`IAuthService.cs` + `AuthService.cs`), unit tests (`AuthServiceTests.cs`), multi-part components (`login.component.ts` + `login.component.html`), or localization pairs (`message_en.properties` + `message_zh.properties`) — are grouped together into atomic units.
+2. **Module / Directory Affinity:** Cohesive units from the same domain directory are packed together up to `max_files_per_bundle`.
+3. **Isolated Context & Per-Bundle Language Rules:** Each bundle is reviewed in its own isolated LLM call with only the `<!-- lang: ... -->` rules matching the extensions present in that bundle, and all comments and token estimates are aggregated automatically.
+
+```yaml
+review:
+  max_files_per_bundle: 5
 ```
 
 ## Filter by File Extension

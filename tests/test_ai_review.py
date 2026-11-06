@@ -23,7 +23,7 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "model": None,
         "provider": None,
         "review_scope": None,
-        "max_diff_files": None,
+        "max_files_per_bundle": None,
         "output_format": None,
         "output": "",
         "no_color": False,
@@ -94,7 +94,7 @@ def test_build_parser_parses_pr_review_options() -> None:
         "--security",
         "--review-scope",
         "full_code",
-        "--max-diff-files",
+        "--max-files-per-bundle",
         "3",
         "--output",
         "review.md",
@@ -105,7 +105,7 @@ def test_build_parser_parses_pr_review_options() -> None:
     assert args.dry_run is True
     assert args.verbosity == "security"
     assert args.review_scope == "full_code"
-    assert args.max_diff_files == 3
+    assert args.max_files_per_bundle == 3
     assert args.output == "review.md"
 
 
@@ -181,9 +181,11 @@ def test_run_local_review_workflow_completes_and_saves_output(mocker, review_con
     ]
     git_utils.get_local_diff.return_value = diff
     git_utils.filter_diff_additions_only.return_value = diff
-    git_utils.limit_diff_files.return_value = (diff, False, 0)
-    git_utils.get_changed_files_summary.return_value = [{"file": "src/a.py", "additions": 1, "deletions": 0}]
-    git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.truncate_diff_per_file.return_value = (diff, False)
+    git_utils.bundle_diff_files.return_value = [{
+        "diff": diff,
+        "files_summary": [{"file": "src/a.py", "additions": 1, "deletions": 0}],
+    }]
 
     llm = MagicMock()
     llm.review_pr.return_value = (
@@ -193,6 +195,7 @@ def test_run_local_review_workflow_completes_and_saves_output(mocker, review_con
 
     markdown_formatter = MagicMock()
     markdown_formatter.format_header.return_value = "HEADER"
+    markdown_formatter.format_structured_comments.return_value = "BODY"
     markdown_formatter.format_footer.return_value = "FOOTER"
 
     mocker.patch("src.ai_review.ProgressIndicator")
@@ -299,17 +302,20 @@ def test_run_pr_review_workflow_dry_run_saves_output(mocker, review_config) -> N
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
-    git_utils.limit_diff_files.return_value = (diff, False, 0)
-    git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
-    git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.truncate_diff_per_file.return_value = (diff, False)
+    git_utils.bundle_diff_files.return_value = [{
+        "diff": diff,
+        "files_summary": [{"file": "a.py", "additions": 1, "deletions": 0}],
+    }]
 
     markdown_formatter = MagicMock()
     markdown_formatter.format_header.return_value = "HEADER"
+    markdown_formatter.format_structured_comments.return_value = "BODY"
     markdown_formatter.format_footer.return_value = "FOOTER"
 
     mocker.patch("src.ai_review.ProgressIndicator")
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
-    mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    mocker.patch("src.ai_review.GitUtils", return_value=git_utils)
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
     mocker.patch("src.tfs_client.TFSError", new=Exception)
     save_output = mocker.patch("src.ai_review.save_output")
@@ -363,16 +369,18 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
 
     git_utils = MagicMock()
     git_utils.filter_diff_additions_only.return_value = diff
-    git_utils.limit_diff_files.return_value = (diff, False, 0)
-    git_utils.get_changed_files_summary.return_value = [{"file": "a.py", "additions": 1, "deletions": 0}]
-    git_utils.truncate_diff.return_value = (diff, False)
+    git_utils.truncate_diff_per_file.return_value = (diff, False)
+    git_utils.bundle_diff_files.return_value = [{
+        "diff": diff,
+        "files_summary": [{"file": "a.py", "additions": 1, "deletions": 0}],
+    }]
 
     progress = MagicMock()
     mocker.patch("src.ai_review.ProgressIndicator", return_value=progress)
     mocker.patch("src.ai_review.LLMClient", return_value=llm)
-    mocker.patch("src.ai_review.GitUtils.__new__", return_value=git_utils)
+    mocker.patch("src.ai_review.GitUtils", return_value=git_utils)
     mocker.patch("src.ai_review._select_comments_to_post", return_value=structured_comments)
-    mocker.patch("src.ai_review._save_pr_review_output")
+    mocker.patch("src.ai_review._save_review_output")
     mocker.patch("src.tfs_client.TFSClient", return_value=tfs)
     mocker.patch("src.tfs_client.TFSError", new=FakeTFSError)
     print_mock = mocker.patch("builtins.print")
@@ -386,6 +394,43 @@ def test_run_pr_review_workflow_returns_error_when_posting_fails(mocker, review_
     assert result == 1
     progress.stop.assert_called()
     print_mock.assert_any_call("ERR:Error posting comments: boom")
+
+
+def test_execute_bundled_review_merges_multiple_bundles_and_tokens() -> None:
+    """It should review each bundle separately and aggregate summaries, comments, and tokens."""
+    from src.token_estimator import TokenEstimate
+
+    llm = MagicMock()
+    llm.config.get_effective_model.return_value = "gpt-4o"
+
+    def fake_review_pr(diff: str, files_summary: list[dict], **kwargs: object) -> tuple[str, list[dict]]:
+        file_name = files_summary[0]["file"]
+        llm.last_token_estimate = TokenEstimate(total_prompt_tokens=150, model="gpt-4o")
+        return (
+            f"Reviewed {file_name}",
+            [{"file": file_name, "line": 10, "type": "bug", "comment": f"Issue in {file_name}"}],
+        )
+
+    llm.review_pr.side_effect = fake_review_pr
+
+    bundles = [
+        {"diff": "+a", "files_summary": [{"file": "a.cs", "additions": 1, "deletions": 0}]},
+        {"diff": "+b", "files_summary": [{"file": "b.ts", "additions": 1, "deletions": 0}]},
+    ]
+
+    summary, comments = ai_review._execute_bundled_review(
+        llm=llm,
+        bundles=bundles,
+        context="",
+        review_scope="diff_only",
+    )
+
+    assert "Bundle 1/2:" in summary
+    assert "Bundle 2/2:" in summary
+    assert len(comments) == 2
+    assert comments[0]["file"] == "a.cs"
+    assert comments[1]["file"] == "b.ts"
+    assert llm.last_token_estimate.total_prompt_tokens == 300
 
 
 def test_select_pr_interactive_uses_list_index(mocker) -> None:

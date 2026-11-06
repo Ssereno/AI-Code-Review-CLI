@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-review-ai-cli"
-version = "2.3.0"
+version = "2.4.0"
 description = "Automated AI-powered code review CLI for Azure DevOps / TFS Pull Requests"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-keywords = ["code-review", "ai", "azure-devops", "tfs", "pull-request", "llm"]
+license = { text = "Apache-2.0" }
+keywords = ["code-review", "ai", "azure-devops", "tfs", "pull-request", "git", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -32,16 +32,8 @@ dependencies = [
 
 [project.optional-dependencies]
 bedrock = ["boto3>=1.34.0"]
-openai = ["openai>=1.0.0"]
-gemini = ["google-generativeai>=0.3.0"]
-claude = ["anthropic>=0.18.0"]
 all = [
     "boto3>=1.34.0",
-    "litellm>=1.40.0",
-    "tiktoken>=0.7.0",
-    "openai>=1.0.0",
-    "google-generativeai>=0.3.0",
-    "anthropic>=0.18.0",
 ]
 dev = [
     "pytest>=8.3.0",

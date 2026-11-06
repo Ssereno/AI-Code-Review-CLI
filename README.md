@@ -6,6 +6,8 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 
 - AI Pull Request review (`pr-review`)
 - Local Git review without a PR (`local` / `local-review` — working tree, `--staged`, `--from <branch>`, `--commit <sha>`)
+- **Smart File Bundling**: groups related files (interfaces, implementations, unit tests, i18n pairs, and domain folders) into cohesive bundles (`max_files_per_bundle`) so large changesets are reviewed completely without context degradation
+- **Deterministic Cross-File Symbol Resolution**: resolves compact signatures and type declarations (`<referenced_symbols>`) via Tree-sitter across PR/local changesets and relative/sibling imports (`max_referenced_symbols`)
 - Structured PR comments (inline + general summary)
 - `dry-run` mode to validate without posting
 - PR listing with filters (`list-prs`)
@@ -30,7 +32,7 @@ AI Code Review is an automated AI-powered code review CLI, compatible with vario
 ## Installation
 
 Install from PyPI:
-s
+
 ```bash
 pip install code-review-ai-cli
 ```
@@ -81,8 +83,8 @@ review:
   verbosity: detailed
   scope: diff_only
   custom_prompt_file: review_prompt.md
-  # file limit sent to the LLM
-  max_diff_files: 50
+  # maximum related files grouped per LLM review bundle (Smart File Bundling)
+  max_files_per_bundle: 5
   # per-file limit
   max_diff_lines: 2000
   # extension allowlist (empty list = all files)

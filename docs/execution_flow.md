@@ -21,13 +21,13 @@ flowchart TD
   PRReview --> Filter[Load config & Init TFS client]
   Filter --> Config[Apply File Filter path and extension]
   Config --> FetchPR[Fetch PR details & diff]
-  FetchPR --> BuildContext[Build AST context & filter files]
-  BuildContext --> AI[Run AI review call]
+  FetchPR --> BuildContext["Build AST scopes, Cross-File Symbols & Smart Bundles"]
+  BuildContext --> AI[Run AI review per bundle & aggregate]
   AI --> Post[Post comments to PR]
 
   LocalReview --> LocalGit[Inspect local Git repo & filter files]
-  LocalGit --> LocalContext[Build local diff & AST context]
-  LocalContext --> LocalAI[Run AI review call]
+  LocalGit --> LocalContext["Build local diff, AST scopes, Cross-File Symbols & Smart Bundles"]
+  LocalContext --> LocalAI[Run AI review per bundle & aggregate]
   LocalAI --> LocalOut[Display structured review & optional file output]
   
   ListPRs --> End[Finish]
